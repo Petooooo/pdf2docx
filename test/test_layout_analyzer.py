@@ -17,6 +17,7 @@ REGION_TOP = LayoutAnalyzer.REGION_TOP
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
+find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
@@ -151,7 +152,102 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('annual report', by_text)
         self.assertIn(PAGE_NUMBER_PLACEHOLDER.lower(), by_text)
         self.assertEqual(report['signals']['repeated_text_candidate_count'], 2)
+        self.assertIn('paragraph_continuation_candidates', report)
         json.dumps(report)
+
+    def test_paragraph_continuation_candidate_when_text_runs_across_pages(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('This paragraph starts on one page and continues', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('with the same sentence on the next page.', 50, 170, 520, 200),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'candidate')
+        self.assertGreaterEqual(candidate['score'], 0.65)
+        self.assertIn('previous_text_open_ended', candidate['positive_signals'])
+        self.assertIn('previous_near_body_bottom', candidate['positive_signals'])
+        self.assertIn('next_near_body_top', candidate['positive_signals'])
+
+    def test_paragraph_continuation_unlikely_after_sentence_end(self):
+        candidates = find_paragraph_continuation_candidates(build_layout_analysis_report([
+            _page(0, [
+                _block('This paragraph clearly ends here.', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('A new paragraph starts on the next page.', 50, 170, 520, 200),
+            ]),
+        ])['pages'])
+        candidate = candidates[0]
+
+        self.assertEqual(candidate['label'], 'unlikely')
+        self.assertIn('previous_strong_sentence_end', candidate['negative_signals'])
+
+    def test_paragraph_continuation_hyphenated_split_is_strong_candidate(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('The policy applies to inter-', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('national transactions recorded later', 50, 170, 520, 200),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'candidate')
+        self.assertIn('previous_hyphenated_word', candidate['positive_signals'])
+        self.assertIn('Hyphenated page break', candidate['reason'])
+
+    def test_paragraph_continuation_unlikely_when_next_block_looks_like_heading(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('The preceding discussion continues without punctuation', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('CHAPTER TWO', 50, 170, 250, 200),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'unlikely')
+        self.assertIn('next_looks_like_heading', candidate['negative_signals'])
+
+    def test_paragraph_continuation_unlikely_for_footer_to_header_only(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Page 1', 270, 955, 330, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 45),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'unlikely')
+        self.assertEqual(candidate['previous_text_preview'], '')
+        self.assertEqual(candidate['next_text_preview'], '')
+        self.assertIn('no_previous_body_block', candidate['negative_signals'])
+        self.assertIn('no_next_body_block', candidate['negative_signals'])
+
+
+def _page(page_index, blocks):
+    return {
+        'page_index': page_index,
+        'width': 600,
+        'height': 1000,
+        'blocks': blocks,
+    }
+
+
+def _block(text, x0, y0, x1, y1, style=None):
+    return {
+        'text': text,
+        'bbox': [x0, y0, x1, y1],
+        'style': style or {'font': 'Times New Roman', 'size': 11.0},
+    }
 
 
 if __name__ == '__main__':

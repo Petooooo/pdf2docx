@@ -74,3 +74,41 @@ Result: passed.
 - `Converter.store()` includes `layout_analysis` only when a report exists, so the default serialize/debug payload remains unchanged.
 - No deviations from the Phase 1 plan were needed.
 - Full existing conversion tests were not run in this local environment because project test dependencies such as `pytest` and `PyMuPDF` are not installed here.
+
+## Phase 1C
+
+Date: 2026-05-31
+
+### Commands run
+
+```bash
+python3 -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+python3 -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 14 tests ran successfully.
+
+```bash
+python3 -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: not run in this local Python environment because the `pytest` module is not installed.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Notes
+
+- Phase 1C adds paragraph continuation candidate scoring to the existing opt-in `layout_analysis` report only.
+- The report now includes `paragraph_continuation_candidates` with previews, score, label, positive/negative signals, and a reason summary.
+- No DOCX generation path, body/header/footer filtering, table/image/shape behavior, public CLI, or paragraph mutation code was modified.
+- Normal conversion output should remain unchanged by design because the new logic only runs while building the explicit opt-in analysis report.
+- Full existing conversion tests were not run in this local environment because project test dependencies such as `pytest` and `PyMuPDF` are not installed here.

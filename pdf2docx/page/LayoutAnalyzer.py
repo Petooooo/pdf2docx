@@ -17,6 +17,8 @@ REGION_BODY = 'body'
 REGION_BOTTOM = 'bottom'
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
+DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
+STRONG_SENTENCE_END_PUNC = '.．。?？!！'
 
 _SPACE_RE = re.compile(r'\s+')
 _PAGE_NUMBER_RE_LIST = (
@@ -25,6 +27,10 @@ _PAGE_NUMBER_RE_LIST = (
     re.compile(r'^\d+\s*(?:/|of)\s*\d+$', re.IGNORECASE),
     re.compile(r'^-?\s*\d+\s*-?$'),
 )
+_NUMBERED_HEADING_RE = re.compile(r'^\d+(?:\.\d+)*\.?\s+\S+')
+_SECTION_HEADING_RE = re.compile(
+    r'^(?:chapter|section|part|appendix|article)\b',
+    re.IGNORECASE)
 
 
 def normalize_text(text) -> str:
@@ -235,6 +241,10 @@ def build_layout_analysis_report(
         min_pages=min_pages,
         top_ratio=top_ratio,
         bottom_ratio=bottom_ratio)
+    continuations = find_paragraph_continuation_candidates(
+        page_summaries,
+        top_ratio=top_ratio,
+        bottom_ratio=bottom_ratio)
 
     return {
         'page_count': len(pages),
@@ -245,11 +255,131 @@ def build_layout_analysis_report(
         },
         'pages': page_summaries,
         'repeated_text_candidates': repeated,
+        'paragraph_continuation_candidates': continuations,
         'signals': {
             'text_block_count': len(records),
             'repeated_text_candidate_count': len(repeated),
+            'paragraph_continuation_candidate_count': len(continuations),
         },
     }
+
+
+def find_paragraph_continuation_candidates(
+        page_summaries: list,
+        top_ratio: float = DEFAULT_TOP_RATIO,
+        bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
+        near_edge_ratio: float = DEFAULT_NEAR_BODY_EDGE_RATIO) -> list:
+    '''Score adjacent-page paragraph continuation candidates.'''
+    candidates = []
+    page_summaries = page_summaries or []
+    for index, previous_page in enumerate(page_summaries[:-1]):
+        next_page = page_summaries[index+1]
+        previous_block = _last_body_block(previous_page)
+        next_block = _first_body_block(next_page)
+        candidates.append(score_paragraph_continuation(
+            previous_page,
+            next_page,
+            previous_block,
+            next_block,
+            top_ratio=top_ratio,
+            bottom_ratio=bottom_ratio,
+            near_edge_ratio=near_edge_ratio))
+    return candidates
+
+
+def score_paragraph_continuation(
+        previous_page: dict,
+        next_page: dict,
+        previous_block: dict = None,
+        next_block: dict = None,
+        top_ratio: float = DEFAULT_TOP_RATIO,
+        bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
+        near_edge_ratio: float = DEFAULT_NEAR_BODY_EDGE_RATIO) -> dict:
+    '''Score a possible paragraph continuation across two adjacent pages.'''
+    positive, negative = [], []
+    score = 0.0
+
+    from_page = previous_page.get('page_index')
+    to_page = next_page.get('page_index')
+
+    if not previous_block:
+        negative.append('no_previous_body_block')
+    if not next_block:
+        negative.append('no_next_body_block')
+    if not previous_block or not next_block:
+        return _continuation_result(
+            from_page, to_page, previous_block, next_block, 0.0,
+            positive, negative)
+
+    positive.append('previous_block_body_region')
+    positive.append('next_block_body_region')
+    score += 0.2
+
+    previous_text = normalize_text(previous_block.get('text', ''))
+    next_text = normalize_text(next_block.get('text', ''))
+    previous_bbox = previous_block.get('bbox', [0.0, 0.0, 0.0, 0.0])
+    next_bbox = next_block.get('bbox', [0.0, 0.0, 0.0, 0.0])
+
+    if _near_body_bottom(previous_bbox, previous_page, bottom_ratio, near_edge_ratio):
+        positive.append('previous_near_body_bottom')
+        score += 0.15
+    else:
+        negative.append('previous_not_near_body_bottom')
+        score -= 0.05
+
+    if _near_body_top(next_bbox, next_page, top_ratio, near_edge_ratio):
+        positive.append('next_near_body_top')
+        score += 0.15
+    else:
+        negative.append('next_not_near_body_top')
+        score -= 0.05
+
+    if _ends_with_strong_sentence_punctuation(previous_text):
+        negative.append('previous_strong_sentence_end')
+        score -= 0.5
+    else:
+        positive.append('previous_text_open_ended')
+        score += 0.15
+
+    if _ends_with_hyphenated_word(previous_text):
+        positive.append('previous_hyphenated_word')
+        score += 0.2
+
+    previous_style = normalize_text(previous_block.get('style', ''))
+    next_style = normalize_text(next_block.get('style', ''))
+    if previous_style and next_style:
+        if previous_style == next_style:
+            positive.append('style_match')
+            score += 0.1
+        else:
+            negative.append('style_mismatch')
+            score -= 0.1
+
+    if _left_boundary_similar(previous_bbox, next_bbox):
+        positive.append('left_boundary_similar')
+        score += 0.1
+    elif _next_indented_like_new_paragraph(previous_bbox, next_bbox):
+        negative.append('next_indented_like_new_paragraph')
+        score -= 0.15
+    else:
+        negative.append('left_boundary_mismatch')
+        score -= 0.05
+
+    if _right_boundary_similar(previous_bbox, next_bbox):
+        positive.append('right_boundary_similar')
+        score += 0.05
+    else:
+        negative.append('right_boundary_mismatch')
+        score -= 0.05
+
+    if _looks_like_heading(next_text):
+        negative.append('next_looks_like_heading')
+        score -= 0.5
+
+    score = min(max(score, 0.0), 1.0)
+    return _continuation_result(
+        from_page, to_page, previous_block, next_block, score,
+        positive, negative)
 
 
 def _style_from_block(block: dict) -> dict:
@@ -268,3 +398,134 @@ def _json_bbox(bbox) -> list:
 
 def _json_number(value) -> float:
     return round(float(value or 0.0), 2)
+
+
+def _last_body_block(page_summary: dict):
+    body_blocks = _body_blocks(page_summary)
+    if not body_blocks:
+        return None
+    return sorted(body_blocks, key=lambda block: (block['bbox'][3], block['block_index']))[-1]
+
+
+def _first_body_block(page_summary: dict):
+    body_blocks = _body_blocks(page_summary)
+    if not body_blocks:
+        return None
+    return sorted(body_blocks, key=lambda block: (block['bbox'][1], block['block_index']))[0]
+
+
+def _body_blocks(page_summary: dict) -> list:
+    blocks = page_summary.get('text_blocks', []) or []
+    return [
+        block for block in blocks
+        if block.get('region') == REGION_BODY and normalize_text(block.get('text'))
+    ]
+
+
+def _near_body_bottom(bbox, page_summary, bottom_ratio: float, near_edge_ratio: float) -> bool:
+    page_height = float(page_summary.get('height') or 0.0)
+    if page_height <= 0:
+        return False
+    body_bottom = page_height * (1.0 - bottom_ratio)
+    return float(bbox[3]) >= body_bottom - page_height * near_edge_ratio
+
+
+def _near_body_top(bbox, page_summary, top_ratio: float, near_edge_ratio: float) -> bool:
+    page_height = float(page_summary.get('height') or 0.0)
+    if page_height <= 0:
+        return False
+    body_top = page_height * top_ratio
+    return float(bbox[1]) <= body_top + page_height * near_edge_ratio
+
+
+def _ends_with_strong_sentence_punctuation(text: str) -> bool:
+    return normalize_text(text).endswith(tuple(STRONG_SENTENCE_END_PUNC))
+
+
+def _ends_with_hyphenated_word(text: str) -> bool:
+    text = normalize_text(text)
+    return bool(text) and text.endswith('-') and not text.endswith('--')
+
+
+def _left_boundary_similar(previous_bbox, next_bbox, tolerance: float = 12.0) -> bool:
+    return abs(float(previous_bbox[0]) - float(next_bbox[0])) <= tolerance
+
+
+def _right_boundary_similar(previous_bbox, next_bbox, tolerance: float = 18.0) -> bool:
+    return abs(float(previous_bbox[2]) - float(next_bbox[2])) <= tolerance
+
+
+def _next_indented_like_new_paragraph(previous_bbox, next_bbox, tolerance: float = 18.0) -> bool:
+    return float(next_bbox[0]) - float(previous_bbox[0]) > tolerance
+
+
+def _looks_like_heading(text: str) -> bool:
+    text = normalize_text(text)
+    if not text or len(text) > 80:
+        return False
+    if _ends_with_strong_sentence_punctuation(text):
+        return False
+    if _SECTION_HEADING_RE.match(text) or _NUMBERED_HEADING_RE.match(text):
+        return True
+
+    words = text.split()
+    letters = ''.join(c for c in text if c.isalpha())
+    if len(words) <= 8 and len(letters) >= 4 and letters.upper() == letters:
+        return True
+    title_like = sum(1 for word in words if word[:1].isupper())
+    return bool(words) and len(words) <= 6 and title_like == len(words)
+
+
+def _continuation_result(
+        from_page,
+        to_page,
+        previous_block,
+        next_block,
+        score: float,
+        positive_signals: list,
+        negative_signals: list) -> dict:
+    score = round(score, 3)
+    return {
+        'from_page': from_page,
+        'to_page': to_page,
+        'previous_text_preview': _preview_text(previous_block),
+        'next_text_preview': _preview_text(next_block),
+        'score': score,
+        'label': _continuation_label(score),
+        'positive_signals': positive_signals,
+        'negative_signals': negative_signals,
+        'reason': _continuation_reason(score, positive_signals, negative_signals),
+    }
+
+
+def _preview_text(block, max_length: int = 120) -> str:
+    if not block:
+        return ''
+    text = normalize_text(block.get('text', ''))
+    if len(text) <= max_length:
+        return text
+    return f'{text[:max_length-3]}...'
+
+
+def _continuation_label(score: float) -> str:
+    if score >= 0.65:
+        return 'candidate'
+    if score >= 0.4:
+        return 'weak'
+    return 'unlikely'
+
+
+def _continuation_reason(score: float, positive: list, negative: list) -> str:
+    if 'no_previous_body_block' in negative or 'no_next_body_block' in negative:
+        return 'Missing body text candidate on one side of the page break.'
+    if 'previous_strong_sentence_end' in negative:
+        return 'Previous text ends with strong sentence punctuation.'
+    if 'next_looks_like_heading' in negative:
+        return 'Next text looks like a heading or section title.'
+    if 'previous_hyphenated_word' in positive:
+        return 'Hyphenated page break with body-position continuation signals.'
+    if score >= 0.65:
+        return 'Adjacent body text blocks have continuation-like layout and text signals.'
+    if score >= 0.4:
+        return 'Some continuation signals are present, but confidence is limited.'
+    return 'Continuation signals are weak or contradicted.'
