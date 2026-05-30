@@ -4,6 +4,7 @@
 
 import logging
 
+from .LayoutAnalyzer import build_layout_analysis_report
 from .RawPageFactory import RawPageFactory
 from ..common.Collection import BaseCollection
 from ..font.Fonts import Fonts
@@ -12,6 +13,19 @@ from ..font.Fonts import Fonts
 class Pages(BaseCollection):
     '''A collection of ``Page``.'''
 
+    def __init__(self, instances:list=None, parent=None):
+        super().__init__(instances, parent)
+        self._layout_analysis_report = None
+
+
+    @property
+    def layout_analysis_report(self):
+        return self._layout_analysis_report
+
+
+    def restore_layout_analysis_report(self, report):
+        self._layout_analysis_report = report or None
+
     def parse(self, fitz_doc, **settings):
         '''Analyze document structure, e.g. page section, header, footer.
 
@@ -19,6 +33,8 @@ class Pages(BaseCollection):
             fitz_doc (fitz.Document): ``PyMuPDF`` Document instance.
             settings (dict): Parsing parameters.
         '''
+        self._layout_analysis_report = None
+
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
         # ---------------------------------------------
@@ -66,6 +82,10 @@ class Pages(BaseCollection):
         # NOTE: blocks structure might be changed in this step, e.g. promote page header/footer,
         # so blocks structure based process, e.g. calculating margin, parse section should be 
         # run after this step.
+        if settings.get('layout_analysis'):
+            self._layout_analysis_report = Pages._build_layout_analysis_report(
+                pages, raw_pages, **settings)
+
         header, footer = Pages._parse_document(raw_pages)
 
 
@@ -88,3 +108,60 @@ class Pages(BaseCollection):
         '''Parse structure in document/pages level, e.g. header, footer'''
         # TODO
         return '', ''
+
+
+    @staticmethod
+    def _build_layout_analysis_report(pages:list, raw_pages:list, **settings):
+        analysis_pages = Pages._layout_analysis_pages(pages, raw_pages)
+        return build_layout_analysis_report(
+            analysis_pages,
+            min_pages=settings.get('layout_analysis_min_pages', 2),
+            top_ratio=settings.get('layout_analysis_top_ratio', 0.15),
+            bottom_ratio=settings.get('layout_analysis_bottom_ratio', 0.15))
+
+
+    @staticmethod
+    def _layout_analysis_pages(pages:list, raw_pages:list):
+        analysis_pages = []
+        for page, raw_page in zip(pages, raw_pages):
+            analysis_pages.append({
+                'page_index': page.id,
+                'width': raw_page.width,
+                'height': raw_page.height,
+                'blocks': [
+                    Pages._layout_analysis_block(block) for block in raw_page.blocks
+                ],
+            })
+        return analysis_pages
+
+
+    @staticmethod
+    def _layout_analysis_block(block):
+        return {
+            'text': getattr(block, 'text', ''),
+            'bbox': Pages._json_bbox(getattr(block, 'bbox', None)),
+            'style': Pages._layout_analysis_style(block),
+        }
+
+
+    @staticmethod
+    def _layout_analysis_style(block):
+        spans = getattr(block, 'spans', [])
+        for span in spans:
+            font = getattr(span, 'font', '')
+            size = getattr(span, 'size', '')
+            flags = getattr(span, 'flags', '')
+            if font or size or flags:
+                return {
+                    'font': font,
+                    'size': size,
+                    'flags': flags,
+                }
+        return {}
+
+
+    @staticmethod
+    def _json_bbox(bbox):
+        if not bbox:
+            return [0.0, 0.0, 0.0, 0.0]
+        return [round(float(value), 2) for value in bbox[:4]]

@@ -245,11 +245,14 @@ class Converter:
 
     def store(self):
         '''Store parsed pages in dict format.'''
-        return {
+        data = {
             'filename': os.path.basename(self.filename_pdf),
             'page_cnt': len(self._pages), # count of all pages
             'pages'   : [page.store() for page in self._pages if page.finalized], # parsed pages only
         }
+        if self._pages.layout_analysis_report:
+            data['layout_analysis'] = self._pages.layout_analysis_report
+        return data
 
 
     def restore(self, data:dict):
@@ -263,6 +266,8 @@ class Converter:
         for raw_page in data.get('pages', []):
             idx = raw_page.get('id', -1)
             self._pages[idx].restore(raw_page)
+
+        self._pages.restore_layout_analysis_report(data.get('layout_analysis'))
 
 
     def serialize(self, filename:str):

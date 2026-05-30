@@ -16,6 +16,7 @@ REGION_BOTTOM = LayoutAnalyzer.REGION_BOTTOM
 REGION_TOP = LayoutAnalyzer.REGION_TOP
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
+build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
@@ -110,8 +111,47 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn(PAGE_NUMBER_PLACEHOLDER.lower(), by_text)
         self.assertNotIn('repeated body line', by_text)
         self.assertEqual(by_text['annual report']['pages'], [0, 1, 2])
+        self.assertEqual(by_text['annual report']['confidence'], 1.0)
+        self.assertEqual(by_text['annual report']['signals']['support_pages'], 3)
         self.assertEqual(by_text[PAGE_NUMBER_PLACEHOLDER.lower()]['regions'], [REGION_BOTTOM])
         json.dumps(candidates)
+
+    def test_build_layout_analysis_report_contains_page_summary_and_candidates(self):
+        pages = [
+            {
+                'page_index': 0,
+                'width': 600,
+                'height': 1000,
+                'blocks': [
+                    {'text': 'Annual Report', 'bbox': [50, 20, 300, 40]},
+                    {'text': 'First body paragraph', 'bbox': [50, 300, 500, 330]},
+                    {'text': 'Page 1', 'bbox': [260, 960, 310, 980]},
+                ],
+            },
+            {
+                'page_index': 1,
+                'width': 600,
+                'height': 1000,
+                'blocks': [
+                    {'text': 'Annual Report', 'bbox': [50, 20, 300, 40]},
+                    {'text': 'Second body paragraph', 'bbox': [50, 300, 500, 330]},
+                    {'text': 'Page 2', 'bbox': [260, 960, 310, 980]},
+                ],
+            },
+        ]
+
+        report = build_layout_analysis_report(pages)
+        by_text = {candidate['text']: candidate for candidate in report['repeated_text_candidates']}
+
+        self.assertEqual(report['page_count'], 2)
+        self.assertEqual(report['pages'][0]['region_counts'][REGION_TOP], 1)
+        self.assertEqual(report['pages'][0]['region_counts'][REGION_BODY], 1)
+        self.assertEqual(report['pages'][0]['region_counts'][REGION_BOTTOM], 1)
+        self.assertIn('First body paragraph', report['pages'][0]['text'])
+        self.assertIn('annual report', by_text)
+        self.assertIn(PAGE_NUMBER_PLACEHOLDER.lower(), by_text)
+        self.assertEqual(report['signals']['repeated_text_candidate_count'], 2)
+        json.dumps(report)
 
 
 if __name__ == '__main__':

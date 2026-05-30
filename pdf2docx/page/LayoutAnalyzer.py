@@ -155,6 +155,7 @@ def find_repeated_text_candidates(
         bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
         regions: tuple = (REGION_TOP, REGION_BOTTOM)) -> list:
     '''Find repeated text candidates across simplified page dictionaries.'''
+    total_pages = len(pages or [])
     records = text_block_records(pages, top_ratio, bottom_ratio)
     allowed_regions = set(regions or [])
     grouped = defaultdict(list)
@@ -173,17 +174,82 @@ def find_repeated_text_candidates(
             continue
 
         regions_seen = sorted({record['region'] for record in group})
+        support = len(pages_seen)
+        confidence = round(support / total_pages, 3) if total_pages else 0.0
         candidates.append({
             'fingerprint': key,
             'text': group[0]['normalized_text'],
             'pages': pages_seen,
             'count': len(group),
             'regions': regions_seen,
+            'confidence': confidence,
+            'signals': {
+                'support_pages': support,
+                'total_pages': total_pages,
+                'instance_count': len(group),
+                'regions': regions_seen,
+            },
             'instances': group,
         })
 
     candidates.sort(key=lambda item: (-len(item['pages']), item['fingerprint']))
     return candidates
+
+
+def build_layout_analysis_report(
+        pages: list,
+        min_pages: int = 2,
+        top_ratio: float = DEFAULT_TOP_RATIO,
+        bottom_ratio: float = DEFAULT_BOTTOM_RATIO) -> dict:
+    '''Build a JSON-serializable document layout analysis report.'''
+    pages = pages or []
+    records = text_block_records(pages, top_ratio, bottom_ratio)
+    records_by_page = defaultdict(list)
+    for record in records:
+        records_by_page[record['page_index']].append(record)
+
+    page_summaries = []
+    for fallback_page_index, page in enumerate(pages):
+        page_index = page.get('page_index', page.get('id', fallback_page_index))
+        page_records = records_by_page.get(page_index, [])
+        region_counts = {
+            REGION_TOP: 0,
+            REGION_BODY: 0,
+            REGION_BOTTOM: 0,
+        }
+        for record in page_records:
+            region_counts[record['region']] += 1
+
+        page_summaries.append({
+            'page_index': page_index,
+            'width': _json_number(page.get('width', page.get('page_width', 0.0))),
+            'height': _json_number(page.get('height', page.get('page_height', 0.0))),
+            'text': normalize_text(' '.join(record['text'] for record in page_records)),
+            'text_block_count': len(page_records),
+            'region_counts': region_counts,
+            'text_blocks': page_records,
+        })
+
+    repeated = find_repeated_text_candidates(
+        pages,
+        min_pages=min_pages,
+        top_ratio=top_ratio,
+        bottom_ratio=bottom_ratio)
+
+    return {
+        'page_count': len(pages),
+        'settings': {
+            'min_pages': min_pages,
+            'top_ratio': top_ratio,
+            'bottom_ratio': bottom_ratio,
+        },
+        'pages': page_summaries,
+        'repeated_text_candidates': repeated,
+        'signals': {
+            'text_block_count': len(records),
+            'repeated_text_candidate_count': len(repeated),
+        },
+    }
 
 
 def _style_from_block(block: dict) -> dict:
@@ -198,3 +264,7 @@ def _json_bbox(bbox) -> list:
     if not bbox or len(bbox) < 4:
         return [0.0, 0.0, 0.0, 0.0]
     return [round(float(value), 2) for value in bbox[:4]]
+
+
+def _json_number(value) -> float:
+    return round(float(value or 0.0), 2)
