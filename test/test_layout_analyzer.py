@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_filter_insertion_point_analysis_report = LayoutAnalyzer.build_filter_insertion_point_analysis_report
 build_indentation_rule_comparison_report = LayoutAnalyzer.build_indentation_rule_comparison_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
 build_paragraph_mismatch_analysis_report = LayoutAnalyzer.build_paragraph_mismatch_analysis_report
@@ -1938,6 +1939,101 @@ class TestLayoutAnalyzer(unittest.TestCase):
             comparison['summary']['total_indentation_split_boundaries'], 0)
         self.assertEqual(comparison['boundaries'], [])
 
+    def test_filter_insertion_analysis_includes_all_candidate_stages(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports(),
+            enabled=True)
+
+        candidate_ids = {
+            point['candidate_id']
+            for point in analysis['insertion_points']
+        }
+        self.assertEqual(analysis['summary']['evaluated_insertion_point_count'], 6)
+        self.assertEqual(candidate_ids, {
+            'raw_page_cleanup',
+            'document_parse',
+            'before_page_parse',
+            'before_blocks_cleanup_or_grouping',
+            'after_textblock_grouping',
+            'docx_generation',
+        })
+
+    def test_filter_insertion_analysis_stage_fields_are_complete(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports(),
+            enabled=True)
+
+        for point in analysis['insertion_points']:
+            self.assertIn(point['risk_level'], {'low', 'medium', 'high'})
+            self.assertIn(point['implementation_complexity'], {'low', 'medium', 'high'})
+            self.assertIn(point['recommendation'], {'preferred', 'possible', 'avoid'})
+            self.assertIn('paragraph_grouping_impact', point)
+            self.assertIn('table_detection_impact', point)
+            self.assertIn('image_shape_extraction_impact', point)
+
+    def test_filter_insertion_analysis_prefers_document_level_stage(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports(),
+            enabled=True)
+
+        by_id = _insertion_points_by_id(analysis)
+        self.assertEqual(
+            analysis['summary']['preferred_insertion_point'],
+            'document_parse')
+        self.assertEqual(by_id['document_parse']['recommendation'], 'preferred')
+        self.assertEqual(by_id['document_parse']['risk_level'], 'low')
+
+    def test_filter_insertion_analysis_marks_docx_stage_incomplete(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports(),
+            enabled=True)
+
+        docx_point = _insertion_points_by_id(analysis)['docx_generation']
+        self.assertEqual(docx_point['recommendation'], 'avoid')
+        self.assertEqual(docx_point['risk_level'], 'high')
+        self.assertIn('Incomplete', docx_point['paragraph_grouping_impact'])
+
+    def test_filter_insertion_analysis_marks_post_textblock_filtering_risky(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports(),
+            enabled=True)
+
+        point = _insertion_points_by_id(analysis)['after_textblock_grouping']
+        self.assertEqual(point['recommendation'], 'avoid')
+        self.assertEqual(point['risk_level'], 'high')
+        self.assertTrue(any('merged' in signal for signal in point['negative_signals']))
+
+    def test_filter_insertion_analysis_handles_missing_reports(self):
+        analysis = build_filter_insertion_point_analysis_report(enabled=True)
+
+        self.assertTrue(analysis['enabled'])
+        self.assertIn(
+            'layout_analysis_report',
+            analysis['summary']['missing_inputs'])
+        self.assertIn(
+            'production_grouping_metrics_unavailable',
+            {warning['type'] for warning in analysis['warnings']})
+
+    def test_filter_insertion_analysis_does_not_mutate_inputs(self):
+        reports = _filter_insertion_reports()
+        before = json.loads(json.dumps(reports))
+
+        build_filter_insertion_point_analysis_report(
+            **reports,
+            enabled=True)
+
+        self.assertEqual(reports, before)
+
+    def test_filter_insertion_analysis_disabled_mode_is_clear(self):
+        analysis = build_filter_insertion_point_analysis_report(
+            **_filter_insertion_reports())
+
+        self.assertFalse(analysis['enabled'])
+        self.assertEqual(analysis['insertion_points'], [])
+        self.assertEqual(
+            analysis['summary']['evaluated_insertion_point_count'],
+            0)
+
 
 def _page(page_index, blocks):
     return {
@@ -2124,6 +2220,80 @@ def _indentation_boundary(
         },
         'previous_text_preview': 'Previous visual line',
         'next_text_preview': 'Next visual line',
+    }
+
+
+def _filter_insertion_reports(body_region_removed_count=0):
+    return {
+        'layout_analysis_report': {
+            'page_count': 2,
+            'pages': [{}, {}],
+            'header_footer_exclusion_dry_run': {
+                'summary': {'candidate_count': 5},
+                'candidates': [{} for _ in range(5)],
+            },
+        },
+        'review_decisions': {
+            'summary': {
+                'approve_exclude': 2,
+                'reject_exclude': 1,
+                'unsure': 1,
+            },
+            'decisions': [],
+        },
+        'body_filtering_diff_report': {
+            'summary': {
+                'approved_candidate_count': 2,
+                'blocked_candidate_count': 3,
+                'would_remove_block_count': 8,
+            },
+        },
+        'paragraph_integrity_report': {
+            'summary': {
+                'body_region_removed_count': body_region_removed_count,
+                'suspicious_warning_count': 0,
+            },
+        },
+        'paragraph_grouping_report': {
+            'summary': {
+                'estimated_paragraph_group_count': 79,
+            },
+        },
+        'production_comparison_report': {
+            'estimator': {
+                'paragraph_group_count': 79,
+            },
+            'production_observed': {
+                'available': True,
+                'paragraph_group_count': 52,
+            },
+            'mismatch': {
+                'absolute_group_count_delta': 27,
+                'estimator_to_production_group_ratio': 1.519,
+                'group_count_delta_ratio': 0.519,
+            },
+            'warnings': [],
+        },
+        'paragraph_mismatch_report': {
+            'summary': {
+                'dominant_mismatch_cause': 'estimator_over_split_by_indentation',
+            },
+            'warnings': [],
+        },
+        'indentation_rule_report': {
+            'summary': {
+                'total_indentation_split_boundaries': 22,
+                'estimator_should_merge_count': 0,
+                'estimator_should_split_count': 22,
+            },
+        },
+    }
+
+
+def _insertion_points_by_id(analysis):
+    return {
+        point['candidate_id']: point
+        for point in analysis['insertion_points']
     }
 
 

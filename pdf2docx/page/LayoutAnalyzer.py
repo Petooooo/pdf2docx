@@ -1072,6 +1072,88 @@ def build_indentation_rule_comparison_report(
     }
 
 
+def build_filter_insertion_point_analysis_report(
+        layout_analysis_report: dict = None,
+        review_decisions=None,
+        body_filtering_diff_report: dict = None,
+        paragraph_integrity_report: dict = None,
+        paragraph_grouping_report: dict = None,
+        production_comparison_report: dict = None,
+        paragraph_mismatch_report: dict = None,
+        indentation_rule_report: dict = None,
+        enabled: bool = False) -> dict:
+    '''Compare future header/footer filtering insertion points without applying filtering.'''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'filter_insertion_point_analysis_report_only',
+            'summary': {
+                'evaluated_insertion_point_count': 0,
+                'preferred_insertion_point': '',
+                'possible_insertion_points': [],
+                'avoid_insertion_points': [],
+                'missing_inputs': [],
+            },
+            'metrics': {},
+            'insertion_points': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2k': False,
+                'reason': 'Insertion point analysis is disabled; no production integration assumptions were evaluated.',
+            },
+        }
+
+    metrics = _filter_insertion_metrics(
+        layout_analysis_report,
+        review_decisions,
+        body_filtering_diff_report,
+        paragraph_integrity_report,
+        paragraph_grouping_report,
+        production_comparison_report,
+        paragraph_mismatch_report,
+        indentation_rule_report)
+    warnings = _filter_insertion_warnings(metrics)
+    insertion_points = [
+        _filter_insertion_point_analysis(spec, metrics)
+        for spec in _filter_insertion_point_specs()
+    ]
+    preferred = [
+        point['candidate_id']
+        for point in insertion_points
+        if point['recommendation'] == 'preferred'
+    ]
+    possible = [
+        point['candidate_id']
+        for point in insertion_points
+        if point['recommendation'] == 'possible'
+    ]
+    avoid = [
+        point['candidate_id']
+        for point in insertion_points
+        if point['recommendation'] == 'avoid'
+    ]
+
+    return {
+        'enabled': True,
+        'policy': 'filter_insertion_point_analysis_report_only',
+        'summary': {
+            'evaluated_insertion_point_count': len(insertion_points),
+            'preferred_insertion_point': preferred[0] if preferred else '',
+            'possible_insertion_points': possible,
+            'avoid_insertion_points': avoid,
+            'missing_inputs': metrics['missing_inputs'],
+        },
+        'metrics': metrics,
+        'insertion_points': insertion_points,
+        'warnings': warnings,
+        'safest_next_experiment': _filter_insertion_next_experiment(preferred, metrics),
+        'recommendation': {
+            'safe_to_attempt_phase_2k': bool(preferred and not metrics['body_region_removed_count']),
+            'reason': _filter_insertion_recommendation(preferred, warnings, metrics),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -2896,6 +2978,384 @@ def _indentation_rule_recommendation(recommendation_counts: Counter) -> str:
     if unclear_count or metadata_count:
         return 'Some indentation splits remain unclear; collect richer line-width/row metadata before production integration.'
     return 'Indentation splits look consistent in this report, but keep any next step internal before production integration.'
+
+
+def _filter_insertion_metrics(
+        layout_analysis_report: dict,
+        review_decisions,
+        body_filtering_diff_report: dict,
+        paragraph_integrity_report: dict,
+        paragraph_grouping_report: dict,
+        production_comparison_report: dict,
+        paragraph_mismatch_report: dict,
+        indentation_rule_report: dict) -> dict:
+    layout_analysis_report = layout_analysis_report or {}
+    body_filtering_diff_report = body_filtering_diff_report or {}
+    paragraph_integrity_report = paragraph_integrity_report or {}
+    paragraph_grouping_report = paragraph_grouping_report or {}
+    production_comparison_report = production_comparison_report or {}
+    paragraph_mismatch_report = paragraph_mismatch_report or {}
+    indentation_rule_report = indentation_rule_report or {}
+
+    diff_summary = body_filtering_diff_report.get('summary') or {}
+    integrity_summary = paragraph_integrity_report.get('summary') or {}
+    grouping_summary = paragraph_grouping_report.get('summary') or {}
+    comparison_estimator = production_comparison_report.get('estimator') or {}
+    comparison_production = production_comparison_report.get('production_observed') or {}
+    comparison_mismatch = production_comparison_report.get('mismatch') or {}
+    mismatch_summary = paragraph_mismatch_report.get('summary') or {}
+    indentation_summary = indentation_rule_report.get('summary') or {}
+    dry_run = layout_analysis_report.get('header_footer_exclusion_dry_run') or {}
+    dry_run_summary = dry_run.get('summary') or {}
+
+    missing_inputs = []
+    if not layout_analysis_report:
+        missing_inputs.append('layout_analysis_report')
+    if not body_filtering_diff_report:
+        missing_inputs.append('body_filtering_diff_report')
+    if not paragraph_integrity_report:
+        missing_inputs.append('paragraph_integrity_report')
+    if not paragraph_grouping_report:
+        missing_inputs.append('paragraph_grouping_report')
+    if not production_comparison_report:
+        missing_inputs.append('production_comparison_report')
+    if not paragraph_mismatch_report:
+        missing_inputs.append('paragraph_mismatch_report')
+    if not indentation_rule_report:
+        missing_inputs.append('indentation_rule_report')
+
+    estimator_count = (
+        comparison_estimator.get('paragraph_group_count') or
+        grouping_summary.get('estimated_paragraph_group_count') or 0)
+    production_count = comparison_production.get('paragraph_group_count') or 0
+    absolute_delta = (
+        comparison_mismatch.get('absolute_group_count_delta')
+        if comparison_mismatch.get('absolute_group_count_delta') is not None
+        else abs(int(estimator_count or 0) - int(production_count or 0)))
+
+    return {
+        'page_count': layout_analysis_report.get('page_count', len(layout_analysis_report.get('pages', []) or [])),
+        'dry_run_candidate_count': dry_run_summary.get(
+            'candidate_count',
+            len(dry_run.get('candidates', []) or [])),
+        'approved_candidate_count': diff_summary.get('approved_candidate_count', 0),
+        'blocked_candidate_count': diff_summary.get('blocked_candidate_count', 0),
+        'would_remove_block_count': diff_summary.get('would_remove_block_count', 0),
+        'body_region_removed_count': integrity_summary.get('body_region_removed_count', 0),
+        'paragraph_integrity_warning_count': integrity_summary.get('suspicious_warning_count', 0),
+        'estimator_paragraph_group_count': estimator_count,
+        'production_body_textblock_count': production_count,
+        'absolute_group_count_delta': absolute_delta,
+        'estimator_to_production_group_ratio': comparison_mismatch.get('estimator_to_production_group_ratio', 0.0),
+        'group_count_delta_ratio': comparison_mismatch.get('group_count_delta_ratio', 0.0),
+        'dominant_mismatch_cause': mismatch_summary.get('dominant_mismatch_cause', ''),
+        'mismatch_warning_count': len(paragraph_mismatch_report.get('warnings', []) or []),
+        'comparison_warning_count': len(production_comparison_report.get('warnings', []) or []),
+        'indentation_split_boundary_count': indentation_summary.get('total_indentation_split_boundaries', 0),
+        'indentation_should_merge_count': indentation_summary.get('estimator_should_merge_count', 0),
+        'indentation_should_split_count': indentation_summary.get('estimator_should_split_count', 0),
+        'review_decision_counts': _decision_counts(review_decisions or {}),
+        'missing_inputs': missing_inputs,
+    }
+
+
+def _filter_insertion_warnings(metrics: dict) -> list:
+    warnings = []
+    for name in metrics.get('missing_inputs', []):
+        warnings.append({
+            'type': 'missing_input',
+            'input': name,
+            'message': f'{name} was not provided; insertion risk is less certain.',
+        })
+
+    if metrics.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removal_risk',
+            'message': 'Reviewed filtering simulation removed body-region blocks; do not integrate production filtering.',
+            'body_region_removed_count': metrics.get('body_region_removed_count', 0),
+        })
+
+    if not metrics.get('production_body_textblock_count', 0):
+        warnings.append({
+            'type': 'production_grouping_metrics_unavailable',
+            'message': 'Production-observed TextBlock metrics are unavailable.',
+        })
+
+    if metrics.get('group_count_delta_ratio', 0.0) > 0.5:
+        warnings.append({
+            'type': 'paragraph_grouping_mismatch_remaining',
+            'message': 'Estimator and production grouping still differ enough to keep integration gated.',
+            'group_count_delta_ratio': metrics.get('group_count_delta_ratio', 0.0),
+        })
+
+    return warnings
+
+
+def _filter_insertion_point_specs() -> list:
+    return [
+        {
+            'candidate_id': 'raw_page_cleanup',
+            'stage_name': 'raw-page cleanup stage',
+            'pipeline_location': 'RawPage.restore() / RawPage.clean_up() before document-level repeated-candidate analysis',
+        },
+        {
+            'candidate_id': 'document_parse',
+            'stage_name': 'document-level Pages._parse_document() stage',
+            'pipeline_location': 'Pages.parse() after raw pages are cleaned and analyzed, before margin/section parsing',
+        },
+        {
+            'candidate_id': 'before_page_parse',
+            'stage_name': 'before Page.parse() / Layout.parse()',
+            'pipeline_location': 'After Page.sections are created, before Sections.parse() calls Layout.parse()',
+        },
+        {
+            'candidate_id': 'before_blocks_cleanup_or_grouping',
+            'stage_name': 'before Blocks.clean_up() or block grouping',
+            'pipeline_location': 'Either before RawPage block cleanup or before Blocks.parse_block() paragraph grouping',
+        },
+        {
+            'candidate_id': 'after_textblock_grouping',
+            'stage_name': 'after TextBlock grouping',
+            'pipeline_location': 'After Blocks.parse_block() has created TextBlock/TableBlock structures',
+        },
+        {
+            'candidate_id': 'docx_generation',
+            'stage_name': 'DOCX generation stage',
+            'pipeline_location': 'Page.make_docx() / Blocks.make_docx() while writing paragraphs and tables',
+        },
+    ]
+
+
+def _filter_insertion_point_analysis(spec: dict, metrics: dict) -> dict:
+    candidate_id = spec['candidate_id']
+    if candidate_id == 'document_parse':
+        return _document_parse_insertion_point(spec, metrics)
+    if candidate_id == 'before_page_parse':
+        return _before_page_parse_insertion_point(spec, metrics)
+    if candidate_id == 'raw_page_cleanup':
+        return _raw_page_cleanup_insertion_point(spec, metrics)
+    if candidate_id == 'before_blocks_cleanup_or_grouping':
+        return _before_blocks_cleanup_or_grouping_insertion_point(spec, metrics)
+    if candidate_id == 'after_textblock_grouping':
+        return _after_textblock_grouping_insertion_point(spec, metrics)
+    return _docx_generation_insertion_point(spec, metrics)
+
+
+def _base_insertion_point(spec: dict, metrics: dict) -> dict:
+    return {
+        'candidate_id': spec['candidate_id'],
+        'stage_name': spec['stage_name'],
+        'pipeline_location': spec['pipeline_location'],
+        'header_footer_candidates_available': metrics.get('dry_run_candidate_count', 0) > 0,
+        'manual_review_decisions_safe_to_apply': metrics.get('approved_candidate_count', 0) > 0,
+        'body_text_accidental_removal_risk': 'unknown',
+        'paragraph_grouping_impact': '',
+        'table_detection_impact': '',
+        'image_shape_extraction_impact': '',
+        'future_header_footer_generation_possible': True,
+        'page_number_handling_possible': True,
+        'rollback_ease': 'medium',
+        'testing_ease': 'medium',
+        'implementation_complexity': 'medium',
+        'risk_level': 'medium',
+        'recommendation': 'possible',
+        'positive_signals': [],
+        'negative_signals': [],
+        'reason': '',
+    }
+
+
+def _document_parse_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    safe_reviewed_filter = (
+        metrics.get('approved_candidate_count', 0) > 0 and
+        metrics.get('body_region_removed_count', 0) == 0)
+    point.update({
+        'body_text_accidental_removal_risk': 'low' if safe_reviewed_filter else 'medium',
+        'paragraph_grouping_impact': 'Likely helps downstream grouping because repeated top/bottom artifacts can be excluded before section and paragraph parsing.',
+        'table_detection_impact': 'Low risk when restricted to approved top/bottom candidates; table detection still sees body lines.',
+        'image_shape_extraction_impact': 'Low risk if layout placeholders and image candidates remain blocked from exclusion.',
+        'rollback_ease': 'high',
+        'testing_ease': 'high',
+        'implementation_complexity': 'medium',
+        'risk_level': 'low' if safe_reviewed_filter else 'medium',
+        'recommendation': 'preferred' if safe_reviewed_filter else 'possible',
+        'positive_signals': [
+            'repeated candidates are available after raw-page cleanup',
+            'manual review decisions can gate every exclusion',
+            'downstream section/table/paragraph parsing can run on cleaner body input',
+        ],
+        'negative_signals': [
+            'requires a carefully isolated opt-in copy/apply boundary before mutating raw pages',
+        ],
+        'reason': 'This is the safest future insertion point because it is document-aware and still precedes body layout grouping.',
+    })
+    return point
+
+
+def _before_page_parse_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    point.update({
+        'body_text_accidental_removal_risk': 'medium',
+        'paragraph_grouping_impact': 'Can help paragraph grouping, but page margins and section layout may already include header/footer artifacts.',
+        'table_detection_impact': 'Medium risk because section/column assignment may already be influenced by repeated artifacts.',
+        'image_shape_extraction_impact': 'Low to medium risk if only text lines are filtered and image placeholders remain blocked.',
+        'future_header_footer_generation_possible': True,
+        'page_number_handling_possible': True,
+        'rollback_ease': 'medium',
+        'testing_ease': 'medium',
+        'implementation_complexity': 'medium',
+        'risk_level': 'medium',
+        'recommendation': 'possible',
+        'positive_signals': [
+            'reviewed candidates can still be matched to page summaries',
+            'filtering remains before Blocks.parse_block() paragraph grouping',
+        ],
+        'negative_signals': [
+            'page margin and section detection have already consumed unfiltered content',
+        ],
+        'reason': 'This is a possible fallback, but it is later than the document-level stage.',
+    })
+    return point
+
+
+def _raw_page_cleanup_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    point.update({
+        'header_footer_candidates_available': False,
+        'manual_review_decisions_safe_to_apply': False,
+        'body_text_accidental_removal_risk': 'high',
+        'paragraph_grouping_impact': 'Unclear; filtering before cleanup may remove or misidentify raw text blocks before line normalization.',
+        'table_detection_impact': 'High risk because raw blocks have not yet been normalized into reliable line-level geometry.',
+        'image_shape_extraction_impact': 'Medium to high risk because floating image identification happens during cleanup.',
+        'future_header_footer_generation_possible': False,
+        'page_number_handling_possible': False,
+        'rollback_ease': 'low',
+        'testing_ease': 'low',
+        'implementation_complexity': 'high',
+        'risk_level': 'high',
+        'recommendation': 'avoid',
+        'positive_signals': [
+            'earliest possible location if a future raw-copy experiment needs observation only',
+        ],
+        'negative_signals': [
+            'document-level repeated candidates are not known yet',
+            'manual review decisions cannot be matched safely before normalized fingerprints exist',
+            'cleanup also handles floating images and overlapped lines',
+        ],
+        'reason': 'Too early for reviewed semantic filtering; keep this stage observational only.',
+    })
+    return point
+
+
+def _before_blocks_cleanup_or_grouping_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    point.update({
+        'body_text_accidental_removal_risk': 'medium',
+        'paragraph_grouping_impact': 'Potentially helpful if applied after cleanup but before parse_block(); risky if applied before clean_up().',
+        'table_detection_impact': 'Medium to high risk because stream/lattice table detection depends on line collections and shapes.',
+        'image_shape_extraction_impact': 'Medium risk around inline/floating image placeholder handling.',
+        'future_header_footer_generation_possible': True,
+        'page_number_handling_possible': True,
+        'rollback_ease': 'medium',
+        'testing_ease': 'medium',
+        'implementation_complexity': 'medium',
+        'risk_level': 'medium',
+        'recommendation': 'possible',
+        'positive_signals': [
+            'line-level geometry can be available before paragraph grouping',
+        ],
+        'negative_signals': [
+            'the label spans two very different timings; before clean_up is too early',
+            'table detection may be sensitive to missing lines',
+        ],
+        'reason': 'Only the after-cleanup/before-grouping variant is plausible; the before-cleanup variant should be avoided.',
+    })
+    return point
+
+
+def _after_textblock_grouping_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    point.update({
+        'body_text_accidental_removal_risk': 'high',
+        'paragraph_grouping_impact': 'Risky because header/footer text may already be merged into TextBlocks or affect spacing.',
+        'table_detection_impact': 'Incomplete because table detection and paragraph grouping have already run.',
+        'image_shape_extraction_impact': 'Low direct image risk, but mixed TextBlock/image content may be hard to split safely.',
+        'future_header_footer_generation_possible': 'partial',
+        'page_number_handling_possible': 'partial',
+        'rollback_ease': 'medium',
+        'testing_ease': 'medium',
+        'implementation_complexity': 'high',
+        'risk_level': 'high',
+        'recommendation': 'avoid',
+        'positive_signals': [
+            'serialized TextBlock metrics are observable for diagnostics',
+        ],
+        'negative_signals': [
+            'header/footer may have already merged into or polluted body TextBlocks',
+            'removing part of a TextBlock would require text/line surgery',
+            'downstream paragraph grouping cannot benefit retroactively',
+        ],
+        'reason': 'Too late for safe body cleanup; use this stage for comparison reports only.',
+    })
+    return point
+
+
+def _docx_generation_insertion_point(spec: dict, metrics: dict) -> dict:
+    point = _base_insertion_point(spec, metrics)
+    point.update({
+        'body_text_accidental_removal_risk': 'high',
+        'paragraph_grouping_impact': 'Incomplete because body pollution remains through parsing and only disappears at rendering time.',
+        'table_detection_impact': 'Incomplete because table and spacing decisions have already been made.',
+        'image_shape_extraction_impact': 'Low direct extraction risk, but no chance to repair polluted layout semantics.',
+        'future_header_footer_generation_possible': 'partial',
+        'page_number_handling_possible': 'partial',
+        'rollback_ease': 'high',
+        'testing_ease': 'low',
+        'implementation_complexity': 'medium',
+        'risk_level': 'high',
+        'recommendation': 'avoid',
+        'positive_signals': [
+            'easy to guard behind output-only experiments',
+        ],
+        'negative_signals': [
+            'does not prevent header/footer from affecting body parsing',
+            'cannot improve paragraph grouping, sectioning, or table detection',
+            'risks hiding rather than fixing semantic structure problems',
+        ],
+        'reason': 'DOCX-only filtering is incomplete; it leaves the parsed body model polluted.',
+    })
+    return point
+
+
+def _filter_insertion_next_experiment(preferred: list, metrics: dict) -> dict:
+    selected = preferred[0] if preferred else 'document_parse'
+    return {
+        'selected_insertion_point': selected,
+        'experiment_type': 'report_only_simulation_at_selected_insertion_point',
+        'requirements': [
+            'opt-in only',
+            'explicit approve_exclude review decisions only',
+            'dry-run/apply split',
+            'no default conversion behavior change',
+            'no DOCX header/footer generation yet',
+        ],
+        'expected_sample_removal_count': metrics.get('would_remove_block_count', 0),
+        'body_region_removed_count': metrics.get('body_region_removed_count', 0),
+    }
+
+
+def _filter_insertion_recommendation(
+        preferred: list,
+        warnings: list,
+        metrics: dict) -> str:
+    if metrics.get('body_region_removed_count', 0):
+        return 'Do not attempt production insertion while body-region removals are present.'
+    if not preferred:
+        return 'No preferred insertion point was established; keep the next phase report-only.'
+    if warnings:
+        return 'A preferred insertion point exists, but remaining diagnostics require Phase 2K to stay opt-in and report-only.'
+    return 'Document-level insertion is the preferred future path, but the next phase should still be an opt-in local simulation.'
 
 
 def _empty_paragraph_grouping_diagnostics() -> dict:

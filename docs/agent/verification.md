@@ -1370,3 +1370,146 @@ Result: confirmed local PDF/report files, `.venv/`, and generated caches remain 
 ### Phase 2J recommendation
 
 Phase 2J is safe to attempt only as another internal/report-only validation phase. The estimator is closer to production grouping, but the remaining delta and warnings mean production paragraph merging, production body filtering, and DOCX integration should stay disconnected.
+
+## Phase 2J
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2J added an internal/report-only insertion point analysis helper for future reviewed header/footer filtering. It compares where filtering could be inserted in the existing PDF-to-DOCX pipeline and records risk, complexity, rollback, testing, and recommendation fields for each stage.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated.
+
+### Pipeline reference
+
+The inspected production flow is:
+
+```text
+Converter.load_pages()
+  -> Converter.parse_document()
+  -> Pages.parse()
+  -> RawPage.restore()
+  -> RawPage.clean_up()
+  -> RawPage.process_font()
+  -> Pages._parse_document()
+  -> RawPage.calculate_margin()
+  -> RawPage.parse_section()
+  -> Converter.parse_pages()
+  -> Page.parse()
+  -> Layout.parse()
+  -> Blocks.parse_block()
+  -> Lines.split_vertically_by_text()
+  -> TextBlock.make_docx()
+```
+
+`Pages._parse_document()` is currently a placeholder, which makes it the least invasive future location for an opt-in document-aware experiment.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/filter-insertion-point-analysis-report.md
+```
+
+The report was not staged or committed. It was generated from the ignored sample PDF, layout report, review pack, and in-memory regenerated Phase 2I diagnostics. No DOCX output was generated.
+
+### Evaluated insertion points
+
+- `raw_page_cleanup`: avoid.
+- `document_parse`: preferred.
+- `before_page_parse`: possible.
+- `before_blocks_cleanup_or_grouping`: possible, but only the after-cleanup/before-grouping variant is plausible.
+- `after_textblock_grouping`: avoid.
+- `docx_generation`: avoid.
+
+Preferred insertion point:
+
+- `document_parse`, specifically the document-level `Pages._parse_document()` stage after raw pages are cleaned and layout candidates are available, but before margin, section, table, and paragraph grouping consume the page body.
+
+Insertion points to avoid:
+
+- `raw_page_cleanup`, because repeated candidates and reviewed fingerprints are not safely available before normalized line-level cleanup.
+- `after_textblock_grouping`, because header/footer text may already be merged into body `TextBlock` objects.
+- `docx_generation`, because it would hide pollution only at render time and would not repair body parsing, grouping, sections, or tables.
+
+### Sample summary
+
+- Evaluated insertion points: 6.
+- Preferred insertion point: `document_parse`.
+- Possible insertion points: `before_page_parse`, `before_blocks_cleanup_or_grouping`.
+- Avoid insertion points: `raw_page_cleanup`, `after_textblock_grouping`, `docx_generation`.
+- Dry-run candidates: 9.
+- Approved candidates: 4.
+- Blocked candidates: 5.
+- Expected sample removal count: 48.
+- Body-region removed count: 0.
+- Estimator paragraph groups: 79.
+- Production-observed body `TextBlock` groups: 52.
+- Absolute group-count delta: 27.
+- Estimator/production ratio: 1.519.
+- Remaining warning: `paragraph_grouping_mismatch_remaining`.
+
+### Main risks
+
+- The preferred insertion point still needs a strict opt-in dry-run/apply split before any mutation is attempted.
+- Remaining paragraph grouping mismatch means Phase 2K must stay report-only or local-only.
+- Filtering before cleanup is too early because raw blocks are not normalized.
+- Filtering after `TextBlock` grouping is too late because body pollution may already affect paragraphs.
+- DOCX-generation-only filtering is incomplete because semantic body structure remains polluted.
+- Table detection and image/shape handling must remain protected from any future filtering experiment.
+
+### Tests added
+
+- Insertion point analysis includes all candidate stages.
+- Each stage includes risk, complexity, and recommendation fields.
+- Document-level stage can be marked preferred when reviewed filtering preserves body content.
+- DOCX-generation-only stage is marked risky/incomplete.
+- Post-`TextBlock` filtering is marked risky when header/footer may already merge into body text blocks.
+- Missing reports or metrics are reported clearly.
+- Input reports are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 87 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 87 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2K recommendation
+
+Phase 2K is safe to attempt only as an internal, opt-in, report-only or local-only simulation at the `document_parse` insertion point. Do not connect filtering to default conversion, public CLI, production DOCX generation, or production paragraph merging yet.
