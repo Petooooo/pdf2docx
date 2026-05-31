@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_indentation_rule_comparison_report = LayoutAnalyzer.build_indentation_rule_comparison_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
 build_paragraph_mismatch_analysis_report = LayoutAnalyzer.build_paragraph_mismatch_analysis_report
 build_paragraph_production_comparison_report = LayoutAnalyzer.build_paragraph_production_comparison_report
@@ -1710,6 +1711,140 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(analysis['summary']['available'])
         self.assertEqual(analysis['pages'], [])
 
+    def test_indentation_rule_comparison_marks_small_indent_as_mergeable(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(
+                page_index=0,
+                left_delta=12.0,
+                previous_sentence_end=False,
+                width_similar=True,
+                previous_width_ratio=0.95,
+                previous_right_gap_ratio=0.02),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(
+            comparison['summary']['total_indentation_split_boundaries'], 1)
+        self.assertEqual(
+            comparison['boundaries'][0]['recommendation'],
+            'estimator_should_merge')
+        self.assertEqual(
+            comparison['boundaries'][0]['production_like_expected_behavior'],
+            'keep_together')
+
+    def test_indentation_rule_comparison_marks_clear_new_paragraph_as_split(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(
+                page_index=0,
+                left_delta=40.0,
+                previous_sentence_end=True,
+                width_similar=False,
+                previous_width_ratio=0.1,
+                previous_right_gap_ratio=0.9),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(
+            comparison['boundaries'][0]['recommendation'],
+            'estimator_should_split')
+        self.assertEqual(
+            comparison['summary']['estimator_should_split_count'], 1)
+
+    def test_indentation_rule_comparison_keeps_heading_list_boundary_split(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(
+                page_index=0,
+                left_delta=35.0,
+                previous_sentence_end=False,
+                width_similar=True,
+                previous_width_ratio=0.95,
+                previous_right_gap_ratio=0.01,
+                extra_reasons=['list_marker'],
+                current_list_marker=True),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(
+            comparison['boundaries'][0]['production_like_expected_behavior'],
+            'treat_as_heading_list_table_boundary')
+        self.assertEqual(
+            comparison['boundaries'][0]['recommendation'],
+            'estimator_should_split')
+
+    def test_indentation_rule_comparison_reports_missing_metadata(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(
+                page_index=0,
+                left_delta=0.0,
+                previous_sentence_end=False,
+                width_similar=False,
+                previous_width_ratio=0.0,
+                previous_right_gap_ratio=0.0,
+                insufficient_metadata=True),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(
+            comparison['boundaries'][0]['recommendation'],
+            'needs_more_metadata')
+        self.assertEqual(
+            comparison['summary']['needs_more_metadata_count'], 1)
+
+    def test_indentation_rule_comparison_produces_summary_counts(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(0, left_delta=12.0, previous_sentence_end=False, width_similar=True),
+            _indentation_boundary(0, left_delta=40.0, previous_sentence_end=True, previous_width_ratio=0.1, previous_right_gap_ratio=0.9),
+            _indentation_boundary(1, left_delta=35.0, previous_sentence_end=False, extra_reasons=['heading_like'], current_heading_like=True),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(
+            comparison['summary']['total_indentation_split_boundaries'], 3)
+        self.assertEqual(
+            comparison['summary']['estimator_should_merge_count'], 1)
+        self.assertEqual(
+            comparison['summary']['estimator_should_split_count'], 2)
+        self.assertEqual(comparison['pages'][0]['page_number'], 1)
+
+    def test_indentation_rule_comparison_does_not_mutate_inputs(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(0, left_delta=12.0, previous_sentence_end=False, width_similar=True),
+        ])
+        before = json.loads(json.dumps(report))
+
+        build_indentation_rule_comparison_report(
+            report,
+            enabled=True)
+
+        self.assertEqual(report, before)
+
+    def test_indentation_rule_comparison_disabled_mode_is_clear(self):
+        report = _estimator_report_for_indentation([
+            _indentation_boundary(0, left_delta=12.0, previous_sentence_end=False, width_similar=True),
+        ])
+
+        comparison = build_indentation_rule_comparison_report(report)
+
+        self.assertFalse(comparison['enabled'])
+        self.assertEqual(
+            comparison['summary']['total_indentation_split_boundaries'], 0)
+        self.assertEqual(comparison['boundaries'], [])
+
 
 def _page(page_index, blocks):
     return {
@@ -1814,6 +1949,88 @@ def _estimator_page_for_mismatch(page_index, group_count, body_blocks, split_rea
             }
             for index, reason in enumerate(split_reasons)
         ],
+    }
+
+
+def _estimator_report_for_indentation(boundaries):
+    pages = {}
+    for boundary in boundaries:
+        page_index = boundary['page_index']
+        pages.setdefault(page_index, {
+            'page_index': page_index,
+            'page_number': page_index + 1,
+            'estimated_paragraph_group_count': 1,
+            'body_block_count_after_filtering': 2,
+            'average_blocks_per_estimated_paragraph': 2.0,
+            'suspicious_single_line_paragraph_count': 0,
+            'suspicious_short_fragment_count': 0,
+            'estimated_paragraph_groups': [],
+            'split_boundaries': [],
+        })
+        pages[page_index]['split_boundaries'].append(boundary)
+
+    return {
+        'enabled': True,
+        'summary': {
+            'estimated_paragraph_group_count': len(pages),
+            'body_block_count_after_filtering': len(boundaries) * 2,
+            'average_blocks_per_estimated_paragraph': 2.0,
+            'suspicious_single_line_paragraph_count': 0,
+            'suspicious_short_fragment_count': 0,
+            'one_line_group_ratio': 0.0,
+            'short_fragment_ratio': 0.0,
+        },
+        'pages': list(pages.values()),
+        'diagnostics': {},
+    }
+
+
+def _indentation_boundary(
+        page_index,
+        left_delta=24.0,
+        previous_sentence_end=False,
+        width_similar=True,
+        previous_width_ratio=0.95,
+        previous_right_gap_ratio=0.02,
+        extra_reasons=None,
+        current_heading_like=False,
+        current_list_marker=False,
+        insufficient_metadata=False):
+    reasons = ['indentation_change']
+    reasons.extend(extra_reasons or [])
+    return {
+        'page_index': page_index,
+        'page_number': page_index + 1,
+        'boundary_index': 0,
+        'previous_line_index': 0,
+        'next_line_index': 1,
+        'previous_block_indexes': [0],
+        'next_block_indexes': [1],
+        'previous_bbox': [50.0, 300.0, 520.0, 320.0],
+        'next_bbox': [50.0 + left_delta, 326.0, 520.0, 346.0],
+        'previous_left': 50.0,
+        'previous_right': 520.0,
+        'next_left': 50.0 + left_delta,
+        'next_right': 520.0,
+        'reasons': reasons,
+        'signals': {
+            'left_delta': left_delta,
+            'right_delta': 0.0,
+            'width_delta_ratio': 0.02 if width_similar else 0.4,
+            'width_similar': width_similar,
+            'previous_sentence_end': previous_sentence_end,
+            'previous_hyphenated': False,
+            'current_heading_like': current_heading_like,
+            'current_list_marker': current_list_marker,
+            'style_change': False,
+            'significant_style_change': False,
+            'previous_width_ratio': previous_width_ratio,
+            'previous_right_gap_ratio': previous_right_gap_ratio,
+            'gap_ratio': 0.3,
+            'insufficient_metadata': insufficient_metadata,
+        },
+        'previous_text_preview': 'Previous visual line',
+        'next_text_preview': 'Next visual line',
     }
 
 

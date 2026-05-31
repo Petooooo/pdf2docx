@@ -1140,3 +1140,116 @@ Result: confirmed local PDF/report/review/diagnostics/comparison/mismatch files,
 ### Phase 2H recommendation
 
 Phase 2H is safe to attempt only as another internal/report-only diagnostic phase. The next useful step is to inspect indentation-sensitive estimator split rules against production `Blocks._join_lines_vertically()` / `Lines.split_vertically_by_text()` behavior before any production integration is considered.
+
+## Phase 2H
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2H added an internal/report-only indentation rule comparison helper. It analyzes estimator paragraph boundaries caused by indentation changes and classifies how production-like grouping rules would likely treat those boundaries.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated for the sample analysis.
+
+### Production rule comparison
+
+The production grouping inspection showed:
+
+- `Blocks._join_lines_vertically()` primarily joins lines into text blocks based on table/image boundaries and vertical spacing. It does not treat indentation alone as a primary paragraph split.
+- `Blocks._split_text_block_vertically()` delegates text-block splitting to `Lines.split_vertically_by_text()`.
+- `Lines.split_vertically_by_text()` uses indentation/free-space as a new-paragraph signal only with stronger context, especially sentence-ending and free-space conditions.
+
+This explains the Phase 2G mismatch: the report-only estimator was more eager to split on indentation than the production grouping path.
+
+### Local indentation comparison report
+
+Generated ignored local-only file:
+
+```text
+local_reports/indentation-rule-comparison-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+The report was regenerated from `local_reports/input-layout-analysis-report.json` and `local_reports/header-footer-exclusion-review.md` using an inline `.venv/bin/python` script. The script rebuilt the reviewed filtering diff, paragraph integrity report, paragraph reconstruction estimator, and indentation comparison report in memory, then wrote only the ignored local report.
+
+### Sample summary
+
+- Total indentation-sensitive boundaries: 67.
+- `estimator_should_merge`: 46.
+- `estimator_should_split`: 21.
+- `needs_more_metadata`: 0.
+- `production_behavior_unclear`: 0.
+
+Production-like behavior counts:
+
+- `keep_together`: 46.
+- `split`: 13.
+- `treat_as_heading_list_table_boundary`: 8.
+
+Most common production keep reason:
+
+- `no_sentence_end_free_space_signal`: 46.
+
+Pages with the most indentation-sensitive boundaries:
+
+- Page 4: 10 total, 7 merge recommendations, 3 split recommendations.
+- Page 5: 9 total, 5 merge recommendations, 4 split recommendations.
+- Page 6: 9 total, 5 merge recommendations, 4 split recommendations.
+- Page 3: 7 total, 5 merge recommendations, 2 split recommendations.
+- Page 8: 7 total, 6 merge recommendations, 1 split recommendation.
+
+The result supports the Phase 2G finding: the mismatch is mostly estimator over-splitting by indentation, not clear production over-merging.
+
+### Tests added
+
+- Small indentation deltas with strong continuation signals are classified as `estimator_should_merge`.
+- Clear new-paragraph indentation/free-space signals are classified as `estimator_should_split`.
+- Heading/list/table-like boundaries are not forced to merge.
+- Missing metadata is reported clearly.
+- Summary counts are produced.
+- Input reports and page summaries are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 74 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 74 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2I recommendation
+
+Phase 2I is safe to attempt only as another internal/report-only refinement phase. The next useful step is to tune estimator diagnostics around indentation and sentence/free-space signals before any production body filtering, production paragraph merging, or DOCX integration is attempted.

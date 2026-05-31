@@ -1000,6 +1000,74 @@ def build_paragraph_mismatch_analysis_report(
     }
 
 
+def build_indentation_rule_comparison_report(
+        estimator_report: dict = None,
+        enabled: bool = False,
+        new_paragraph_free_space_ratio: float = 0.85,
+        small_indent_tolerance: float = 24.0,
+        page_limit: int = 8) -> dict:
+    '''Compare estimator indentation splits with production-like split rules.'''
+    estimator_report = estimator_report or {}
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'indentation_rule_comparison_report_only',
+            'summary': {
+                'total_indentation_split_boundaries': 0,
+                'estimator_should_merge_count': 0,
+                'estimator_should_split_count': 0,
+                'needs_more_metadata_count': 0,
+                'production_behavior_unclear_count': 0,
+            },
+            'pages': [],
+            'boundaries': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2i': False,
+                'reason': 'Indentation rule comparison is disabled; no integration assumptions were evaluated.',
+            },
+        }
+
+    boundaries = []
+    for page in estimator_report.get('pages', []) or []:
+        for boundary in page.get('split_boundaries', []) or []:
+            if 'indentation_change' not in (boundary.get('reasons', []) or []):
+                continue
+            boundaries.append(_indentation_boundary_comparison(
+                page,
+                boundary,
+                new_paragraph_free_space_ratio,
+                small_indent_tolerance))
+
+    recommendation_counts = Counter(
+        boundary['recommendation']
+        for boundary in boundaries)
+    keep_reasons = Counter(
+        boundary.get('production_keep_reason', '')
+        for boundary in boundaries
+        if boundary.get('production_keep_reason'))
+    pages = _indentation_pages_summary(boundaries, page_limit)
+    return {
+        'enabled': True,
+        'policy': 'indentation_rule_comparison_report_only',
+        'summary': {
+            'total_indentation_split_boundaries': len(boundaries),
+            'estimator_should_merge_count': recommendation_counts.get('estimator_should_merge', 0),
+            'estimator_should_split_count': recommendation_counts.get('estimator_should_split', 0),
+            'needs_more_metadata_count': recommendation_counts.get('needs_more_metadata', 0),
+            'production_behavior_unclear_count': recommendation_counts.get('production_behavior_unclear', 0),
+            'most_common_production_keep_reasons': _counter_top_items(keep_reasons),
+        },
+        'pages': pages,
+        'boundaries': boundaries,
+        'warnings': [],
+        'recommendation': {
+            'safe_to_attempt_phase_2i': False,
+            'reason': _indentation_rule_recommendation(recommendation_counts),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -2041,6 +2109,12 @@ def _paragraph_split_boundary(
         'next_line_index': current.get('line_index'),
         'previous_block_indexes': list(previous.get('block_indexes', []) or []),
         'next_block_indexes': list(current.get('block_indexes', []) or []),
+        'previous_bbox': list(previous.get('bbox', []) or []),
+        'next_bbox': list(current.get('bbox', []) or []),
+        'previous_left': _bbox_value(previous.get('bbox'), 0),
+        'previous_right': _bbox_value(previous.get('bbox'), 2),
+        'next_left': _bbox_value(current.get('bbox'), 0),
+        'next_right': _bbox_value(current.get('bbox'), 2),
         'reasons': list(reasons or []),
         'signals': dict(signals or {}),
         'previous_text_preview': _preview_text(previous, max_length=100),
@@ -2554,6 +2628,185 @@ def _mismatch_analysis_recommendation(dominant_cause: str, warnings: list) -> st
     if dominant_cause in {'counts_aligned'}:
         return 'Counts align in this report, but keep the next phase internal before integration.'
     return f'Dominant mismatch cause is {dominant_cause}; keep Phase 2H diagnostic/report-only.'
+
+
+def _indentation_boundary_comparison(
+        page: dict,
+        boundary: dict,
+        new_paragraph_free_space_ratio: float,
+        small_indent_tolerance: float) -> dict:
+    signals = boundary.get('signals', {}) or {}
+    reasons = boundary.get('reasons', []) or []
+    classification = _classify_indentation_boundary(
+        signals,
+        reasons,
+        new_paragraph_free_space_ratio,
+        small_indent_tolerance)
+    previous_bbox = boundary.get('previous_bbox') or []
+    next_bbox = boundary.get('next_bbox') or []
+    return {
+        'page_index': boundary.get('page_index', page.get('page_index')),
+        'page_number': boundary.get('page_number', page.get('page_number')),
+        'boundary_index': boundary.get('boundary_index'),
+        'previous_text_preview': boundary.get('previous_text_preview', ''),
+        'next_text_preview': boundary.get('next_text_preview', ''),
+        'previous_bbox': previous_bbox,
+        'next_bbox': next_bbox,
+        'previous_left': boundary.get('previous_left', _bbox_value(previous_bbox, 0)),
+        'previous_right': boundary.get('previous_right', _bbox_value(previous_bbox, 2)),
+        'next_left': boundary.get('next_left', _bbox_value(next_bbox, 0)),
+        'next_right': boundary.get('next_right', _bbox_value(next_bbox, 2)),
+        'indentation_delta': signals.get('left_delta'),
+        'line_width_signal': {
+            'width_delta_ratio': signals.get('width_delta_ratio'),
+            'width_similar': signals.get('width_similar'),
+            'previous_width_ratio': signals.get('previous_width_ratio'),
+            'previous_right_gap_ratio': signals.get('previous_right_gap_ratio'),
+        },
+        'sentence_ending_signal': {
+            'previous_sentence_end': signals.get('previous_sentence_end'),
+            'previous_hyphenated': signals.get('previous_hyphenated'),
+        },
+        'style_signal': {
+            'style_change': signals.get('style_change'),
+            'significant_style_change': signals.get('significant_style_change'),
+        },
+        'estimator_split_reasons': list(reasons),
+        'production_like_expected_behavior': classification['production_like_expected_behavior'],
+        'recommendation': classification['recommendation'],
+        'production_keep_reason': classification.get('production_keep_reason', ''),
+        'reason': classification['reason'],
+    }
+
+
+def _classify_indentation_boundary(
+        signals: dict,
+        reasons: list,
+        new_paragraph_free_space_ratio: float,
+        small_indent_tolerance: float) -> dict:
+    if signals.get('insufficient_metadata'):
+        return _indentation_classification(
+            'requires_more_metadata',
+            'needs_more_metadata',
+            'Boundary is missing bbox or line-width metadata.')
+
+    heading_or_list = any(reason in reasons for reason in (
+        'heading_like',
+        'previous_heading_like',
+        'list_marker',
+        'previous_list_item'))
+    if heading_or_list:
+        return _indentation_classification(
+            'treat_as_heading_list_table_boundary',
+            'estimator_should_split',
+            'Heading/list-like signals should remain split in the report.')
+
+    left_delta = abs(float(signals.get('left_delta') or 0.0))
+    previous_sentence_end = bool(signals.get('previous_sentence_end'))
+    previous_hyphenated = bool(signals.get('previous_hyphenated'))
+    previous_width_ratio = float(signals.get('previous_width_ratio') or 0.0)
+    previous_right_gap_ratio = float(signals.get('previous_right_gap_ratio') or 0.0)
+    width_similar = bool(signals.get('width_similar'))
+    significant_style_change = bool(signals.get('significant_style_change'))
+    gap_ratio = float(signals.get('gap_ratio') or 0.0)
+
+    production_start_signal = (
+        previous_sentence_end and
+        previous_width_ratio > 0.0 and
+        (1.0 - previous_width_ratio) >= new_paragraph_free_space_ratio)
+    production_end_signal = (
+        previous_sentence_end and
+        previous_right_gap_ratio >= 0.12 and
+        previous_width_ratio <= 0.88)
+
+    if production_start_signal or production_end_signal:
+        return _indentation_classification(
+            'split',
+            'estimator_should_split',
+            'Production-like punctuation/free-space signal supports a paragraph boundary.')
+
+    if previous_hyphenated:
+        return _indentation_classification(
+            'keep_together',
+            'estimator_should_merge',
+            'Hyphenated line ending is continuation evidence.',
+            production_keep_reason='hyphenated_continuation')
+
+    if left_delta <= small_indent_tolerance and width_similar and not significant_style_change:
+        return _indentation_classification(
+            'keep_together',
+            'estimator_should_merge',
+            'Indentation delta is small and width/style signals look continuous.',
+            production_keep_reason='small_indent_with_consistent_width_style')
+
+    if not previous_sentence_end and gap_ratio <= 1.6 and not significant_style_change:
+        return _indentation_classification(
+            'keep_together',
+            'estimator_should_merge',
+            'Production splits indentation after sentence-ending/free-space signals, which are absent here.',
+            production_keep_reason='no_sentence_end_free_space_signal')
+
+    if significant_style_change or gap_ratio >= 2.4:
+        return _indentation_classification(
+            'split',
+            'estimator_should_split',
+            'Style or vertical-gap signal supports a real paragraph boundary.')
+
+    return _indentation_classification(
+        'requires_more_metadata',
+        'production_behavior_unclear',
+        'Indentation signal is ambiguous without richer production row metrics.')
+
+
+def _indentation_classification(
+        production_like_expected_behavior: str,
+        recommendation: str,
+        reason: str,
+        production_keep_reason: str = '') -> dict:
+    return {
+        'production_like_expected_behavior': production_like_expected_behavior,
+        'recommendation': recommendation,
+        'reason': reason,
+        'production_keep_reason': production_keep_reason,
+    }
+
+
+def _indentation_pages_summary(boundaries: list, page_limit: int) -> list:
+    by_page = defaultdict(list)
+    for boundary in boundaries:
+        by_page[boundary.get('page_index')].append(boundary)
+
+    pages = []
+    for page_index, page_boundaries in by_page.items():
+        recommendation_counts = Counter(
+            boundary.get('recommendation')
+            for boundary in page_boundaries)
+        pages.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'indentation_split_boundary_count': len(page_boundaries),
+            'estimator_should_merge_count': recommendation_counts.get('estimator_should_merge', 0),
+            'estimator_should_split_count': recommendation_counts.get('estimator_should_split', 0),
+            'needs_more_metadata_count': recommendation_counts.get('needs_more_metadata', 0),
+            'production_behavior_unclear_count': recommendation_counts.get('production_behavior_unclear', 0),
+        })
+
+    return sorted(
+        pages,
+        key=lambda item: (
+            -item['indentation_split_boundary_count'],
+            item['page_number']))[:page_limit]
+
+
+def _indentation_rule_recommendation(recommendation_counts: Counter) -> str:
+    merge_count = recommendation_counts.get('estimator_should_merge', 0)
+    unclear_count = recommendation_counts.get('production_behavior_unclear', 0)
+    metadata_count = recommendation_counts.get('needs_more_metadata', 0)
+    if merge_count:
+        return 'Several indentation splits look mergeable under production-like rules; keep Phase 2I report-only and tune estimator diagnostics first.'
+    if unclear_count or metadata_count:
+        return 'Some indentation splits remain unclear; collect richer line-width/row metadata before production integration.'
+    return 'Indentation splits look consistent in this report, but keep any next step internal before production integration.'
 
 
 def _empty_paragraph_grouping_diagnostics() -> dict:
