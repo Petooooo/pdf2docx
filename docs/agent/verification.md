@@ -378,3 +378,79 @@ Regenerated the ignored local report at `local_reports/input-layout-analysis-rep
 - Image placeholders are still layout-only signals and need image identity or placement analysis before semantic treatment.
 - Page-number/footer handling still needs section, first-page, odd/even, and margin modeling before DOCX header/footer generation.
 - Body filtering should remain blocked until a review command or fixture evaluation can compare dry-run candidates against expected retained body text.
+
+## Phase 1G
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 1G created a local-only review pack from the existing `header_footer_exclusion_dry_run` report. The review pack is intended for human approval before any future Phase 2A body filtering.
+
+No production conversion behavior changed. No PDF page content, body blocks, paragraphs, tables, images, shapes, DOCX output, public CLI behavior, or `Converter.convert()` behavior was modified.
+
+### Local review artifact
+
+Generated local-only file:
+
+```text
+local_reports/header-footer-exclusion-review.md
+```
+
+The file is ignored through `local_reports/` and must not be committed because it may contain short extracted PDF previews for review.
+
+Review pack contents:
+
+- candidate id / fingerprint
+- proposed role and action
+- region and affected pages
+- support count
+- confidence label and semantic confidence
+- positive and negative signals
+- reason summary
+- short local-only preview
+- review recommendation
+- manual decision fields: `approve_exclude`, `reject_exclude`, `unsure`
+
+### Review pack counts
+
+- Dry-run candidates included: 9.
+- Actions: 4 `would_exclude`, 5 `review`, 0 `keep`.
+- Review recommendations: 4 `safe_candidate`, 5 `needs_manual_review`, 0 `keep_body`.
+- Proposed roles: 1 `header`, 2 `footer`, 1 `page_number`, 2 `layout_placeholder`, 3 `review_only`.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 26 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 26 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed `local_samples/`, `local_reports/`, `.venv/`, generated caches, and the local review pack remain ignored. The only commit-intended file from Phase 1G is documentation under `docs/agent/`.
+
+### Recommendation for Phase 2A
+
+Phase 2A should not consume raw `would_exclude` labels directly. It should start from explicit review decisions in the local review pack, keep filtering opt-in, and include tests that prove default conversion output remains unchanged.
