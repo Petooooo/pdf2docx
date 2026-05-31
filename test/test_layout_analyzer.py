@@ -1236,7 +1236,7 @@ class TestLayoutAnalyzer(unittest.TestCase):
         report = build_layout_analysis_report([
             _page(0, [
                 _block('First paragraph line one', 50, 300, 520, 320),
-                _block('First paragraph line two.', 50, 326, 520, 346),
+                _block('First paragraph line two.', 50, 326, 250, 346),
                 _block('Indented new paragraph starts', 80, 352, 520, 372),
                 _block(
                     'Different style paragraph starts',
@@ -1270,6 +1270,99 @@ class TestLayoutAnalyzer(unittest.TestCase):
             for reason in boundary['reasons']
         ]
         self.assertIn('indentation_change', boundary_reasons)
+        self.assertIn('sentence_end_with_trailing_space', boundary_reasons)
+
+    def test_paragraph_reconstruction_ignores_weak_indentation_change(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('This visual line continues without punctuation', 50, 300, 520, 320),
+                _block('and this indented line is still continuation text', 80, 326, 520, 346),
+                _block('with one more aligned continuation line.', 80, 352, 520, 372),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        page = validation['pages'][0]
+        self.assertEqual(page['estimated_paragraph_group_count'], 1)
+        self.assertEqual(
+            page['ignored_split_boundaries'][0]['ignored_reasons'],
+            ['weak_indentation_change'])
+        self.assertEqual(
+            validation['summary']['ignored_split_reason_counts'],
+            {'weak_indentation_change': 1})
+
+    def test_paragraph_reconstruction_indentation_with_free_space_can_split(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('A short complete sentence.', 50, 300, 250, 320),
+                _block('Indented new paragraph starts after free space', 90, 326, 520, 346),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        split_reasons = validation['pages'][0]['split_boundaries'][0]['reasons']
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 2)
+        self.assertIn('indentation_change', split_reasons)
+        self.assertIn('sentence_end_with_trailing_space', split_reasons)
+
+    def test_paragraph_reconstruction_heading_like_indentation_still_splits(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Overview', 50, 300, 170, 320),
+                _block('Indented body starts below the heading.', 85, 326, 520, 346),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        split_reasons = validation['pages'][0]['split_boundaries'][0]['reasons']
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 2)
+        self.assertIn('previous_heading_like', split_reasons)
+        self.assertIn('indentation_change', split_reasons)
+
+    def test_paragraph_reconstruction_list_indentation_still_splits(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Introductory prose before a list', 50, 300, 520, 320),
+                _block('- Indented list item', 80, 326, 420, 346),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        split_reasons = validation['pages'][0]['split_boundaries'][0]['reasons']
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 2)
+        self.assertIn('list_marker', split_reasons)
+        self.assertIn('indentation_change', split_reasons)
+
+    def test_paragraph_reconstruction_weak_indent_relaxation_reduces_group_count(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('A continuing instruction line without a period', 50, 300, 520, 320),
+                _block('wrapped continuation line with indentation', 80, 326, 520, 346),
+                _block('another wrapped continuation line', 80, 352, 520, 372),
+                _block('final wrapped continuation line.', 80, 378, 520, 398),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 1)
+        self.assertEqual(
+            validation['diagnostics']['ignored_split_reason_counts'],
+            {'weak_indentation_change': 1})
 
     def test_paragraph_reconstruction_sentence_end_does_not_force_every_line_split(self):
         report = build_layout_analysis_report([

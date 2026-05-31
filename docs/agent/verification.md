@@ -1253,3 +1253,120 @@ Result: confirmed local PDF/report files, `.venv/`, and generated caches remain 
 ### Phase 2I recommendation
 
 Phase 2I is safe to attempt only as another internal/report-only refinement phase. The next useful step is to tune estimator diagnostics around indentation and sentence/free-space signals before any production body filtering, production paragraph merging, or DOCX integration is attempted.
+
+## Phase 2I
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2I tuned only the internal/report-only paragraph grouping estimator. Weak indentation changes no longer force paragraph splits unless supported by stronger production-like signals such as sentence-ending/free-space evidence, heading/list boundaries, large vertical gaps, or strong style changes.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated.
+
+### Local reports regenerated
+
+Regenerated ignored local-only files:
+
+```text
+local_reports/paragraph-grouping-diagnostics-report.md
+local_reports/paragraph-production-comparison-report.md
+local_reports/paragraph-mismatch-analysis-report.md
+local_reports/indentation-rule-comparison-report.md
+```
+
+The reports may contain short extracted previews and were not staged or committed. They were regenerated from `local_reports/input-layout-analysis-report.json`, `local_reports/header-footer-exclusion-review.md`, and an in-memory `Converter.parse()` production-observation pass.
+
+### Phase 2H to Phase 2I comparison
+
+Estimator and production comparison:
+
+- Phase 2H estimator paragraph groups: 125.
+- Phase 2I estimator paragraph groups: 79.
+- Production-observed body `TextBlock` groups: 52.
+- Phase 2H absolute delta: 73.
+- Phase 2I absolute delta: 27.
+- Phase 2H estimator/production ratio: 2.404.
+- Phase 2I estimator/production ratio: 1.519.
+
+Indentation split comparison:
+
+- Phase 2H indentation-sensitive boundaries: 67.
+- Phase 2I indentation-sensitive split boundaries: 22.
+- Phase 2H `estimator_should_merge`: 46.
+- Phase 2I `estimator_should_merge`: 0.
+- Phase 2H `estimator_should_split`: 21.
+- Phase 2I `estimator_should_split`: 22.
+- Phase 2I ignored weak indentation boundaries: 84.
+
+Fragmentation comparison:
+
+- Phase 2H suspicious single-line paragraph count: 36.
+- Phase 2I suspicious single-line paragraph count: 14.
+- Phase 2H suspicious short-fragment count: 16.
+- Phase 2I suspicious short-fragment count: 5.
+
+Remaining mismatch summary:
+
+- Remaining absolute delta: 27.
+- Remaining group-count delta ratio: 0.519.
+- Worst mismatch pages: 7, 4, 10, 3, and 5.
+- Dominant mismatch cause remains `estimator_over_split_by_indentation`, but it is reduced from 9 pages to 6 pages.
+- Remaining warning count across estimator/comparison/mismatch reports: 3.
+
+The estimator is now substantially closer to production-observed grouping, but the mismatch is still large enough that production integration should remain gated.
+
+### Tests added or updated
+
+- Indentation-only changes no longer force a split when continuation signals are strong.
+- Indentation with sentence-ending/free-space evidence can still split.
+- Heading-like indentation boundaries still split.
+- List/bullet-like indentation boundaries still split.
+- Large vertical gaps and strong style changes still split.
+- Diagnostics record ignored weak indentation evidence.
+- Weak indentation relaxation reduces estimated group fragmentation.
+- Input reports and page summaries are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 79 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 79 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2J recommendation
+
+Phase 2J is safe to attempt only as another internal/report-only validation phase. The estimator is closer to production grouping, but the remaining delta and warnings mean production paragraph merging, production body filtering, and DOCX integration should stay disconnected.

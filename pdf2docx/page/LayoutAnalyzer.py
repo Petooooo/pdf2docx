@@ -702,6 +702,8 @@ def build_paragraph_reconstruction_validation_report(
                 'cross_page_continuation_warning_count': 0,
                 'warning_count': 0,
                 'line_level_body_blocks_available': body_before_count > 0,
+                'ignored_split_boundary_count': 0,
+                'ignored_split_reason_counts': {},
             },
             'pages': [],
             'filtered_pages': original_pages,
@@ -789,6 +791,8 @@ def build_paragraph_reconstruction_validation_report(
             'groups_by_block_count': diagnostics['groups_by_block_count'],
             'one_line_group_ratio': diagnostics['one_line_group_ratio'],
             'short_fragment_ratio': diagnostics['short_fragment_ratio'],
+            'ignored_split_boundary_count': diagnostics['ignored_split_boundary_count'],
+            'ignored_split_reason_counts': diagnostics['ignored_split_reason_counts'],
         },
         'pages': pages_report,
         'filtered_pages': filtered_pages,
@@ -1750,7 +1754,7 @@ def _paragraph_reconstruction_page_report(
     page_index = filtered_page.get('page_index')
     original_body_blocks = _body_blocks(original_page)
     filtered_body_blocks = _body_blocks(filtered_page)
-    groups, gap_warnings, split_boundaries = _estimate_paragraph_groups(
+    groups, gap_warnings, split_boundaries, ignored_split_boundaries = _estimate_paragraph_groups(
         filtered_page,
         filtered_body_blocks,
         max_line_gap_ratio,
@@ -1822,6 +1826,7 @@ def _paragraph_reconstruction_page_report(
         'suspicious_short_fragment_count': len(suspicious_short_fragments),
         'estimated_paragraph_groups': groups,
         'split_boundaries': split_boundaries,
+        'ignored_split_boundaries': ignored_split_boundaries,
         'warnings': warnings,
     }
 
@@ -1836,15 +1841,16 @@ def _estimate_paragraph_groups(
     groups = []
     warnings = []
     split_boundaries = []
+    ignored_split_boundaries = []
     if not body_blocks:
-        return groups, warnings, split_boundaries
+        return groups, warnings, split_boundaries, ignored_split_boundaries
 
     sorted_blocks = sorted(
         [dict(block) for block in body_blocks],
         key=lambda block: block.get('block_index', 0))
     line_units = _body_line_units(sorted_blocks)
     if not line_units:
-        return groups, warnings, split_boundaries
+        return groups, warnings, split_boundaries, ignored_split_boundaries
 
     metrics = _paragraph_line_metrics(sorted_blocks)
     current_units = [line_units[0]]
@@ -1878,6 +1884,14 @@ def _estimate_paragraph_groups(
                 boundary_signals))
             current_units = [unit]
             break_before_reasons = break_reasons
+        elif boundary_signals.get('ignored_split_reasons'):
+            ignored_split_boundaries.append(_paragraph_ignored_split_boundary(
+                page,
+                len(ignored_split_boundaries),
+                previous,
+                unit,
+                boundary_signals))
+            current_units.append(unit)
         else:
             current_units.append(unit)
 
@@ -1887,7 +1901,7 @@ def _estimate_paragraph_groups(
         current_units,
         break_before_reasons,
         short_fragment_length))
-    return groups, warnings, split_boundaries
+    return groups, warnings, split_boundaries, ignored_split_boundaries
 
 
 def _body_line_units(blocks: list) -> list:
@@ -1981,8 +1995,15 @@ def _paragraph_break_reasons(
     body_width = max(float(metrics.get('max_right', 0.0)) - float(metrics.get('min_left', 0.0)), 1.0)
     right_gap_ratio = max(0.0, float(metrics.get('max_right', 0.0)) - float(previous_bbox[2])) / body_width
     previous_width_ratio = previous_width / body_width
+    current_width_ratio = current_width / body_width
+    current_left_gap_ratio = max(0.0, float(current_bbox[0]) - float(metrics.get('min_left', 0.0))) / body_width
     width_delta_ratio = abs(previous_width - current_width) / max(previous_width, current_width, 1.0)
     significant_style_change = _significant_style_change(previous, current)
+    sentence_end_with_trailing_space = (
+        previous_sentence_end and
+        right_gap_ratio >= 0.12 and
+        previous_width_ratio <= 0.88 and
+        not previous_hyphenated)
 
     signals = {
         'vertical_gap': round(vertical_gap, 2),
@@ -2001,7 +2022,11 @@ def _paragraph_break_reasons(
         'style_change': previous.get('style') != current.get('style'),
         'significant_style_change': significant_style_change,
         'previous_width_ratio': round(previous_width_ratio, 3),
+        'current_width_ratio': round(current_width_ratio, 3),
         'previous_right_gap_ratio': round(right_gap_ratio, 3),
+        'current_left_gap_ratio': round(current_left_gap_ratio, 3),
+        'sentence_end_with_trailing_space': sentence_end_with_trailing_space,
+        'ignored_split_reasons': [],
         'insufficient_metadata': insufficient_metadata,
     }
 
@@ -2030,20 +2055,60 @@ def _paragraph_break_reasons(
     if significant_style_change and not previous_hyphenated:
         reasons.append('style_change')
 
-    if abs(left_delta) > indent_tolerance and not previous_hyphenated:
-        if left_delta > 0.0 or previous_sentence_end or gap_ratio > max_line_gap_ratio:
-            reasons.append('indentation_change')
-
-    if (previous_sentence_end and
-            right_gap_ratio >= 0.12 and
-            previous_width_ratio <= 0.88 and
-            not previous_hyphenated):
+    if sentence_end_with_trailing_space:
         reasons.append('sentence_end_with_trailing_space')
+
+    indentation_candidate = abs(left_delta) > indent_tolerance and not previous_hyphenated
+    if indentation_candidate:
+        if _indentation_supported_by_strong_break_signal(
+                left_delta,
+                gap_ratio,
+                max_line_gap_ratio,
+                previous_sentence_end,
+                sentence_end_with_trailing_space,
+                current_left_gap_ratio,
+                current_width_ratio,
+                reasons):
+            reasons.append('indentation_change')
+        else:
+            signals['ignored_split_reasons'].append('weak_indentation_change')
 
     if reasons:
         warning = None
 
     return sorted(set(reasons)), warning, signals
+
+
+def _indentation_supported_by_strong_break_signal(
+        left_delta: float,
+        gap_ratio: float,
+        max_line_gap_ratio: float,
+        previous_sentence_end: bool,
+        sentence_end_with_trailing_space: bool,
+        current_left_gap_ratio: float,
+        current_width_ratio: float,
+        reasons: list) -> bool:
+    if any(reason in reasons for reason in (
+            'heading_like',
+            'previous_heading_like',
+            'list_marker',
+            'previous_list_item',
+            'large_vertical_gap',
+            'style_change')):
+        return True
+
+    if sentence_end_with_trailing_space:
+        return True
+
+    clear_first_line_indent = (
+        previous_sentence_end and
+        left_delta > 0.0 and
+        current_left_gap_ratio >= 0.08 and
+        current_width_ratio <= 0.92)
+    if clear_first_line_indent:
+        return True
+
+    return previous_sentence_end and gap_ratio > max_line_gap_ratio
 
 
 def _estimated_paragraph_group(
@@ -2116,6 +2181,30 @@ def _paragraph_split_boundary(
         'next_left': _bbox_value(current.get('bbox'), 0),
         'next_right': _bbox_value(current.get('bbox'), 2),
         'reasons': list(reasons or []),
+        'signals': dict(signals or {}),
+        'previous_text_preview': _preview_text(previous, max_length=100),
+        'next_text_preview': _preview_text(current, max_length=100),
+    }
+
+
+def _paragraph_ignored_split_boundary(
+        page: dict,
+        boundary_index: int,
+        previous: dict,
+        current: dict,
+        signals: dict) -> dict:
+    page_index = page.get('page_index')
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'boundary_index': boundary_index,
+        'previous_line_index': previous.get('line_index'),
+        'next_line_index': current.get('line_index'),
+        'previous_block_indexes': list(previous.get('block_indexes', []) or []),
+        'next_block_indexes': list(current.get('block_indexes', []) or []),
+        'previous_bbox': list(previous.get('bbox', []) or []),
+        'next_bbox': list(current.get('bbox', []) or []),
+        'ignored_reasons': list(signals.get('ignored_split_reasons', []) or []),
         'signals': dict(signals or {}),
         'previous_text_preview': _preview_text(previous, max_length=100),
         'next_text_preview': _preview_text(current, max_length=100),
@@ -2817,6 +2906,9 @@ def _empty_paragraph_grouping_diagnostics() -> dict:
         'short_fragment_ratio': 0.0,
         'split_reason_counts': {},
         'most_common_split_reasons': [],
+        'ignored_split_reason_counts': {},
+        'most_common_ignored_split_reasons': [],
+        'ignored_split_boundary_count': 0,
         'pages_with_worst_fragmentation': [],
         'warning_counts': {},
         'split_boundary_count': 0,
@@ -2837,10 +2929,19 @@ def _paragraph_grouping_diagnostics(
         for page in pages_report or []
         for boundary in page.get('split_boundaries', []) or []
     ]
+    ignored_split_boundaries = [
+        boundary
+        for page in pages_report or []
+        for boundary in page.get('ignored_split_boundaries', []) or []
+    ]
     split_reason_counts = Counter()
     for boundary in split_boundaries:
         for reason in boundary.get('reasons', []) or []:
             split_reason_counts[reason] += 1
+    ignored_reason_counts = Counter()
+    for boundary in ignored_split_boundaries:
+        for reason in boundary.get('ignored_reasons', []) or []:
+            ignored_reason_counts[reason] += 1
     if possible_continuations:
         split_reason_counts['page_boundary'] += len(possible_continuations)
 
@@ -2860,6 +2961,9 @@ def _paragraph_grouping_diagnostics(
         'short_fragment_ratio': _safe_ratio(short_fragment_count, len(groups)),
         'split_reason_counts': dict(sorted(split_reason_counts.items())),
         'most_common_split_reasons': _counter_top_items(split_reason_counts),
+        'ignored_split_reason_counts': dict(sorted(ignored_reason_counts.items())),
+        'most_common_ignored_split_reasons': _counter_top_items(ignored_reason_counts),
+        'ignored_split_boundary_count': len(ignored_split_boundaries),
         'pages_with_worst_fragmentation': _pages_with_worst_fragmentation(pages_report),
         'warning_counts': dict(sorted(warning_counts.items())),
         'split_boundary_count': len(split_boundaries),
