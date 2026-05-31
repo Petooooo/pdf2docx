@@ -1211,6 +1211,24 @@ class TestLayoutAnalyzer(unittest.TestCase):
             validation['pages'][0]['estimated_paragraph_groups'][0]['block_count'], 3)
         self.assertEqual(validation['summary']['warning_count'], 0)
 
+    def test_paragraph_reconstruction_groups_same_row_fragments_as_one_line(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Click on', 50, 300, 110, 320),
+                _block('Header', 116, 300, 170, 320, style={'font': 'Arial', 'size': 11.0}),
+                _block('and then choose Edit.', 50, 326, 520, 346),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        group = validation['pages'][0]['estimated_paragraph_groups'][0]
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 1)
+        self.assertEqual(group['line_count'], 2)
+        self.assertEqual(group['block_count'], 3)
+
     def test_paragraph_reconstruction_detects_hard_break_signals(self):
         report = build_layout_analysis_report([
             _page(0, [
@@ -1239,9 +1257,96 @@ class TestLayoutAnalyzer(unittest.TestCase):
             for reason in group['break_before_reasons']
         ]
         self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 4)
-        self.assertIn('left_boundary_change', break_reasons)
+        self.assertIn('indentation_change', break_reasons)
         self.assertIn('style_change', break_reasons)
         self.assertIn('large_vertical_gap', break_reasons)
+        self.assertIn('split_boundaries', validation['pages'][0])
+        boundary_reasons = [
+            reason
+            for boundary in validation['pages'][0]['split_boundaries']
+            for reason in boundary['reasons']
+        ]
+        self.assertIn('indentation_change', boundary_reasons)
+
+    def test_paragraph_reconstruction_sentence_end_does_not_force_every_line_split(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('This complete sentence fills the line.', 50, 300, 550, 320),
+                _block('The next visual line can still belong with it', 50, 326, 550, 346),
+                _block('Short sentence.', 50, 352, 250, 372),
+                _block('A new paragraph starts after visible free space', 50, 378, 550, 398),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 2)
+        split_reasons = [
+            reason
+            for boundary in validation['pages'][0]['split_boundaries']
+            for reason in boundary['reasons']
+        ]
+        self.assertIn('sentence_end_with_trailing_space', split_reasons)
+
+    def test_paragraph_reconstruction_splits_heading_like_short_lines(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Overview', 50, 300, 180, 320),
+                _block('This body paragraph starts below the heading', 50, 326, 550, 346),
+                _block('and continues on a second visual line.', 50, 352, 550, 372),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 2)
+        split_reasons = [
+            reason
+            for boundary in validation['pages'][0]['split_boundaries']
+            for reason in boundary['reasons']
+        ]
+        self.assertIn('previous_heading_like', split_reasons)
+
+    def test_paragraph_reconstruction_keeps_list_items_separate_from_prose(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Introductory prose before a list.', 50, 300, 550, 320),
+                _block('- First list item', 70, 326, 400, 346),
+                _block('Closing prose after the list item', 50, 352, 550, 372),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 3)
+        split_reasons = [
+            reason
+            for boundary in validation['pages'][0]['split_boundaries']
+            for reason in boundary['reasons']
+        ]
+        self.assertIn('list_marker', split_reasons)
+        self.assertIn('previous_list_item', split_reasons)
+
+    def test_paragraph_reconstruction_hyphenated_line_ending_is_continuation_signal(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('This line ends with a hyphen-', 50, 300, 350, 320),
+                _block('ated word despite indentation change.', 80, 326, 550, 346),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 1)
+        self.assertEqual(validation['pages'][0]['split_boundaries'], [])
 
     def test_paragraph_reconstruction_warns_on_excessive_one_line_fragments(self):
         report = build_layout_analysis_report([
@@ -1264,6 +1369,13 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn(
             'excessive_one_line_fragmentation',
             {warning['type'] for warning in validation['warnings']})
+        self.assertGreater(
+            validation['diagnostics']['one_line_group_ratio'],
+            0.0)
+        self.assertEqual(
+            validation['diagnostics']['pages_with_worst_fragmentation'][0]['page_number'],
+            1)
+        self.assertIn('1', validation['diagnostics']['groups_by_line_count'])
 
     def test_paragraph_reconstruction_reports_cross_page_continuation_without_merge(self):
         report = build_layout_analysis_report([

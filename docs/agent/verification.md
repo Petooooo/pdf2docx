@@ -821,3 +821,108 @@ Result: confirmed local PDF/report/review/diff/integrity/reconstruction files, `
 ### Phase 2E recommendation
 
 Phase 2E is not ready for production parse-path integration. It is safe to attempt only as another internal/report-only phase focused on improving paragraph grouping signals and validation metrics, not production body mutation or DOCX paragraph merging yet.
+
+## Phase 2E
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2E improved the internal/report-only paragraph grouping estimator and diagnostics after reviewed header/footer filtering. The estimator now groups same-row text fragments into report-only line units before estimating paragraph groups, then records split-boundary reasons and document-level fragmentation diagnostics.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+
+### Production comparison
+
+The production layout path remains unchanged. Phase 2E only made the report estimator closer to the existing production grouping ideas:
+
+- Production `Blocks._join_lines_vertically()` first groups nearby physical lines with compatible spacing.
+- Production `Lines.split_vertically_by_text()` then uses sentence endings, line width/free-space, and new-paragraph indentation to split paragraph-like groups.
+- Phase 2E mirrors those concepts only in simplified JSON summary analysis by adding same-row fragment grouping, indentation/width/edge diagnostics, list/heading signals, sentence-end free-space signals, and hyphenated-continuation handling.
+
+### Local diagnostics report
+
+Generated ignored local-only file:
+
+```text
+local_reports/paragraph-grouping-diagnostics-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+### Phase 2D vs Phase 2E metrics
+
+- Body blocks before/after filtering: 520 / 520.
+- Estimated paragraph groups: 388 -> 125.
+- Average blocks per estimated paragraph: 1.34 -> 4.16.
+- Suspicious single-line paragraph count: 153 -> 36.
+- Suspicious short-fragment count: 151 -> 16.
+- One-line group ratio: 0.472.
+- Short-fragment ratio: 0.128.
+- Warning count: 1 report-only suspicious vertical gap.
+
+### Most common split reasons
+
+- `indentation_change`: 67.
+- `style_change`: 26.
+- `sentence_end_with_trailing_space`: 16.
+- `previous_heading_like`: 10.
+- `list_marker`: 9.
+- `large_vertical_gap`: 8.
+- `previous_list_item`: 8.
+- `heading_like`: 2.
+
+### Tests added
+
+- Same-row fragments are grouped as one report-only line unit.
+- Consistent multi-line body text is grouped into one estimated paragraph.
+- Sentence-ending punctuation can end a paragraph only with visible trailing-space signals.
+- Heading-like short lines split from body prose.
+- Bullet/list-like lines stay separate from surrounding prose.
+- Hyphenated line endings act as continuation evidence.
+- Split reasons are recorded on paragraph boundaries.
+- Fragmentation diagnostics report one-line ratio and worst pages.
+- Original summaries are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 56 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 56 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diff/integrity/reconstruction/diagnostics files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2F recommendation
+
+Phase 2F is safe to attempt only as another internal/report-only phase. The estimator is much less fragmented than Phase 2D, but the remaining warning and split-reason distribution should be reviewed before any production paragraph merge or DOCX integration is considered.

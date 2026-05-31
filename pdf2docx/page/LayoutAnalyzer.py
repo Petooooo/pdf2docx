@@ -8,7 +8,7 @@ header/footer analysis incrementally without changing conversion output.
 '''
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 PAGE_NUMBER_PLACEHOLDER = '<PAGE_NUMBER>'
@@ -54,6 +54,8 @@ _NUMBERED_HEADING_RE = re.compile(r'^\d+(?:\.\d+)*\.?\s+\S+')
 _SECTION_HEADING_RE = re.compile(
     r'^(?:chapter|section|part|appendix|article)\b',
     re.IGNORECASE)
+_LIST_MARKER_RE = re.compile(
+    r'^\s*(?:[-*+]|(?:\d+|[A-Za-z])[.)])\s+\S+')
 
 
 def normalize_text(text) -> str:
@@ -704,6 +706,7 @@ def build_paragraph_reconstruction_validation_report(
             'pages': [],
             'filtered_pages': original_pages,
             'possible_cross_page_continuation_candidates': [],
+            'diagnostics': _empty_paragraph_grouping_diagnostics(),
             'warnings': [],
             'recommendation': {
                 'safe_to_attempt_phase_2e': False,
@@ -761,6 +764,11 @@ def build_paragraph_reconstruction_validation_report(
             'average_blocks_per_estimated_paragraph': average_blocks_per_group,
         })
 
+    diagnostics = _paragraph_grouping_diagnostics(
+        pages_report,
+        warnings,
+        possible_continuations)
+
     warning_count = len(warnings)
     safe = warning_count == 0 and body_after_count > 0
     return {
@@ -777,10 +785,15 @@ def build_paragraph_reconstruction_validation_report(
             'cross_page_continuation_warning_count': len(continuation_warnings),
             'warning_count': warning_count,
             'line_level_body_blocks_available': body_after_count > 0,
+            'groups_by_line_count': diagnostics['groups_by_line_count'],
+            'groups_by_block_count': diagnostics['groups_by_block_count'],
+            'one_line_group_ratio': diagnostics['one_line_group_ratio'],
+            'short_fragment_ratio': diagnostics['short_fragment_ratio'],
         },
         'pages': pages_report,
         'filtered_pages': filtered_pages,
         'possible_cross_page_continuation_candidates': possible_continuations,
+        'diagnostics': diagnostics,
         'warnings': warnings,
         'recommendation': {
             'safe_to_attempt_phase_2e': bool(safe),
@@ -1471,7 +1484,7 @@ def _paragraph_reconstruction_page_report(
     page_index = filtered_page.get('page_index')
     original_body_blocks = _body_blocks(original_page)
     filtered_body_blocks = _body_blocks(filtered_page)
-    groups, gap_warnings = _estimate_paragraph_groups(
+    groups, gap_warnings, split_boundaries = _estimate_paragraph_groups(
         filtered_page,
         filtered_body_blocks,
         max_line_gap_ratio,
@@ -1542,6 +1555,7 @@ def _paragraph_reconstruction_page_report(
         'suspicious_single_line_paragraph_count': len(suspicious_single_line),
         'suspicious_short_fragment_count': len(suspicious_short_fragments),
         'estimated_paragraph_groups': groups,
+        'split_boundaries': split_boundaries,
         'warnings': warnings,
     }
 
@@ -1555,47 +1569,114 @@ def _estimate_paragraph_groups(
         short_fragment_length: int) -> tuple:
     groups = []
     warnings = []
+    split_boundaries = []
     if not body_blocks:
-        return groups, warnings
+        return groups, warnings, split_boundaries
 
     sorted_blocks = sorted(
         [dict(block) for block in body_blocks],
         key=lambda block: block.get('block_index', 0))
+    line_units = _body_line_units(sorted_blocks)
+    if not line_units:
+        return groups, warnings, split_boundaries
+
     metrics = _paragraph_line_metrics(sorted_blocks)
-    current_blocks = [sorted_blocks[0]]
+    current_units = [line_units[0]]
     break_before_reasons = []
 
-    for block in sorted_blocks[1:]:
-        previous = current_blocks[-1]
-        break_reasons, gap_warning = _paragraph_break_reasons(
+    for unit in line_units[1:]:
+        previous = current_units[-1]
+        break_reasons, gap_warning, boundary_signals = _paragraph_break_reasons(
             previous,
-            block,
+            unit,
             metrics,
             max_line_gap_ratio,
             paragraph_gap_ratio,
             indent_tolerance)
         if gap_warning:
-            warnings.append(_paragraph_gap_warning(page, previous, block, gap_warning))
+            warnings.append(_paragraph_gap_warning(page, previous, unit, gap_warning))
 
         if break_reasons:
             groups.append(_estimated_paragraph_group(
                 page,
                 len(groups),
-                current_blocks,
+                current_units,
                 break_before_reasons,
                 short_fragment_length))
-            current_blocks = [block]
+            split_boundaries.append(_paragraph_split_boundary(
+                page,
+                len(split_boundaries),
+                previous,
+                unit,
+                break_reasons,
+                boundary_signals))
+            current_units = [unit]
             break_before_reasons = break_reasons
         else:
-            current_blocks.append(block)
+            current_units.append(unit)
 
     groups.append(_estimated_paragraph_group(
         page,
         len(groups),
-        current_blocks,
+        current_units,
         break_before_reasons,
         short_fragment_length))
-    return groups, warnings
+    return groups, warnings, split_boundaries
+
+
+def _body_line_units(blocks: list) -> list:
+    units = []
+    current = []
+    for block in sorted(blocks or [], key=lambda item: item.get('block_index', 0)):
+        if current and not _same_physical_row(_union_bbox(current), block.get('bbox', [])):
+            units.append(_line_unit_from_blocks(current, len(units)))
+            current = []
+        current.append(dict(block))
+
+    if current:
+        units.append(_line_unit_from_blocks(current, len(units)))
+    return units
+
+
+def _line_unit_from_blocks(blocks: list, line_index: int) -> dict:
+    ordered_blocks = sorted(
+        [dict(block) for block in blocks or []],
+        key=lambda block: (
+            _bbox_value(block.get('bbox'), 0),
+            block.get('block_index', 0)))
+    text = normalize_text(' '.join(block.get('text', '') for block in ordered_blocks))
+    styles = _unique_styles(ordered_blocks)
+    block_indexes = [block.get('block_index') for block in ordered_blocks]
+    bbox = _union_bbox(ordered_blocks)
+    return {
+        'line_index': line_index,
+        'block_index': block_indexes[0] if block_indexes else None,
+        'block_indexes': block_indexes,
+        'block_count': len(ordered_blocks),
+        'row_fragment_count': len(ordered_blocks),
+        'text': text,
+        'bbox': bbox,
+        'style': styles[0] if len(styles) == 1 else 'mixed',
+        'styles': styles,
+        'width': round(max(0.0, bbox[2] - bbox[0]), 2),
+    }
+
+
+def _same_physical_row(previous_bbox, current_bbox) -> bool:
+    if not previous_bbox or not current_bbox or len(previous_bbox) < 4 or len(current_bbox) < 4:
+        return False
+
+    previous_height = max(_block_height(previous_bbox), 1.0)
+    current_height = max(_block_height(current_bbox), 1.0)
+    overlap = min(float(previous_bbox[3]), float(current_bbox[3])) - max(
+        float(previous_bbox[1]),
+        float(current_bbox[1]))
+    if overlap > 0.0 and overlap / min(previous_height, current_height) >= 0.35:
+        return True
+
+    previous_center = (float(previous_bbox[1]) + float(previous_bbox[3])) / 2.0
+    current_center = (float(current_bbox[1]) + float(current_bbox[3])) / 2.0
+    return abs(previous_center - current_center) <= max(previous_height, current_height) * 0.45
 
 
 def _paragraph_break_reasons(
@@ -1609,6 +1690,9 @@ def _paragraph_break_reasons(
     warning = None
     previous_bbox = previous.get('bbox', [0.0, 0.0, 0.0, 0.0])
     current_bbox = current.get('bbox', [0.0, 0.0, 0.0, 0.0])
+    insufficient_metadata = (
+        not previous_bbox or len(previous_bbox) < 4 or
+        not current_bbox or len(current_bbox) < 4)
     line_height = max(
         metrics.get('median_line_height', 0.0),
         _block_height(previous_bbox),
@@ -1616,68 +1700,153 @@ def _paragraph_break_reasons(
         1.0)
     vertical_gap = max(0.0, float(current_bbox[1]) - float(previous_bbox[3]))
     gap_ratio = vertical_gap / line_height
+    previous_text = normalize_text(previous.get('text', ''))
+    current_text = normalize_text(current.get('text', ''))
+    previous_sentence_end = _ends_with_strong_sentence_punctuation(previous_text)
+    previous_hyphenated = _ends_with_hyphenated_word(previous_text)
+    previous_heading = _looks_like_heading(previous_text)
+    current_heading = _looks_like_heading(current_text)
+    previous_list = _looks_like_list_item(previous_text)
+    current_list = _looks_like_list_item(current_text)
+    left_delta = float(current_bbox[0]) - float(previous_bbox[0])
+    right_delta = float(current_bbox[2]) - float(previous_bbox[2])
+    previous_width = max(0.0, float(previous_bbox[2]) - float(previous_bbox[0]))
+    current_width = max(0.0, float(current_bbox[2]) - float(current_bbox[0]))
+    body_width = max(float(metrics.get('max_right', 0.0)) - float(metrics.get('min_left', 0.0)), 1.0)
+    right_gap_ratio = max(0.0, float(metrics.get('max_right', 0.0)) - float(previous_bbox[2])) / body_width
+    previous_width_ratio = previous_width / body_width
+    width_delta_ratio = abs(previous_width - current_width) / max(previous_width, current_width, 1.0)
+    significant_style_change = _significant_style_change(previous, current)
+
+    signals = {
+        'vertical_gap': round(vertical_gap, 2),
+        'gap_ratio': round(gap_ratio, 3),
+        'left_delta': round(left_delta, 2),
+        'right_delta': round(right_delta, 2),
+        'right_edge_similar': abs(right_delta) <= 18.0,
+        'width_delta_ratio': round(width_delta_ratio, 3),
+        'width_similar': width_delta_ratio <= 0.18,
+        'previous_sentence_end': previous_sentence_end,
+        'previous_hyphenated': previous_hyphenated,
+        'previous_heading_like': previous_heading,
+        'current_heading_like': current_heading,
+        'previous_list_marker': previous_list,
+        'current_list_marker': current_list,
+        'style_change': previous.get('style') != current.get('style'),
+        'significant_style_change': significant_style_change,
+        'previous_width_ratio': round(previous_width_ratio, 3),
+        'previous_right_gap_ratio': round(right_gap_ratio, 3),
+        'insufficient_metadata': insufficient_metadata,
+    }
+
+    if insufficient_metadata:
+        reasons.append('insufficient_metadata')
+
+    if current_list:
+        reasons.append('list_marker')
+    elif previous_list:
+        reasons.append('previous_list_item')
+
+    if current_heading:
+        reasons.append('heading_like')
+    elif previous_heading:
+        reasons.append('previous_heading_like')
 
     if gap_ratio >= paragraph_gap_ratio:
         reasons.append('large_vertical_gap')
-    elif gap_ratio > max_line_gap_ratio:
+    elif gap_ratio > max_line_gap_ratio and not previous_hyphenated:
         warning = {
             'type': 'suspicious_vertical_gap_inside_paragraph',
             'vertical_gap': round(vertical_gap, 2),
             'gap_ratio': round(gap_ratio, 3),
         }
 
-    previous_style = normalize_text(previous.get('style', ''))
-    current_style = normalize_text(current.get('style', ''))
-    if previous_style and current_style and previous_style != current_style:
+    if significant_style_change and not previous_hyphenated:
         reasons.append('style_change')
 
-    left_delta = abs(float(current_bbox[0]) - float(previous_bbox[0]))
-    if left_delta > indent_tolerance:
-        reasons.append('left_boundary_change')
+    if abs(left_delta) > indent_tolerance and not previous_hyphenated:
+        if left_delta > 0.0 or previous_sentence_end or gap_ratio > max_line_gap_ratio:
+            reasons.append('indentation_change')
 
-    if _looks_like_heading(current.get('text', '')):
-        reasons.append('next_looks_like_heading')
+    if (previous_sentence_end and
+            right_gap_ratio >= 0.12 and
+            previous_width_ratio <= 0.88 and
+            not previous_hyphenated):
+        reasons.append('sentence_end_with_trailing_space')
 
     if reasons:
         warning = None
 
-    return reasons, warning
+    return sorted(set(reasons)), warning, signals
 
 
 def _estimated_paragraph_group(
         page: dict,
         group_index: int,
-        blocks: list,
+        line_units: list,
         break_before_reasons: list,
         short_fragment_length: int) -> dict:
-    text = normalize_text(' '.join(block.get('text', '') for block in blocks))
+    text = normalize_text(' '.join(unit.get('text', '') for unit in line_units))
     quality = text_quality_signals(text)
-    one_line = len(blocks) == 1
+    line_count = len(line_units)
+    block_count = sum(unit.get('block_count', 1) for unit in line_units)
+    one_line = line_count == 1
     looks_like_heading = _looks_like_heading(text)
+    looks_like_list = _looks_like_list_item(text)
     suspicious_single_line = (
         one_line and
         quality.get('meaningful_text') and
-        not looks_like_heading)
+        not looks_like_heading and
+        not looks_like_list)
     suspicious_short = (
         suspicious_single_line and
         len(text) < short_fragment_length)
 
     page_index = page.get('page_index')
-    block_indexes = [block.get('block_index') for block in blocks]
+    block_indexes = [
+        block_index
+        for unit in line_units
+        for block_index in unit.get('block_indexes', [])
+    ]
     return {
         'page_index': page_index,
         'page_number': _human_page_number(page_index),
         'group_index': group_index,
-        'block_count': len(blocks),
-        'line_count': len(blocks),
+        'block_count': block_count,
+        'line_count': line_count,
         'block_indexes': block_indexes,
         'start_block_index': block_indexes[0] if block_indexes else None,
         'end_block_index': block_indexes[-1] if block_indexes else None,
-        'bbox': _union_bbox(blocks),
+        'bbox': _union_bbox(line_units),
         'text_preview': _preview_text({'text': text}, max_length=120),
         'break_before_reasons': list(break_before_reasons or []),
+        'starts_with_list_marker': bool(looks_like_list),
+        'heading_like': bool(looks_like_heading),
         'suspicious_single_line_paragraph': bool(suspicious_single_line),
         'suspicious_short_fragment': bool(suspicious_short),
+    }
+
+
+def _paragraph_split_boundary(
+        page: dict,
+        boundary_index: int,
+        previous: dict,
+        current: dict,
+        reasons: list,
+        signals: dict) -> dict:
+    page_index = page.get('page_index')
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'boundary_index': boundary_index,
+        'previous_line_index': previous.get('line_index'),
+        'next_line_index': current.get('line_index'),
+        'previous_block_indexes': list(previous.get('block_indexes', []) or []),
+        'next_block_indexes': list(current.get('block_indexes', []) or []),
+        'reasons': list(reasons or []),
+        'signals': dict(signals or {}),
+        'previous_text_preview': _preview_text(previous, max_length=100),
+        'next_text_preview': _preview_text(current, max_length=100),
     }
 
 
@@ -1703,6 +1872,7 @@ def _cross_page_continuation_warning(candidate: dict) -> dict:
         'to_page': candidate.get('to_page'),
         'type': 'possible_cross_page_continuation',
         'message': 'Adjacent-page body blocks may belong to the same paragraph; report only, no merge applied.',
+        'split_reasons': ['page_boundary'],
         'label': candidate.get('label'),
         'score': candidate.get('score'),
         'reason': candidate.get('reason'),
@@ -1715,6 +1885,106 @@ def _paragraph_reconstruction_recommendation(safe: bool, warning_count: int) -> 
     if safe:
         return 'No paragraph reconstruction warnings were detected in the report-only validation.'
     return f'Found {warning_count} paragraph reconstruction warning(s); keep production DOCX integration gated.'
+
+
+def _empty_paragraph_grouping_diagnostics() -> dict:
+    return {
+        'groups_by_line_count': {},
+        'groups_by_block_count': {},
+        'one_line_group_ratio': 0.0,
+        'short_fragment_ratio': 0.0,
+        'split_reason_counts': {},
+        'most_common_split_reasons': [],
+        'pages_with_worst_fragmentation': [],
+        'warning_counts': {},
+        'split_boundary_count': 0,
+    }
+
+
+def _paragraph_grouping_diagnostics(
+        pages_report: list,
+        warnings: list,
+        possible_continuations: list) -> dict:
+    groups = [
+        group
+        for page in pages_report or []
+        for group in page.get('estimated_paragraph_groups', []) or []
+    ]
+    split_boundaries = [
+        boundary
+        for page in pages_report or []
+        for boundary in page.get('split_boundaries', []) or []
+    ]
+    split_reason_counts = Counter()
+    for boundary in split_boundaries:
+        for reason in boundary.get('reasons', []) or []:
+            split_reason_counts[reason] += 1
+    if possible_continuations:
+        split_reason_counts['page_boundary'] += len(possible_continuations)
+
+    one_line_count = sum(1 for group in groups if group.get('line_count') == 1)
+    short_fragment_count = sum(
+        1 for group in groups
+        if group.get('suspicious_short_fragment'))
+    warning_counts = Counter(warning.get('type') for warning in warnings or [])
+
+    if possible_continuations:
+        warning_counts['possible_cross_page_continuation'] += len(possible_continuations)
+
+    return {
+        'groups_by_line_count': _groups_by_size(groups, 'line_count'),
+        'groups_by_block_count': _groups_by_size(groups, 'block_count'),
+        'one_line_group_ratio': _safe_ratio(one_line_count, len(groups)),
+        'short_fragment_ratio': _safe_ratio(short_fragment_count, len(groups)),
+        'split_reason_counts': dict(sorted(split_reason_counts.items())),
+        'most_common_split_reasons': _counter_top_items(split_reason_counts),
+        'pages_with_worst_fragmentation': _pages_with_worst_fragmentation(pages_report),
+        'warning_counts': dict(sorted(warning_counts.items())),
+        'split_boundary_count': len(split_boundaries),
+    }
+
+
+def _groups_by_size(groups: list, key: str) -> dict:
+    counts = Counter()
+    for group in groups or []:
+        size = int(group.get(key) or 0)
+        bucket = '5+' if size >= 5 else str(size)
+        counts[bucket] += 1
+    return dict(sorted(counts.items(), key=lambda item: item[0]))
+
+
+def _counter_top_items(counter: Counter, limit: int = 8) -> list:
+    return [
+        {'reason': key, 'count': value}
+        for key, value in counter.most_common(limit)
+    ]
+
+
+def _pages_with_worst_fragmentation(pages_report: list, limit: int = 5) -> list:
+    page_items = []
+    for page in pages_report or []:
+        group_count = int(page.get('estimated_paragraph_group_count') or 0)
+        if not group_count:
+            continue
+        one_line_count = int(page.get('suspicious_single_line_paragraph_count') or 0)
+        short_count = int(page.get('suspicious_short_fragment_count') or 0)
+        page_items.append({
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'estimated_paragraph_group_count': group_count,
+            'body_block_count_after_filtering': page.get('body_block_count_after_filtering', 0),
+            'one_line_group_ratio': _safe_ratio(one_line_count, group_count),
+            'short_fragment_ratio': _safe_ratio(short_count, group_count),
+            'suspicious_single_line_paragraph_count': one_line_count,
+            'suspicious_short_fragment_count': short_count,
+        })
+
+    return sorted(
+        page_items,
+        key=lambda item: (
+            -item['one_line_group_ratio'],
+            -item['suspicious_single_line_paragraph_count'],
+            item['page_number']))[:limit]
 
 
 def _body_blocks(page: dict) -> list:
@@ -1730,8 +2000,25 @@ def _paragraph_line_metrics(blocks: list) -> dict:
         for block in blocks
         if _block_height(block.get('bbox', [])) > 0.0
     ]
+    bboxes = [
+        block.get('bbox', [])
+        for block in blocks or []
+        if block.get('bbox') and len(block.get('bbox')) >= 4
+    ]
+    gaps = []
+    sorted_blocks = sorted(
+        [block for block in blocks or [] if block.get('bbox') and len(block.get('bbox')) >= 4],
+        key=lambda item: item.get('block_index', 0))
+    for previous, current in zip(sorted_blocks, sorted_blocks[1:]):
+        if _same_physical_row(previous.get('bbox'), current.get('bbox')):
+            continue
+        gaps.append(max(0.0, float(current['bbox'][1]) - float(previous['bbox'][3])))
+
     return {
         'median_line_height': _median_number(heights) or 1.0,
+        'median_vertical_gap': _median_number(gaps),
+        'min_left': min((float(bbox[0]) for bbox in bboxes), default=0.0),
+        'max_right': max((float(bbox[2]) for bbox in bboxes), default=0.0),
     }
 
 
@@ -1757,6 +2044,12 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     return round(float(numerator) / float(denominator), 3)
 
 
+def _bbox_value(bbox, index: int) -> float:
+    if not bbox or len(bbox) <= index:
+        return 0.0
+    return float(bbox[index])
+
+
 def _union_bbox(blocks: list) -> list:
     bboxes = [
         block.get('bbox', [])
@@ -1771,6 +2064,46 @@ def _union_bbox(blocks: list) -> list:
         round(max(float(bbox[2]) for bbox in bboxes), 2),
         round(max(float(bbox[3]) for bbox in bboxes), 2),
     ]
+
+
+def _unique_styles(blocks: list) -> list:
+    styles = []
+    for block in blocks or []:
+        style = normalize_text(block.get('style', ''))
+        if style and style not in styles:
+            styles.append(style)
+    return styles
+
+
+def _significant_style_change(previous: dict, current: dict) -> bool:
+    previous_style = normalize_text(previous.get('style', ''))
+    current_style = normalize_text(current.get('style', ''))
+    if not previous_style or not current_style or previous_style == current_style:
+        return False
+    if 'mixed' in {previous_style, current_style}:
+        return False
+
+    previous_font, previous_size = _style_font_size(previous_style)
+    current_font, current_size = _style_font_size(current_style)
+    if previous_size and current_size and abs(previous_size - current_size) >= 0.75:
+        return True
+    if previous_font and current_font and previous_font != current_font:
+        return True
+    return previous_size is None or current_size is None
+
+
+def _style_font_size(style: str) -> tuple:
+    if isinstance(style, dict):
+        style = normalize_style_key(style)
+    parts = normalize_text(style).split('|')
+    font = parts[0] if parts else ''
+    size = None
+    if len(parts) > 1:
+        try:
+            size = float(parts[1])
+        except (TypeError, ValueError):
+            size = None
+    return font, size
 
 
 def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:
@@ -2083,6 +2416,10 @@ def _looks_like_heading(text: str) -> bool:
         return True
     title_like = sum(1 for word in words if word[:1].isupper())
     return bool(words) and len(words) <= 6 and title_like == len(words)
+
+
+def _looks_like_list_item(text: str) -> bool:
+    return bool(_LIST_MARKER_RE.match(normalize_text(text)))
 
 
 def _continuation_result(
