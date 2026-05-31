@@ -784,6 +784,92 @@ def build_document_parse_filtering_hook_report(
     }
 
 
+def build_document_parse_raw_object_mapping_report(
+        page_summaries: list = None,
+        raw_object_pages: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        enabled: bool = False,
+        expected_would_remove_count: int = None,
+        exact_bbox_tolerance: float = 0.75,
+        fuzzy_bbox_tolerance: float = 3.0) -> dict:
+    '''Validate reviewed summary-to-raw-object mapping without mutating input.
+
+    This is an internal document-parse diagnostic. It proves whether approved
+    layout-summary removal candidates can be matched to exactly one raw-page
+    object near ``Pages._parse_document()``.
+    '''
+    page_summaries = _copy_page_summaries(page_summaries)
+    raw_records = _raw_object_records(raw_object_pages)
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'document_parse_raw_object_mapping_report_only',
+            'insertion_point': 'document_parse',
+            'mapping_target': 'raw_page.blocks after clean_up/process_font',
+            'summary': _raw_mapping_empty_summary(expected_would_remove_count),
+            'mappings': [],
+            'mapping_quality_by_page': [],
+            'mapping_quality_by_role': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2n': False,
+                'reason': 'Raw-object mapping validation is disabled.',
+            },
+        }
+
+    dry_run_report = dry_run_report or {}
+    review_decisions = review_decisions or {}
+    filtering_report = build_reviewed_header_footer_filter_report(
+        page_summaries,
+        dry_run_report,
+        review_decisions,
+        enabled=True,
+        apply=False)
+    blocked_fingerprints = {
+        candidate.get('fingerprint')
+        for candidate in filtering_report.get('blocked_candidates', []) or []
+        if candidate.get('fingerprint')
+    }
+    expected_blocks = _raw_mapping_expected_blocks(
+        page_summaries,
+        dry_run_report,
+        review_decisions)
+    raw_by_page = defaultdict(list)
+    for record in raw_records:
+        raw_by_page[record.get('page_index')].append(record)
+
+    mappings = []
+    for expected in expected_blocks:
+        mappings.append(_raw_mapping_for_expected_block(
+            expected,
+            raw_by_page.get(expected.get('page_index'), []),
+            blocked_fingerprints,
+            exact_bbox_tolerance,
+            fuzzy_bbox_tolerance))
+
+    summary = _raw_mapping_summary(
+        mappings,
+        filtering_report,
+        expected_would_remove_count)
+    warnings = _raw_mapping_warnings(summary, mappings)
+    return {
+        'enabled': True,
+        'policy': 'document_parse_raw_object_mapping_report_only',
+        'insertion_point': 'document_parse',
+        'mapping_target': 'raw_page.blocks after clean_up/process_font',
+        'summary': summary,
+        'mappings': mappings,
+        'mapping_quality_by_page': _raw_mapping_quality_by_page(mappings),
+        'mapping_quality_by_role': _raw_mapping_quality_by_role(mappings),
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2n': _raw_mapping_safe_for_phase_2n(summary, warnings),
+            'reason': _raw_mapping_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -2108,6 +2194,394 @@ def _document_parse_hook_recommendation(
     return (
         True,
         'Hook scaffold is dry-run/report-only and preserves production objects; Phase 2M can remain opt-in and guarded.')
+
+
+def _raw_mapping_empty_summary(expected_would_remove_count: int = None) -> dict:
+    return {
+        'approved_candidate_count': 0,
+        'expected_would_remove_count': expected_would_remove_count or 0,
+        'mapped_raw_object_count': 0,
+        'exact_match_count': 0,
+        'fuzzy_match_count': 0,
+        'ambiguous_match_count': 0,
+        'missing_match_count': 0,
+        'unsafe_match_count': 0,
+        'body_region_matched_for_removal_count': 0,
+        'rejected_unsure_layout_placeholder_matched_for_removal_count': 0,
+        'all_expected_blocks_mapped_once': False,
+    }
+
+
+def _raw_mapping_expected_blocks(
+        page_summaries: list,
+        dry_run_report: dict,
+        review_decisions) -> list:
+    decision_map = _review_decision_map(review_decisions or {})
+    approved, _ = _reviewed_exclusion_candidates(
+        _dry_run_candidates(dry_run_report),
+        decision_map)
+    approved_by_fingerprint = {
+        item.get('fingerprint'): item
+        for item in approved
+        if item.get('fingerprint')
+    }
+    expected_blocks = []
+    for page in page_summaries or []:
+        page_index = page.get('page_index')
+        for block in page.get('text_blocks', []) or []:
+            candidate = approved_by_fingerprint.get(block.get('fingerprint'))
+            if not candidate or not _block_matches_reviewed_candidate(block, page_index, candidate):
+                continue
+            expected_blocks.append(_raw_mapping_expected_block(page_index, block, candidate))
+    return expected_blocks
+
+
+def _raw_mapping_expected_block(page_index, block: dict, candidate: dict) -> dict:
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'block_index': block.get('block_index'),
+        'fingerprint': block.get('fingerprint', ''),
+        'normalized_text': block.get('normalized_text') or _comparison_text(block.get('text', '')),
+        'region': block.get('region', ''),
+        'bbox': _json_bbox(block.get('bbox')),
+        'candidate_id': candidate.get('candidate_id', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'manual_decision': candidate.get('manual_decision', ''),
+        'text_preview': _preview_text(block, max_length=100),
+    }
+
+
+def _raw_object_records(raw_object_pages: list) -> list:
+    records = []
+    for fallback_page_index, page in enumerate(raw_object_pages or []):
+        page_index = page.get('page_index', page.get('id', fallback_page_index))
+        page_height = page.get('height', page.get('page_height', 0))
+        objects = (
+            page.get('raw_objects') or
+            page.get('objects') or
+            page.get('blocks') or
+            page.get('text_blocks') or
+            [])
+        for fallback_index, raw_object in enumerate(objects):
+            record = _raw_object_record(
+                page_index,
+                page_height,
+                raw_object,
+                fallback_index)
+            if record:
+                records.append(record)
+    return records
+
+
+def _raw_object_record(page_index, page_height, raw_object: dict, fallback_index: int) -> dict:
+    text = normalize_text(raw_object.get('text', ''))
+    if not text:
+        return {}
+
+    bbox = _json_bbox(raw_object.get('bbox'))
+    region = raw_object.get('region') or classify_y_band(bbox, page_height)
+    fingerprint = raw_object.get('fingerprint') or make_text_fingerprint(
+        text,
+        region,
+        style=None).get('key')
+    raw_object_id = raw_object.get(
+        'raw_object_id',
+        raw_object.get('object_id', raw_object.get('block_index', fallback_index)))
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'raw_object_id': raw_object_id,
+        'object_index': raw_object.get('object_index', fallback_index),
+        'block_index': raw_object.get('block_index', fallback_index),
+        'object_type': raw_object.get('object_type', ''),
+        'text': text,
+        'normalized_text': _comparison_text(text),
+        'fingerprint': fingerprint,
+        'region': region,
+        'bbox': bbox,
+        'placeholder_kind': raw_object.get('placeholder_kind') or _placeholder_kind(text),
+        'text_preview': _preview_text(raw_object, max_length=100),
+    }
+
+
+def _raw_mapping_for_expected_block(
+        expected: dict,
+        raw_records: list,
+        blocked_fingerprints: set,
+        exact_bbox_tolerance: float,
+        fuzzy_bbox_tolerance: float) -> dict:
+    candidates = []
+    for raw_record in raw_records or []:
+        candidate = _raw_mapping_candidate(
+            expected,
+            raw_record,
+            blocked_fingerprints,
+            exact_bbox_tolerance,
+            fuzzy_bbox_tolerance)
+        if candidate:
+            candidates.append(candidate)
+
+    safe_candidates = [
+        candidate for candidate in candidates
+        if not candidate.get('unsafe_signals')
+    ]
+    if not safe_candidates:
+        status = 'missing_match'
+        selected = []
+    elif len(safe_candidates) == 1:
+        status = safe_candidates[0]['match_quality']
+        selected = safe_candidates
+    else:
+        status = 'ambiguous_match'
+        selected = safe_candidates
+
+    unsafe_candidates = [
+        candidate for candidate in candidates
+        if candidate.get('unsafe_signals')
+    ]
+    return {
+        'page_index': expected.get('page_index'),
+        'page_number': expected.get('page_number'),
+        'block_index': expected.get('block_index'),
+        'candidate_id': expected.get('candidate_id', ''),
+        'fingerprint': expected.get('fingerprint', ''),
+        'proposed_role': expected.get('proposed_role', ''),
+        'region': expected.get('region', ''),
+        'expected_bbox': expected.get('bbox', []),
+        'expected_preview': expected.get('text_preview', ''),
+        'mapping_status': status,
+        'safe_match_count': len(safe_candidates),
+        'unsafe_match_count': len(unsafe_candidates),
+        'selected_raw_objects': selected,
+        'candidate_raw_objects': candidates,
+        'reason': _raw_mapping_reason(status, safe_candidates, unsafe_candidates),
+    }
+
+
+def _raw_mapping_candidate(
+        expected: dict,
+        raw_record: dict,
+        blocked_fingerprints: set,
+        exact_bbox_tolerance: float,
+        fuzzy_bbox_tolerance: float) -> dict:
+    if expected.get('page_index') != raw_record.get('page_index'):
+        return {}
+
+    text_match = (
+        expected.get('fingerprint') == raw_record.get('fingerprint') or
+        expected.get('normalized_text') == raw_record.get('normalized_text'))
+    if not text_match:
+        return {}
+
+    region_match = expected.get('region') == raw_record.get('region')
+    bbox_delta = _bbox_max_delta(expected.get('bbox'), raw_record.get('bbox'))
+    bbox_overlap = _bbox_overlap_ratio(expected.get('bbox'), raw_record.get('bbox'))
+    if not region_match and bbox_delta > fuzzy_bbox_tolerance:
+        return {}
+    if bbox_delta > fuzzy_bbox_tolerance and bbox_overlap < 0.7:
+        return {}
+
+    unsafe = []
+    positive = []
+    if region_match:
+        positive.append('region_match')
+    else:
+        unsafe.append('region_mismatch')
+    if raw_record.get('region') == REGION_BODY:
+        unsafe.append('body_region_raw_object')
+    if raw_record.get('fingerprint') in blocked_fingerprints:
+        unsafe.append('blocked_review_decision_fingerprint')
+    if raw_record.get('placeholder_kind') == 'image':
+        unsafe.append('layout_placeholder_raw_object')
+
+    if bbox_delta <= exact_bbox_tolerance:
+        quality = 'exact_match'
+        positive.append('bbox_exact_or_near_exact')
+    else:
+        quality = 'fuzzy_match'
+        positive.append('bbox_fuzzy_match')
+    if bbox_overlap:
+        positive.append('bbox_overlap')
+
+    return {
+        'raw_object_id': raw_record.get('raw_object_id'),
+        'object_index': raw_record.get('object_index'),
+        'block_index': raw_record.get('block_index'),
+        'object_type': raw_record.get('object_type', ''),
+        'fingerprint': raw_record.get('fingerprint', ''),
+        'region': raw_record.get('region', ''),
+        'bbox': raw_record.get('bbox', []),
+        'match_quality': quality,
+        'bbox_max_delta': round(bbox_delta, 2),
+        'bbox_overlap_ratio': round(bbox_overlap, 3),
+        'placeholder_kind': raw_record.get('placeholder_kind', ''),
+        'positive_signals': positive,
+        'unsafe_signals': unsafe,
+        'text_preview': raw_record.get('text_preview', ''),
+    }
+
+
+def _raw_mapping_summary(
+        mappings: list,
+        filtering_report: dict,
+        expected_would_remove_count: int = None) -> dict:
+    exact_count = sum(1 for item in mappings if item.get('mapping_status') == 'exact_match')
+    fuzzy_count = sum(1 for item in mappings if item.get('mapping_status') == 'fuzzy_match')
+    ambiguous_count = sum(1 for item in mappings if item.get('mapping_status') == 'ambiguous_match')
+    missing_count = sum(1 for item in mappings if item.get('mapping_status') == 'missing_match')
+    unsafe_count = sum(item.get('unsafe_match_count', 0) for item in mappings)
+    selected = [
+        raw_object
+        for item in mappings
+        if item.get('mapping_status') in {'exact_match', 'fuzzy_match'}
+        for raw_object in item.get('selected_raw_objects', []) or []
+    ]
+    body_matched_count = sum(1 for item in selected if item.get('region') == REGION_BODY)
+    blocked_matched_count = sum(
+        1 for item in selected
+        if (
+            'blocked_review_decision_fingerprint' in item.get('unsafe_signals', []) or
+            'layout_placeholder_raw_object' in item.get('unsafe_signals', [])))
+    expected_count = len(mappings)
+    expected_would_remove_count = (
+        expected_would_remove_count
+        if expected_would_remove_count is not None else
+        expected_count)
+    mapped_count = exact_count + fuzzy_count
+    return {
+        'approved_candidate_count': filtering_report.get('approved_candidate_count', 0),
+        'blocked_candidate_count': filtering_report.get('blocked_candidate_count', 0),
+        'expected_would_remove_count': expected_would_remove_count,
+        'observed_would_remove_count': expected_count,
+        'mapped_raw_object_count': mapped_count,
+        'exact_match_count': exact_count,
+        'fuzzy_match_count': fuzzy_count,
+        'ambiguous_match_count': ambiguous_count,
+        'missing_match_count': missing_count,
+        'unsafe_match_count': unsafe_count,
+        'body_region_matched_for_removal_count': body_matched_count,
+        'rejected_unsure_layout_placeholder_matched_for_removal_count': blocked_matched_count,
+        'all_expected_blocks_mapped_once': (
+            mapped_count == expected_count and
+            not ambiguous_count and
+            not missing_count and
+            not unsafe_count and
+            not body_matched_count and
+            not blocked_matched_count),
+    }
+
+
+def _raw_mapping_quality_by_page(mappings: list) -> list:
+    grouped = defaultdict(list)
+    for mapping in mappings or []:
+        grouped[mapping.get('page_index')].append(mapping)
+    rows = []
+    for page_index, items in sorted(grouped.items()):
+        rows.append(_raw_mapping_quality_row(
+            {'page_index': page_index, 'page_number': _human_page_number(page_index)},
+            items))
+    return rows
+
+
+def _raw_mapping_quality_by_role(mappings: list) -> dict:
+    grouped = defaultdict(list)
+    for mapping in mappings or []:
+        grouped[mapping.get('proposed_role', '')].append(mapping)
+    return {
+        role: _raw_mapping_quality_counts(items)
+        for role, items in sorted(grouped.items())
+    }
+
+
+def _raw_mapping_quality_row(base: dict, mappings: list) -> dict:
+    row = dict(base)
+    row.update(_raw_mapping_quality_counts(mappings))
+    return row
+
+
+def _raw_mapping_quality_counts(mappings: list) -> dict:
+    counts = Counter(item.get('mapping_status') for item in mappings or [])
+    return {
+        'expected_count': len(mappings or []),
+        'mapped_count': counts.get('exact_match', 0) + counts.get('fuzzy_match', 0),
+        'exact_match_count': counts.get('exact_match', 0),
+        'fuzzy_match_count': counts.get('fuzzy_match', 0),
+        'ambiguous_match_count': counts.get('ambiguous_match', 0),
+        'missing_match_count': counts.get('missing_match', 0),
+        'unsafe_match_count': sum(item.get('unsafe_match_count', 0) for item in mappings or []),
+    }
+
+
+def _raw_mapping_warnings(summary: dict, mappings: list) -> list:
+    warnings = []
+    if summary.get('expected_would_remove_count') != summary.get('observed_would_remove_count'):
+        warnings.append({
+            'type': 'expected_would_remove_count_mismatch',
+            'expected': summary.get('expected_would_remove_count'),
+            'observed': summary.get('observed_would_remove_count'),
+        })
+    for key, warning_type in (
+            ('missing_match_count', 'missing_raw_object_match'),
+            ('ambiguous_match_count', 'ambiguous_raw_object_match'),
+            ('unsafe_match_count', 'unsafe_raw_object_match'),
+            ('body_region_matched_for_removal_count', 'body_region_raw_object_matched'),
+            ('rejected_unsure_layout_placeholder_matched_for_removal_count',
+             'blocked_candidate_raw_object_matched')):
+        count = summary.get(key, 0)
+        if count:
+            warnings.append({
+                'type': warning_type,
+                'count': count,
+            })
+    if not summary.get('approved_candidate_count', 0):
+        warnings.append({
+            'type': 'no_approved_candidates',
+            'message': 'No approved candidates were available for raw-object mapping.',
+        })
+    return warnings
+
+
+def _raw_mapping_safe_for_phase_2n(summary: dict, warnings: list) -> bool:
+    return bool(summary.get('all_expected_blocks_mapped_once')) and not warnings
+
+
+def _raw_mapping_recommendation(summary: dict, warnings: list) -> str:
+    if _raw_mapping_safe_for_phase_2n(summary, warnings):
+        return 'Every reviewed would-remove summary block maps to exactly one safe raw-page object; Phase 2N can remain opt-in and copied-object only.'
+    return 'Do not apply production filtering yet; resolve raw-object mapping warnings first.'
+
+
+def _raw_mapping_reason(status: str, safe_candidates: list, unsafe_candidates: list) -> str:
+    if status == 'exact_match':
+        return 'Exactly one raw object matched by page, text fingerprint, region, and near-identical bbox.'
+    if status == 'fuzzy_match':
+        return 'Exactly one raw object matched by page, text fingerprint, region, and fuzzy bbox proximity.'
+    if status == 'ambiguous_match':
+        return f'{len(safe_candidates)} raw objects matched; manual/raw-object disambiguation is required.'
+    if unsafe_candidates:
+        return 'Only unsafe raw-object matches were found.'
+    return 'No matching raw object was found for this reviewed summary block.'
+
+
+def _bbox_max_delta(first, second) -> float:
+    first = _json_bbox(first)
+    second = _json_bbox(second)
+    return max(abs(float(a) - float(b)) for a, b in zip(first, second))
+
+
+def _bbox_overlap_ratio(first, second) -> float:
+    first = _json_bbox(first)
+    second = _json_bbox(second)
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    intersection = width * height
+    first_area = max((first[2] - first[0]) * (first[3] - first[1]), 0.0)
+    second_area = max((second[2] - second[0]) * (second[3] - second[1]), 0.0)
+    denominator = min(first_area, second_area)
+    return intersection / denominator if denominator else 0.0
 
 
 def _integrity_removed_block_summary(page_index, block: dict, removed: dict) -> dict:

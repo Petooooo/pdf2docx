@@ -1754,3 +1754,116 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2M recommendation
 
 Phase 2M is safe to attempt only as another explicitly opt-in experiment. The next phase should still avoid default conversion changes and should not mutate production raw pages until the hook can prove, in a guarded path, that reviewed filtering decisions map reliably to the actual raw-page block objects.
+
+## Phase 2M
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2M added an internal/report-only raw-object mapping validation helper for the `document_parse` boundary. The helper checks whether reviewed layout-analysis removal candidates map safely to actual `raw_page.blocks` objects after cleanup and font processing, before any future body filtering experiment.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No production raw page, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No header/footer content is removed from production page content.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+
+### Mapping target
+
+- Insertion point: `document_parse`.
+- Target location: `raw_page.blocks` after `RawPage.clean_up()` and `RawPage.process_font()`, near `Pages._parse_document()`.
+- Matching signals: page index, normalized text fingerprint, top/body/bottom region, bbox proximity/overlap, placeholder kind, and reviewed role.
+- The report uses only explicit `approve_exclude` decisions and never raw `would_exclude` labels alone.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/document-parse-raw-object-mapping-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, hook report, and generated mapping report remained ignored.
+
+### Sample summary
+
+- Approved candidate count: 4.
+- Blocked candidate count: 5.
+- Expected would-remove count: 48.
+- Observed would-remove count: 48.
+- Mapped raw object count: 48.
+- Exact match count: 48.
+- Fuzzy match count: 0.
+- Ambiguous match count: 0.
+- Missing match count: 0.
+- Unsafe match count: 0.
+- Body-region matched-for-removal count: 0.
+- Rejected/unsure/layout-placeholder matched-for-removal count: 0.
+- All expected blocks mapped once: yes.
+- Safety warnings: none.
+
+Mapping by role:
+
+- `header`: 12 exact matches.
+- `footer`: 24 exact matches.
+- `page_number`: 12 exact matches.
+
+### Tests added
+
+- Approved summary candidate maps to exactly one raw-like object.
+- Rejected candidates do not map for removal.
+- Unsure candidates do not map for removal.
+- Layout-placeholder candidates do not map for removal.
+- Body-region raw-like objects are not mapped for removal.
+- Missing raw objects produce clear warnings.
+- Ambiguous multiple raw matches produce clear warnings.
+- Fuzzy bbox/text matches are reported separately from exact matches.
+- Mapping report does not mutate input raw-like objects or summaries.
+- Disabled/default behavior remains unchanged.
+- The internal `Pages` mapping validation path stores a report without mutating fake raw pages.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 112 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 112 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2N recommendation
+
+Phase 2N is safe to attempt only as an explicitly opt-in copied-object experiment. The next step should still avoid mutating production raw pages by default, but it can test whether a copied `raw_page.blocks` collection can be filtered using the validated one-to-one raw-object mapping.

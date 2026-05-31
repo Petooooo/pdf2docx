@@ -6,6 +6,7 @@ import logging
 
 from .LayoutAnalyzer import (
     build_document_parse_filtering_hook_report,
+    build_document_parse_raw_object_mapping_report,
     build_layout_analysis_report,
 )
 from .RawPageFactory import RawPageFactory
@@ -20,6 +21,7 @@ class Pages(BaseCollection):
         super().__init__(instances, parent)
         self._layout_analysis_report = None
         self._document_parse_filtering_hook_report = None
+        self._document_parse_raw_object_mapping_report = None
 
 
     @property
@@ -39,6 +41,7 @@ class Pages(BaseCollection):
         '''
         self._layout_analysis_report = None
         self._document_parse_filtering_hook_report = None
+        self._document_parse_raw_object_mapping_report = None
 
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
@@ -100,6 +103,16 @@ class Pages(BaseCollection):
                 layout_analysis_report,
                 **settings)
 
+        if settings.get('_document_parse_raw_object_mapping_enabled'):
+            if layout_analysis_report is None:
+                layout_analysis_report = Pages._build_layout_analysis_report(
+                    pages, raw_pages, **settings)
+            self._run_document_parse_raw_object_mapping_validation(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                **settings)
+
         header, footer = Pages._parse_document(raw_pages)
 
 
@@ -136,6 +149,25 @@ class Pages(BaseCollection):
         return self._document_parse_filtering_hook_report
 
 
+    def _run_document_parse_raw_object_mapping_validation(
+            self,
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            **settings):
+        '''Validate summary-to-raw-object mapping without mutating raw pages.'''
+        if not settings.get('_document_parse_raw_object_mapping_enabled'):
+            self._document_parse_raw_object_mapping_report = None
+            return None
+
+        self._document_parse_raw_object_mapping_report = Pages._build_document_parse_raw_object_mapping_report(
+            layout_analysis_report,
+            pages,
+            raw_pages,
+            **settings)
+        return self._document_parse_raw_object_mapping_report
+
+
     @staticmethod
     def _build_document_parse_filtering_hook_report(
             layout_analysis_report:dict,
@@ -166,6 +198,25 @@ class Pages(BaseCollection):
 
 
     @staticmethod
+    def _build_document_parse_raw_object_mapping_report(
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            **settings):
+        layout_analysis_report = layout_analysis_report or {}
+        raw_object_pages = Pages._raw_object_mapping_pages(pages, raw_pages)
+        return build_document_parse_raw_object_mapping_report(
+            layout_analysis_report.get('pages', []),
+            raw_object_pages,
+            settings.get('_document_parse_mapping_dry_run_report') or
+            layout_analysis_report.get('header_footer_exclusion_dry_run', {}),
+            settings.get('_document_parse_filtering_review_decisions'),
+            enabled=bool(settings.get('_document_parse_raw_object_mapping_enabled')),
+            expected_would_remove_count=settings.get(
+                '_document_parse_mapping_expected_would_remove_count'))
+
+
+    @staticmethod
     def _build_layout_analysis_report(pages:list, raw_pages:list, **settings):
         analysis_pages = Pages._layout_analysis_pages(pages, raw_pages)
         return build_layout_analysis_report(
@@ -188,6 +239,35 @@ class Pages(BaseCollection):
                 ],
             })
         return analysis_pages
+
+
+    @staticmethod
+    def _raw_object_mapping_pages(pages:list, raw_pages:list):
+        raw_object_pages = []
+        for page, raw_page in zip(pages, raw_pages):
+            raw_object_pages.append({
+                'page_index': page.id,
+                'width': raw_page.width,
+                'height': raw_page.height,
+                'raw_objects': [
+                    Pages._raw_object_mapping_block(page.id, index, block)
+                    for index, block in enumerate(raw_page.blocks)
+                ],
+            })
+        return raw_object_pages
+
+
+    @staticmethod
+    def _raw_object_mapping_block(page_index:int, object_index:int, block):
+        return {
+            'raw_object_id': f'page-{page_index}-raw-block-{object_index}',
+            'object_index': object_index,
+            'block_index': object_index,
+            'object_type': block.__class__.__name__,
+            'text': getattr(block, 'text', ''),
+            'bbox': Pages._json_bbox(getattr(block, 'bbox', None)),
+            'style': Pages._layout_analysis_style(block),
+        }
 
 
     @staticmethod

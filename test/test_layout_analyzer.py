@@ -28,6 +28,7 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
+build_document_parse_raw_object_mapping_report = LayoutAnalyzer.build_document_parse_raw_object_mapping_report
 build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
 build_filter_insertion_point_analysis_report = LayoutAnalyzer.build_filter_insertion_point_analysis_report
 build_indentation_rule_comparison_report = LayoutAnalyzer.build_indentation_rule_comparison_report
@@ -2291,6 +2292,158 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIsNone(report)
         self.assertIsNone(pages._document_parse_filtering_hook_report)
 
+    def test_raw_object_mapping_maps_approved_summary_to_one_raw_object(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        self.assertEqual(mapping['summary']['approved_candidate_count'], 2)
+        self.assertEqual(mapping['summary']['expected_would_remove_count'], 2)
+        self.assertEqual(mapping['summary']['mapped_raw_object_count'], 2)
+        self.assertEqual(mapping['summary']['exact_match_count'], 2)
+        self.assertEqual(mapping['summary']['ambiguous_match_count'], 0)
+        self.assertEqual(mapping['summary']['missing_match_count'], 0)
+        self.assertTrue(mapping['summary']['all_expected_blocks_mapped_once'])
+
+    def test_raw_object_mapping_does_not_map_rejected_unsure_or_placeholder(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+        mapped_fingerprints = {
+            raw_object['fingerprint']
+            for item in mapping['mappings']
+            for raw_object in item['selected_raw_objects']
+        }
+
+        self.assertNotIn('reject-header', mapped_fingerprints)
+        self.assertNotIn('unsure-footer', mapped_fingerprints)
+        self.assertNotIn('image-placeholder', mapped_fingerprints)
+        self.assertEqual(
+            mapping['summary']['rejected_unsure_layout_placeholder_matched_for_removal_count'],
+            0)
+
+    def test_raw_object_mapping_does_not_map_body_region_for_removal(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'].append(
+            _raw_object(6, 'Approved Header', REGION_BODY))
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        self.assertEqual(mapping['summary']['mapped_raw_object_count'], 2)
+        self.assertEqual(mapping['summary']['body_region_matched_for_removal_count'], 0)
+        self.assertEqual(mapping['summary']['unsafe_match_count'], 0)
+
+    def test_raw_object_mapping_warns_when_raw_object_is_missing(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'] = [
+            raw_object
+            for raw_object in inputs['raw_object_pages'][0]['raw_objects']
+            if raw_object['fingerprint'] != _summary_fingerprint('Approved Footer', REGION_BOTTOM)
+        ]
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        warning_types = {warning['type'] for warning in mapping['safety_warnings']}
+        self.assertEqual(mapping['summary']['missing_match_count'], 1)
+        self.assertIn('missing_raw_object_match', warning_types)
+        self.assertFalse(mapping['recommendation']['safe_to_attempt_phase_2n'])
+
+    def test_raw_object_mapping_warns_when_raw_match_is_ambiguous(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'].append(
+            _raw_object(6, 'Approved Header', REGION_TOP))
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        warning_types = {warning['type'] for warning in mapping['safety_warnings']}
+        self.assertEqual(mapping['summary']['ambiguous_match_count'], 1)
+        self.assertIn('ambiguous_raw_object_match', warning_types)
+
+    def test_raw_object_mapping_reports_fuzzy_match_separately(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'][0]['bbox'] = [52.0, 22.0, 302.0, 42.0]
+
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        self.assertEqual(mapping['summary']['exact_match_count'], 1)
+        self.assertEqual(mapping['summary']['fuzzy_match_count'], 1)
+        self.assertEqual(mapping['summary']['mapped_raw_object_count'], 2)
+
+    def test_raw_object_mapping_does_not_mutate_inputs(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        before_pages = json.loads(json.dumps(inputs['page_summaries']))
+        before_raw = json.loads(json.dumps(inputs['raw_object_pages']))
+
+        build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        self.assertEqual(inputs['page_summaries'], before_pages)
+        self.assertEqual(inputs['raw_object_pages'], before_raw)
+
+    def test_raw_object_mapping_disabled_mode_is_clear(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        mapping = build_document_parse_raw_object_mapping_report(**inputs)
+
+        self.assertFalse(mapping['enabled'])
+        self.assertEqual(mapping['summary']['mapped_raw_object_count'], 0)
+        self.assertFalse(mapping['recommendation']['safe_to_attempt_phase_2n'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_raw_object_mapping_hook_stores_report_without_mutating_raw_pages(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        fake_pages = [_FakePage(0)]
+        fake_raw_pages = [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])]
+        before_raw_texts = [block.text for block in fake_raw_pages[0].blocks]
+        pages = Pages()
+
+        report = pages._run_document_parse_raw_object_mapping_validation(
+            layout_report,
+            fake_pages,
+            fake_raw_pages,
+            _document_parse_raw_object_mapping_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_mapping_expected_would_remove_count=2)
+
+        self.assertIs(pages._document_parse_raw_object_mapping_report, report)
+        self.assertEqual(report['summary']['mapped_raw_object_count'], 2)
+        self.assertEqual([block.text for block in fake_raw_pages[0].blocks], before_raw_texts)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_raw_object_mapping_disabled_leaves_report_empty(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        pages = Pages()
+
+        report = pages._run_document_parse_raw_object_mapping_validation(
+            layout_report,
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])])
+
+        self.assertIsNone(report)
+        self.assertIsNone(pages._document_parse_raw_object_mapping_report)
+
 
 def _page(page_index, blocks):
     return {
@@ -2617,6 +2770,202 @@ def _document_parse_hook_layout_report(inputs):
         'pages': inputs['page_summaries'],
         'header_footer_exclusion_dry_run': inputs['dry_run_report'],
     }
+
+
+def _document_parse_raw_mapping_inputs():
+    page_summaries = [
+        {
+            'page_index': 0,
+            'page_number': 1,
+            'text_block_count': 6,
+            'region_counts': {
+                REGION_TOP: 3,
+                REGION_BODY: 1,
+                REGION_BOTTOM: 2,
+            },
+            'text_blocks': [
+                _mapping_summary_block(
+                    0,
+                    _summary_fingerprint('Approved Header', REGION_TOP),
+                    REGION_TOP,
+                    'Approved Header'),
+                _mapping_summary_block(
+                    1,
+                    _summary_fingerprint('Body paragraph', REGION_BODY),
+                    REGION_BODY,
+                    'Body paragraph'),
+                _mapping_summary_block(
+                    2,
+                    _summary_fingerprint('Approved Footer', REGION_BOTTOM),
+                    REGION_BOTTOM,
+                    'Approved Footer'),
+                _mapping_summary_block(
+                    3,
+                    _summary_fingerprint('Rejected Header', REGION_TOP),
+                    REGION_TOP,
+                    'Rejected Header'),
+                _mapping_summary_block(
+                    4,
+                    _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                    REGION_BOTTOM,
+                    'Unsure Footer'),
+                _mapping_summary_block(
+                    5,
+                    _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                    REGION_TOP,
+                    IMAGE_PLACEHOLDER),
+            ],
+        },
+    ]
+    dry_run_report = {
+        'summary': {'candidate_count': 5},
+        'candidates': [
+            _dry_run_candidate(
+                'c-approved-header',
+                _summary_fingerprint('Approved Header', REGION_TOP),
+                ROLE_HEADER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'c-approved-footer',
+                _summary_fingerprint('Approved Footer', REGION_BOTTOM),
+                ROLE_FOOTER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_BOTTOM]),
+            _dry_run_candidate(
+                'c-reject-header',
+                _summary_fingerprint('Rejected Header', REGION_TOP),
+                ROLE_HEADER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'c-unsure-footer',
+                _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                ROLE_FOOTER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_BOTTOM]),
+            _dry_run_candidate(
+                'c-image-placeholder',
+                _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                ROLE_LAYOUT_PLACEHOLDER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_TOP]),
+        ],
+    }
+    review_decisions = {
+        'decisions': [
+            _review_decision(
+                'c-approved-header',
+                _summary_fingerprint('Approved Header', REGION_TOP),
+                'approve_exclude'),
+            _review_decision(
+                'c-approved-footer',
+                _summary_fingerprint('Approved Footer', REGION_BOTTOM),
+                'approve_exclude'),
+            _review_decision(
+                'c-reject-header',
+                _summary_fingerprint('Rejected Header', REGION_TOP),
+                'reject_exclude'),
+            _review_decision(
+                'c-unsure-footer',
+                _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                'unsure'),
+            _review_decision(
+                'c-image-placeholder',
+                _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                'approve_exclude'),
+        ],
+        'summary': {
+            'decision_counts': {
+                'approve_exclude': 3,
+                'reject_exclude': 1,
+                'unsure': 1,
+            },
+        },
+    }
+    return {
+        'page_summaries': page_summaries,
+        'raw_object_pages': [{
+            'page_index': 0,
+            'page_number': 1,
+            'width': 600,
+            'height': 1000,
+            'raw_objects': [
+                _raw_object(0, 'Approved Header', REGION_TOP),
+                _raw_object(1, 'Body paragraph', REGION_BODY),
+                _raw_object(2, 'Approved Footer', REGION_BOTTOM),
+                _raw_object(3, 'Rejected Header', REGION_TOP),
+                _raw_object(4, 'Unsure Footer', REGION_BOTTOM),
+                _raw_object(5, IMAGE_PLACEHOLDER, REGION_TOP),
+            ],
+        }],
+        'dry_run_report': dry_run_report,
+        'review_decisions': review_decisions,
+    }
+
+
+def _summary_fingerprint(text, region):
+    return make_text_fingerprint(text, y_band=region)['key']
+
+
+def _raw_object(block_index, text, region):
+    bbox_by_region = {
+        REGION_TOP: [50.0, 20.0, 300.0, 40.0],
+        REGION_BODY: [50.0, 400.0, 520.0, 420.0],
+        REGION_BOTTOM: [50.0, 960.0, 300.0, 980.0],
+    }
+    bbox = list(bbox_by_region[region])
+    bbox[1] += block_index * 0.2
+    bbox[3] += block_index * 0.2
+    return {
+        'raw_object_id': f'raw-{block_index}',
+        'object_index': block_index,
+        'block_index': block_index,
+        'object_type': 'Line',
+        'fingerprint': _summary_fingerprint(text, region),
+        'region': region,
+        'text': text,
+        'bbox': bbox,
+    }
+
+
+def _mapping_summary_block(block_index, fingerprint, region, text):
+    block = _raw_object(block_index, text, region)
+    return {
+        'block_index': block_index,
+        'fingerprint': fingerprint,
+        'normalized_text': normalize_page_number(text).lower(),
+        'region': region,
+        'text': text,
+        'bbox': block['bbox'],
+    }
+
+
+class _FakePage:
+
+    def __init__(self, page_id):
+        self.id = page_id
+
+
+class _FakeRawPage:
+
+    def __init__(self, raw_objects):
+        self.width = 600
+        self.height = 1000
+        self.blocks = [_FakeRawBlock(raw_object) for raw_object in raw_objects]
+
+
+class _FakeRawBlock:
+
+    def __init__(self, raw_object):
+        self.text = raw_object['text']
+        self.bbox = raw_object['bbox']
+        self.spans = []
 
 
 def _summary_block(block_index, fingerprint, region, text):
