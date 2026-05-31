@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
@@ -960,6 +961,202 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(diff['summary']['would_remove_block_count'], 0)
         self.assertEqual(diff['summary']['kept_block_count'], 4)
 
+    def test_paragraph_integrity_report_has_no_body_loss_for_top_bottom_removal(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph first line', 50, 300, 520, 330),
+                _block('Body paragraph second line', 50, 335, 520, 365),
+                _block('Page 1', 270, 960, 330, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph continues', 50, 300, 520, 330),
+                _block('Body paragraph finishes', 50, 335, 520, 365),
+                _block('Page 2', 270, 960, 330, 980),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown('\n'.join([
+            _review_markdown(
+                'repeated-1',
+                f'{PAGE_NUMBER_PLACEHOLDER.lower()}||bottom',
+                'page_number',
+                'would_exclude',
+                'approve_exclude'),
+            _review_markdown(
+                'repeated-2',
+                'annual report||top',
+                'header',
+                'would_exclude',
+                'approve_exclude'),
+        ]))
+        diff = build_body_filtering_diff_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True)
+
+        self.assertEqual(integrity['summary']['removed_block_count'], 4)
+        self.assertEqual(integrity['summary']['body_region_removed_count'], 0)
+        self.assertEqual(integrity['summary']['top_bottom_removed_count'], 4)
+        self.assertEqual(integrity['suspicious_body_loss_warnings'], [])
+        self.assertEqual(integrity['suspicious_paragraph_gap_warnings'], [])
+        self.assertTrue(integrity['summary']['line_level_body_blocks_available'])
+
+    def test_paragraph_integrity_warns_if_body_region_block_is_removed(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Body paragraph first line', 50, 300, 520, 330),
+                _block('Body paragraph removed line', 50, 335, 520, 365),
+                _block('Body paragraph final line', 50, 370, 520, 400),
+            ]),
+        ])
+        diff = _unsafe_diff_report_for_removed_blocks(
+            report['pages'],
+            [(0, 1)])
+
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True)
+
+        self.assertEqual(integrity['summary']['body_region_removed_count'], 1)
+        self.assertIn(
+            'body_region_removed',
+            {warning['type'] for warning in integrity['suspicious_body_loss_warnings']})
+        self.assertIn(
+            'body_flow_gap',
+            {warning['type'] for warning in integrity['suspicious_paragraph_gap_warnings']})
+
+    def test_paragraph_integrity_warns_on_high_page_body_loss(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Body paragraph first line', 50, 300, 520, 330),
+                _block('Body paragraph second line', 50, 335, 520, 365),
+                _block('Body paragraph third line', 50, 370, 520, 400),
+            ]),
+        ])
+        diff = _unsafe_diff_report_for_removed_blocks(
+            report['pages'],
+            [(0, 0), (0, 1)])
+
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True,
+            high_body_loss_ratio=0.5)
+
+        self.assertIn(
+            'high_body_loss_ratio',
+            {warning['type'] for warning in integrity['suspicious_body_loss_warnings']})
+
+    def test_paragraph_integrity_keeps_line_level_body_blocks_available(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body line one', 50, 300, 520, 330),
+                _block('Body line two', 50, 335, 520, 365),
+                _block('Body line three', 50, 370, 520, 400),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body line four', 50, 300, 520, 330),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            'annual report||top',
+            'header',
+            'would_exclude',
+            'approve_exclude'))
+        diff = build_body_filtering_diff_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True)
+        kept_body_blocks = [
+            block
+            for page in integrity['filtered_pages']
+            for block in page['text_blocks']
+            if block['region'] == REGION_BODY
+        ]
+
+        self.assertEqual(len(kept_body_blocks), 4)
+        self.assertTrue(integrity['summary']['line_level_body_blocks_available'])
+
+    def test_paragraph_integrity_report_does_not_mutate_input(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('More body text.', 50, 300, 520, 330),
+            ]),
+        ])
+        before = json.loads(json.dumps(report['pages']))
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            'annual report||top',
+            'header',
+            'would_exclude',
+            'approve_exclude'))
+        diff = build_body_filtering_diff_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+
+        build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True)
+
+        self.assertEqual(report['pages'], before)
+
+    def test_paragraph_integrity_disabled_mode_keeps_original_summaries(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('More body text.', 50, 300, 520, 330),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            'annual report||top',
+            'header',
+            'would_exclude',
+            'approve_exclude'))
+        diff = build_body_filtering_diff_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff)
+
+        self.assertFalse(integrity['enabled'])
+        self.assertEqual(integrity['summary']['removed_block_count'], 0)
+        self.assertEqual(integrity['summary']['filtered_block_count'], 4)
+        self.assertEqual(integrity['filtered_pages'], report['pages'])
+
 
 def _page(page_index, blocks):
     return {
@@ -1000,6 +1197,46 @@ def _review_markdown(candidate_id, fingerprint, role, action, decision):
         f'reject_exclude: {markers["reject_exclude"]}    '
         f'unsure: {markers["unsure"]}',
     ])
+
+
+def _unsafe_diff_report_for_removed_blocks(pages, removed_keys):
+    removed_by_page = []
+    for page in pages:
+        page_removed = []
+        page_index = page['page_index']
+        for block in page['text_blocks']:
+            if (page_index, block['block_index']) in set(removed_keys):
+                page_removed.append({
+                    'page_index': page_index,
+                    'page_number': page_index + 1,
+                    'block_index': block['block_index'],
+                    'candidate_id': 'unsafe-body',
+                    'fingerprint': block['fingerprint'],
+                    'proposed_role': 'header',
+                    'manual_decision': 'reject_exclude',
+                    'explicit_approval': False,
+                    'region': block['region'],
+                    'reason': 'unsafe synthetic removal',
+                    'short_preview': block['text'],
+                })
+        removed_by_page.append({
+            'page_index': page_index,
+            'page_number': page_index + 1,
+            'removed_count': len(page_removed),
+            'blocks': page_removed,
+        })
+
+    return {
+        'enabled': True,
+        'summary': {
+            'original_block_count': sum(len(page['text_blocks']) for page in pages),
+        },
+        'removed_blocks_by_page': removed_by_page,
+        'kept_blocks_by_page': [],
+        'removed_blocks_by_candidate': [],
+        'retained_candidates': [],
+        'safety': {'warnings': []},
+    }
 
 
 if __name__ == '__main__':

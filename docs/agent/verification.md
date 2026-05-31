@@ -633,3 +633,92 @@ Result: confirmed local PDF/report/review/diff files, `.venv/`, and generated ca
 ### Phase 2C recommendation
 
 Phase 2C is reasonable to attempt only as another opt-in/internal step. It should still avoid default conversion changes, use explicit manual approvals, and add fixture-level checks that compare retained body text before any integration with production `Pages`, `Page`, `Blocks`, or DOCX generation paths.
+
+## Phase 2C
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2C added a report-only paragraph integrity validation helper. It compares original page summaries with the reviewed filtering diff, simulates filtered summaries in memory, and reports whether approved header/footer/page-number removal would damage body text continuity.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merging or body filtering was added.
+
+Existing paragraph-like grouping remains in the normal pipeline: `Blocks.parse_block()` joins physical lines and `Lines.split_vertically_by_text()` splits text into paragraph-like `TextBlock` objects later in layout parsing. Phase 2C did not refactor that pipeline.
+
+### Local paragraph integrity report
+
+Generated ignored local-only file:
+
+```text
+local_reports/paragraph-integrity-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+### Sample summary
+
+- Original blocks: 790.
+- Filtered blocks: 742.
+- Removed blocks: 48.
+- Body-region kept blocks: 520.
+- Body-region removed blocks: 0.
+- Top-region removed blocks: 12.
+- Bottom-region removed blocks: 36.
+- Top/bottom removed blocks: 48.
+- Suspicious paragraph/body-loss warning count: 0.
+- Possible cross-page continuation candidates after filtering: 11 `unlikely`, 0 `weak`, 0 `candidate`.
+- Line-level body content remains available for later paragraph reconstruction.
+
+The report indicates that the approved removals are limited to reviewed top/bottom artifacts for the sample. It does not prove paragraph reconstruction quality by itself; it only confirms this filtering prototype does not remove body-region line/block summaries.
+
+### Tests added
+
+- Paragraph integrity report detects no body loss when only approved top/bottom artifacts are removed.
+- Paragraph integrity report warns if a body-region block would be removed.
+- Paragraph integrity report warns if a page loses an unusually high number of body blocks.
+- Paragraph integrity report keeps line-level body blocks available for later paragraph grouping.
+- Report generation does not mutate original page summaries.
+- Disabled mode keeps original summaries unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 45 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 45 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diff/paragraph-integrity files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2D recommendation
+
+Phase 2D is safe to attempt only as another explicit opt-in/internal step. Before any production parse-path integration, keep the reviewed filtering gate, preserve a dry-run comparison, and add paragraph reconstruction checks that validate retained line-level body blocks can still be grouped into sensible DOCX paragraphs.

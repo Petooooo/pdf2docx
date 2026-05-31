@@ -561,6 +561,104 @@ def build_body_filtering_diff_report(
     }
 
 
+def build_paragraph_integrity_report(
+        page_summaries: list,
+        body_filtering_diff_report: dict = None,
+        enabled: bool = False,
+        high_body_loss_ratio: float = 0.2) -> dict:
+    '''Validate paragraph-oriented body integrity after reviewed filtering.'''
+    diff_report = body_filtering_diff_report or {}
+    removed_lookup = _diff_report_removed_lookup(diff_report) if enabled else {}
+    filtered_pages = []
+    pages_report = []
+    body_loss_warnings = []
+    paragraph_gap_warnings = []
+    original_block_count = 0
+    filtered_block_count = 0
+    removed_block_count = 0
+    body_region_kept_count = 0
+    body_region_removed_count = 0
+    top_removed_count = 0
+    bottom_removed_count = 0
+
+    for page in page_summaries or []:
+        page_index = page.get('page_index')
+        blocks = page.get('text_blocks', []) or []
+        original_block_count += len(blocks)
+        kept_blocks = []
+        removed_blocks = []
+
+        for block in blocks:
+            key = (page_index, block.get('block_index'))
+            if key in removed_lookup:
+                summary = _integrity_removed_block_summary(
+                    page_index,
+                    block,
+                    removed_lookup[key])
+                removed_blocks.append(summary)
+                removed_block_count += 1
+
+                if block.get('region') == REGION_BODY:
+                    body_region_removed_count += 1
+                elif block.get('region') == REGION_TOP:
+                    top_removed_count += 1
+                elif block.get('region') == REGION_BOTTOM:
+                    bottom_removed_count += 1
+                continue
+
+            kept_blocks.append(dict(block))
+            if block.get('region') == REGION_BODY:
+                body_region_kept_count += 1
+
+        filtered_block_count += len(kept_blocks)
+        filtered_page = _filtered_page_summary(page, kept_blocks)
+        filtered_pages.append(filtered_page)
+
+        page_report = _paragraph_integrity_page_report(
+            page,
+            kept_blocks,
+            removed_blocks,
+            high_body_loss_ratio)
+        pages_report.append(page_report)
+        body_loss_warnings.extend(page_report['body_loss_warnings'])
+        paragraph_gap_warnings.extend(page_report['paragraph_gap_warnings'])
+
+    continuation_candidates = find_paragraph_continuation_candidates(filtered_pages)
+    diff_safety_warnings = (diff_report.get('safety') or {}).get('warnings', [])
+    warning_count = (
+        len(body_loss_warnings) +
+        len(paragraph_gap_warnings) +
+        len(diff_safety_warnings))
+    safe = warning_count == 0 and body_region_removed_count == 0
+
+    return {
+        'enabled': bool(enabled),
+        'policy': 'paragraph_integrity_report_only',
+        'summary': {
+            'original_block_count': original_block_count,
+            'filtered_block_count': filtered_block_count if enabled else original_block_count,
+            'removed_block_count': removed_block_count if enabled else 0,
+            'body_region_kept_count': body_region_kept_count,
+            'body_region_removed_count': body_region_removed_count if enabled else 0,
+            'top_removed_count': top_removed_count if enabled else 0,
+            'bottom_removed_count': bottom_removed_count if enabled else 0,
+            'top_bottom_removed_count': (top_removed_count + bottom_removed_count) if enabled else 0,
+            'line_level_body_blocks_available': body_region_kept_count > 0,
+            'suspicious_warning_count': warning_count if enabled else 0,
+        },
+        'pages': pages_report,
+        'filtered_pages': filtered_pages if enabled else _copy_page_summaries(page_summaries),
+        'suspicious_body_loss_warnings': body_loss_warnings if enabled else [],
+        'suspicious_paragraph_gap_warnings': paragraph_gap_warnings if enabled else [],
+        'diff_safety_warnings': diff_safety_warnings if enabled else [],
+        'possible_cross_page_continuation_candidates': continuation_candidates if enabled else [],
+        'recommendation': {
+            'safe_to_attempt_phase_2d': bool(enabled and safe),
+            'reason': _paragraph_integrity_recommendation(enabled, safe, warning_count),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -1043,6 +1141,172 @@ def _human_page_number(page_index):
     if isinstance(page_index, int):
         return page_index + 1
     return page_index
+
+
+def _diff_report_removed_lookup(diff_report: dict) -> dict:
+    lookup = {}
+    for page in (diff_report or {}).get('removed_blocks_by_page', []) or []:
+        page_index = page.get('page_index')
+        for block in page.get('blocks', []) or []:
+            lookup[(page_index, block.get('block_index'))] = block
+    return lookup
+
+
+def _integrity_removed_block_summary(page_index, block: dict, removed: dict) -> dict:
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'block_index': block.get('block_index'),
+        'region': block.get('region', ''),
+        'fingerprint': block.get('fingerprint', ''),
+        'candidate_id': removed.get('candidate_id', ''),
+        'proposed_role': removed.get('proposed_role', ''),
+        'explicit_approval': bool(removed.get('explicit_approval')),
+        'short_preview': _preview_text(block, max_length=100),
+    }
+
+
+def _paragraph_integrity_page_report(
+        page: dict,
+        kept_blocks: list,
+        removed_blocks: list,
+        high_body_loss_ratio: float) -> dict:
+    page_index = page.get('page_index')
+    original_blocks = page.get('text_blocks', []) or []
+    original_body_blocks = [
+        block for block in original_blocks
+        if block.get('region') == REGION_BODY
+    ]
+    kept_body_blocks = [
+        block for block in kept_blocks
+        if block.get('region') == REGION_BODY
+    ]
+    removed_body_blocks = [
+        block for block in removed_blocks
+        if block.get('region') == REGION_BODY
+    ]
+    body_loss_warnings = []
+    paragraph_gap_warnings = []
+
+    if removed_body_blocks:
+        body_loss_warnings.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'type': 'body_region_removed',
+            'message': 'Body-region blocks would be removed.',
+            'removed_body_count': len(removed_body_blocks),
+            'blocks': removed_body_blocks,
+        })
+
+    body_loss_ratio = (
+        len(removed_body_blocks) / len(original_body_blocks)
+        if original_body_blocks else 0.0)
+    if body_loss_ratio > high_body_loss_ratio:
+        body_loss_warnings.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'type': 'high_body_loss_ratio',
+            'message': 'Page would lose an unusually high share of body-region blocks.',
+            'removed_body_count': len(removed_body_blocks),
+            'original_body_count': len(original_body_blocks),
+            'body_loss_ratio': round(body_loss_ratio, 3),
+        })
+
+    paragraph_gap_warnings.extend(_paragraph_gap_warnings(
+        page_index,
+        original_blocks,
+        kept_blocks,
+        removed_blocks))
+
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'original_block_count': len(original_blocks),
+        'filtered_block_count': len(kept_blocks),
+        'removed_block_count': len(removed_blocks),
+        'body_region_original_count': len(original_body_blocks),
+        'body_region_kept_count': len(kept_body_blocks),
+        'body_region_removed_count': len(removed_body_blocks),
+        'top_bottom_removed_count': sum(
+            1 for block in removed_blocks
+            if block.get('region') in {REGION_TOP, REGION_BOTTOM}),
+        'removed_blocks': removed_blocks,
+        'body_loss_warnings': body_loss_warnings,
+        'paragraph_gap_warnings': paragraph_gap_warnings,
+    }
+
+
+def _paragraph_gap_warnings(
+        page_index,
+        original_blocks: list,
+        kept_blocks: list,
+        removed_blocks: list) -> list:
+    warnings = []
+    removed_body_indices = {
+        block.get('block_index')
+        for block in removed_blocks
+        if block.get('region') == REGION_BODY
+    }
+    if not removed_body_indices:
+        return warnings
+
+    kept_body_indices = {
+        block.get('block_index')
+        for block in kept_blocks
+        if block.get('region') == REGION_BODY
+    }
+    original_body_blocks = [
+        block for block in sorted(
+            original_blocks,
+            key=lambda item: item.get('block_index', 0))
+        if block.get('region') == REGION_BODY
+    ]
+
+    for index, block in enumerate(original_body_blocks):
+        block_index = block.get('block_index')
+        if block_index not in removed_body_indices:
+            continue
+
+        previous_kept = any(
+            item.get('block_index') in kept_body_indices
+            for item in original_body_blocks[:index])
+        next_kept = any(
+            item.get('block_index') in kept_body_indices
+            for item in original_body_blocks[index+1:])
+        if previous_kept and next_kept:
+            warnings.append({
+                'page_index': page_index,
+                'page_number': _human_page_number(page_index),
+                'type': 'body_flow_gap',
+                'message': 'Removed body-region block sits between kept body blocks.',
+                'block_index': block_index,
+                'short_preview': _preview_text(block, max_length=100),
+            })
+
+    return warnings
+
+
+def _copy_page_summaries(page_summaries: list) -> list:
+    copied = []
+    for page in page_summaries or []:
+        copied_page = dict(page)
+        copied_page['text_blocks'] = [
+            dict(block)
+            for block in page.get('text_blocks', []) or []
+        ]
+        copied.append(copied_page)
+    return copied
+
+
+def _paragraph_integrity_recommendation(
+        enabled: bool,
+        safe: bool,
+        warning_count: int) -> str:
+    if not enabled:
+        return 'Paragraph integrity validation is disabled; no filtering assumptions were evaluated.'
+    if safe:
+        return 'No suspicious body loss or paragraph-gap warnings were detected in the report-only validation.'
+    return f'Found {warning_count} warning(s); do not connect filtering to production parsing yet.'
 
 
 def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:
