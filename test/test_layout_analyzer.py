@@ -29,6 +29,7 @@ build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclu
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
+build_document_parse_guarded_raw_page_apply_restore_report = LayoutAnalyzer.build_document_parse_guarded_raw_page_apply_restore_report
 build_document_parse_raw_object_mapping_report = LayoutAnalyzer.build_document_parse_raw_object_mapping_report
 build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
 build_filter_insertion_point_analysis_report = LayoutAnalyzer.build_filter_insertion_point_analysis_report
@@ -2610,6 +2611,133 @@ class TestLayoutAnalyzer(unittest.TestCase):
 
         self.assertIsNone(report)
         self.assertIsNone(pages._document_parse_copied_raw_filtering_apply_report)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_guarded_raw_apply_removes_only_approved_during_apply_and_restores(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        fake_pages = [_FakePage(0)]
+        fake_raw_pages = [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])]
+        before_raw_texts = [block.text for block in fake_raw_pages[0].blocks]
+
+        report = Pages()._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            fake_pages,
+            fake_raw_pages,
+            _document_parse_guarded_raw_apply_restore_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_guarded_raw_apply_restore_expected_mapping_count=2)
+
+        self.assertEqual(report['summary']['removed_during_apply_count'], 2)
+        self.assertEqual(report['summary']['filtered_raw_block_count_during_apply'], 4)
+        self.assertEqual(report['summary']['restored_raw_block_count_after_restore'], 6)
+        self.assertTrue(report['summary']['restore_exact_count_match'])
+        self.assertTrue(report['summary']['restore_fingerprint_match'])
+        self.assertFalse(report['summary']['original_raw_pages_left_mutated'])
+        self.assertEqual([block.text for block in fake_raw_pages[0].blocks], before_raw_texts)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_guarded_raw_apply_keeps_rejected_unsure_placeholder_and_body(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        report = Pages()._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])],
+            _document_parse_guarded_raw_apply_restore_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_guarded_raw_apply_restore_expected_mapping_count=2)
+
+        self.assertEqual(report['summary']['body_region_removed_count'], 0)
+        self.assertEqual(
+            report['summary']['rejected_unsure_layout_placeholder_removed_count'],
+            0)
+        self.assertEqual(
+            report['downstream_risk_notes']['body_block_count_before'],
+            report['downstream_risk_notes']['body_block_count_during_apply'])
+        self.assertEqual(
+            report['downstream_risk_notes']['image_shape_placeholder_count_before'],
+            report['downstream_risk_notes']['image_shape_placeholder_count_during_apply'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_guarded_raw_apply_warns_and_skips_when_mapping_missing(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        raw_objects = [
+            raw_object
+            for raw_object in inputs['raw_object_pages'][0]['raw_objects']
+            if raw_object['fingerprint'] != _summary_fingerprint('Approved Footer', REGION_BOTTOM)
+        ]
+        fake_raw_pages = [_FakeRawPage(raw_objects)]
+
+        report = Pages()._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            fake_raw_pages,
+            _document_parse_guarded_raw_apply_restore_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_guarded_raw_apply_restore_expected_mapping_count=2)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertEqual(report['summary']['removed_during_apply_count'], 0)
+        self.assertIn('mapping_missing_raw_object_match', warning_types)
+        self.assertIn('guarded_apply_skipped', warning_types)
+        self.assertTrue(report['summary']['restore_exact_count_match'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_guarded_raw_apply_warns_and_skips_when_mapping_ambiguous(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        raw_objects = list(inputs['raw_object_pages'][0]['raw_objects'])
+        raw_objects.append(_raw_object(6, 'Approved Header', REGION_TOP))
+
+        report = Pages()._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            [_FakeRawPage(raw_objects)],
+            _document_parse_guarded_raw_apply_restore_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_guarded_raw_apply_restore_expected_mapping_count=2)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertEqual(report['summary']['removed_during_apply_count'], 0)
+        self.assertIn('mapping_ambiguous_raw_object_match', warning_types)
+        self.assertIn('guarded_apply_skipped', warning_types)
+        self.assertTrue(report['summary']['restore_fingerprint_match'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_guarded_raw_apply_count_matches_phase_2m_and_2n(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        report = Pages()._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])],
+            _document_parse_guarded_raw_apply_restore_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_guarded_raw_apply_restore_expected_mapping_count=2)
+
+        self.assertTrue(report['consistency']['removed_count_matches_phase_2m'])
+        self.assertTrue(report['consistency']['removed_count_matches_phase_2n'])
+        self.assertTrue(report['recommendation']['safe_to_attempt_phase_2p'])
+
+    def test_guarded_raw_apply_disabled_mode_is_clear(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        report = build_document_parse_guarded_raw_page_apply_restore_report(
+            raw_object_pages_before=inputs['raw_object_pages'])
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['removed_during_apply_count'], 0)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2p'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_guarded_raw_apply_disabled_leaves_report_empty(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        pages = Pages()
+
+        report = pages._run_document_parse_guarded_raw_apply_restore(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])])
+
+        self.assertIsNone(report)
+        self.assertIsNone(pages._document_parse_guarded_raw_apply_restore_report)
 
 
 def _page(page_index, blocks):

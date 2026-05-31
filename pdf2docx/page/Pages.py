@@ -7,8 +7,10 @@ import logging
 from .LayoutAnalyzer import (
     build_document_parse_copied_raw_page_filtering_apply_report,
     build_document_parse_filtering_hook_report,
+    build_document_parse_guarded_raw_page_apply_restore_report,
     build_document_parse_raw_object_mapping_report,
     build_layout_analysis_report,
+    reviewed_raw_object_removal_plan,
 )
 from .RawPageFactory import RawPageFactory
 from ..common.Collection import BaseCollection
@@ -24,6 +26,7 @@ class Pages(BaseCollection):
         self._document_parse_filtering_hook_report = None
         self._document_parse_raw_object_mapping_report = None
         self._document_parse_copied_raw_filtering_apply_report = None
+        self._document_parse_guarded_raw_apply_restore_report = None
 
 
     @property
@@ -45,6 +48,7 @@ class Pages(BaseCollection):
         self._document_parse_filtering_hook_report = None
         self._document_parse_raw_object_mapping_report = None
         self._document_parse_copied_raw_filtering_apply_report = None
+        self._document_parse_guarded_raw_apply_restore_report = None
 
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
@@ -126,6 +130,16 @@ class Pages(BaseCollection):
                 raw_pages,
                 **settings)
 
+        if settings.get('_document_parse_guarded_raw_apply_restore_enabled'):
+            if layout_analysis_report is None:
+                layout_analysis_report = Pages._build_layout_analysis_report(
+                    pages, raw_pages, **settings)
+            self._run_document_parse_guarded_raw_apply_restore(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                **settings)
+
         header, footer = Pages._parse_document(raw_pages)
 
 
@@ -201,6 +215,27 @@ class Pages(BaseCollection):
         return self._document_parse_copied_raw_filtering_apply_report
 
 
+    def _run_document_parse_guarded_raw_apply_restore(
+            self,
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            **settings):
+        '''Apply reviewed filtering to raw pages and restore before returning.'''
+        if not settings.get('_document_parse_guarded_raw_apply_restore_enabled'):
+            self._document_parse_guarded_raw_apply_restore_report = None
+            return None
+
+        self._document_parse_guarded_raw_apply_restore_report = Pages._build_document_parse_guarded_raw_apply_restore_report(
+            layout_analysis_report,
+            pages,
+            raw_pages,
+            raw_object_mapping_report=self._document_parse_raw_object_mapping_report,
+            copied_apply_report=self._document_parse_copied_raw_filtering_apply_report,
+            **settings)
+        return self._document_parse_guarded_raw_apply_restore_report
+
+
     @staticmethod
     def _build_document_parse_filtering_hook_report(
             layout_analysis_report:dict,
@@ -271,6 +306,71 @@ class Pages(BaseCollection):
 
 
     @staticmethod
+    def _build_document_parse_guarded_raw_apply_restore_report(
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            raw_object_mapping_report:dict=None,
+            copied_apply_report:dict=None,
+            **settings):
+        layout_analysis_report = layout_analysis_report or {}
+        raw_object_pages_before = Pages._raw_object_mapping_pages(pages, raw_pages)
+        mapping_report = raw_object_mapping_report or build_document_parse_raw_object_mapping_report(
+            layout_analysis_report.get('pages', []),
+            raw_object_pages_before,
+            settings.get('_document_parse_mapping_dry_run_report') or
+            layout_analysis_report.get('header_footer_exclusion_dry_run', {}),
+            settings.get('_document_parse_filtering_review_decisions'),
+            enabled=True,
+            expected_would_remove_count=settings.get(
+                '_document_parse_guarded_raw_apply_restore_expected_mapping_count'))
+        copied_apply_report = copied_apply_report or build_document_parse_copied_raw_page_filtering_apply_report(
+            layout_analysis_report.get('pages', []),
+            raw_object_pages_before,
+            settings.get('_document_parse_mapping_dry_run_report') or
+            layout_analysis_report.get('header_footer_exclusion_dry_run', {}),
+            settings.get('_document_parse_filtering_review_decisions'),
+            raw_object_mapping_report=mapping_report,
+            enabled=True,
+            expected_mapping_count=settings.get(
+                '_document_parse_guarded_raw_apply_restore_expected_mapping_count'))
+
+        snapshot = Pages._snapshot_raw_page_blocks(raw_pages)
+        snapshot_created = True
+        restore_completed = False
+        removed_by_page = []
+        apply_skipped_reason = ''
+        try:
+            if mapping_report.get('safety_warnings'):
+                apply_skipped_reason = 'mapping_report_has_safety_warnings'
+                raw_object_pages_during = raw_object_pages_before
+            else:
+                removed_by_page = Pages._apply_guarded_raw_page_filter(
+                    pages,
+                    raw_pages,
+                    reviewed_raw_object_removal_plan(mapping_report))
+                raw_object_pages_during = Pages._raw_object_mapping_pages(pages, raw_pages)
+        finally:
+            Pages._restore_raw_page_blocks(snapshot)
+            restore_completed = True
+
+        raw_object_pages_after = Pages._raw_object_mapping_pages(pages, raw_pages)
+        return build_document_parse_guarded_raw_page_apply_restore_report(
+            raw_object_pages_before,
+            raw_object_pages_during,
+            raw_object_pages_after,
+            removed_by_page,
+            raw_object_mapping_report=mapping_report,
+            copied_apply_report=copied_apply_report,
+            enabled=bool(settings.get('_document_parse_guarded_raw_apply_restore_enabled')),
+            snapshot_created=snapshot_created,
+            restore_completed=restore_completed,
+            expected_mapping_count=settings.get(
+                '_document_parse_guarded_raw_apply_restore_expected_mapping_count'),
+            apply_skipped_reason=apply_skipped_reason)
+
+
+    @staticmethod
     def _build_layout_analysis_report(pages:list, raw_pages:list, **settings):
         analysis_pages = Pages._layout_analysis_pages(pages, raw_pages)
         return build_layout_analysis_report(
@@ -322,6 +422,71 @@ class Pages(BaseCollection):
             'bbox': Pages._json_bbox(getattr(block, 'bbox', None)),
             'style': Pages._layout_analysis_style(block),
         }
+
+
+    @staticmethod
+    def _snapshot_raw_page_blocks(raw_pages:list):
+        return [
+            {
+                'raw_page': raw_page,
+                'blocks': list(raw_page.blocks),
+            }
+            for raw_page in raw_pages or []
+        ]
+
+
+    @staticmethod
+    def _restore_raw_page_blocks(snapshot:list):
+        for item in snapshot or []:
+            Pages._reset_raw_page_blocks(
+                item.get('raw_page'),
+                item.get('blocks', []))
+
+
+    @staticmethod
+    def _apply_guarded_raw_page_filter(pages:list, raw_pages:list, removal_plan:list):
+        remove_by_key = {
+            (item.get('page_index'), item.get('raw_object_id')): item
+            for item in removal_plan or []
+        }
+        removed_by_page = []
+        for page, raw_page in zip(pages or [], raw_pages or []):
+            kept_blocks = []
+            removed_objects = []
+            for index, block in enumerate(raw_page.blocks):
+                raw_object = Pages._raw_object_mapping_block(page.id, index, block)
+                plan_item = remove_by_key.get((page.id, raw_object.get('raw_object_id')))
+                if plan_item:
+                    raw_object.update({
+                        'candidate_id': plan_item.get('candidate_id', ''),
+                        'proposed_role': plan_item.get('proposed_role', ''),
+                        'mapping_status': plan_item.get('mapping_status', ''),
+                        'removal_reason': 'guarded_apply_restore_experiment',
+                    })
+                    removed_objects.append(raw_object)
+                    continue
+                kept_blocks.append(block)
+
+            Pages._reset_raw_page_blocks(raw_page, kept_blocks)
+            removed_by_page.append({
+                'page_index': page.id,
+                'page_number': page.id + 1,
+                'removed_count': len(removed_objects),
+                'objects': removed_objects,
+            })
+
+        return removed_by_page
+
+
+    @staticmethod
+    def _reset_raw_page_blocks(raw_page, blocks:list):
+        if hasattr(raw_page.blocks, '_instances'):
+            # Preserve exact object identity/count; reset() may skip falsey bbox objects.
+            raw_page.blocks._instances = list(blocks)
+        elif isinstance(raw_page.blocks, list):
+            raw_page.blocks[:] = list(blocks)
+        else:
+            raw_page.blocks = list(blocks)
 
 
     @staticmethod

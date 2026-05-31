@@ -965,6 +965,101 @@ def build_document_parse_copied_raw_page_filtering_apply_report(
     }
 
 
+def reviewed_raw_object_removal_plan(raw_object_mapping_report: dict) -> list:
+    '''Return safe reviewed raw-object removal targets from a mapping report.'''
+    return _copied_apply_removal_plan(raw_object_mapping_report)
+
+
+def build_document_parse_guarded_raw_page_apply_restore_report(
+        raw_object_pages_before: list = None,
+        raw_object_pages_during: list = None,
+        raw_object_pages_after: list = None,
+        removed_objects_by_page: list = None,
+        raw_object_mapping_report: dict = None,
+        copied_apply_report: dict = None,
+        enabled: bool = False,
+        snapshot_created: bool = False,
+        restore_completed: bool = False,
+        expected_mapping_count: int = None,
+        apply_skipped_reason: str = '') -> dict:
+    '''Report a guarded production raw-page apply/restore experiment.'''
+    before = _copy_raw_object_pages(raw_object_pages_before)
+    during = _copy_raw_object_pages(raw_object_pages_during or raw_object_pages_before)
+    after = _copy_raw_object_pages(raw_object_pages_after or raw_object_pages_before)
+    removed_by_page = [
+        {
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'removed_count': page.get('removed_count', 0),
+            'objects': [dict(raw_object) for raw_object in page.get('objects', []) or []],
+        }
+        for page in removed_objects_by_page or []
+    ]
+    removed_objects = [
+        raw_object
+        for page in removed_by_page
+        for raw_object in page.get('objects', []) or []
+    ]
+    if not enabled:
+        original_count = _raw_object_page_count(before)
+        return {
+            'enabled': False,
+            'experiment_mode': 'guarded_apply_restore',
+            'production_applied': False,
+            'policy': 'guarded_raw_page_apply_restore_report_only',
+            'insertion_point': 'document_parse',
+            'summary': _guarded_apply_disabled_summary(original_count),
+            'removed_objects_by_page': [],
+            'removed_counts_by_role': {},
+            'removed_counts_by_page': [],
+            'downstream_risk_notes': _guarded_apply_downstream_risk_notes(before, before),
+            'consistency': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2p': False,
+                'reason': 'Guarded raw-page apply/restore experiment is disabled.',
+            },
+        }
+
+    consistency = _guarded_apply_consistency(
+        raw_object_mapping_report,
+        copied_apply_report,
+        len(removed_objects),
+        expected_mapping_count)
+    summary = _guarded_apply_summary(
+        before,
+        during,
+        after,
+        removed_objects,
+        raw_object_mapping_report,
+        snapshot_created,
+        restore_completed,
+        consistency)
+    warnings = _guarded_apply_warnings(
+        summary,
+        raw_object_mapping_report,
+        consistency,
+        apply_skipped_reason)
+    return {
+        'enabled': True,
+        'experiment_mode': 'guarded_apply_restore',
+        'production_applied': False,
+        'policy': 'guarded_raw_page_apply_restore_report_only',
+        'insertion_point': 'document_parse',
+        'summary': summary,
+        'removed_objects_by_page': removed_by_page,
+        'removed_counts_by_role': _copied_apply_removed_counts_by_role(removed_objects),
+        'removed_counts_by_page': _copied_apply_removed_counts_by_page(removed_by_page),
+        'downstream_risk_notes': _guarded_apply_downstream_risk_notes(before, during),
+        'consistency': consistency,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2p': _guarded_apply_safe_for_phase_2p(summary, warnings),
+            'reason': _guarded_apply_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -2890,6 +2985,211 @@ def _copied_apply_recommendation(summary: dict, warnings: list) -> str:
     if _copied_apply_safe_for_phase_2o(summary, warnings):
         return 'Copied raw-page filtering removed only validated reviewed objects; Phase 2O can remain opt-in and non-default.'
     return 'Do not apply production filtering yet; resolve copied-apply warnings first.'
+
+
+def _guarded_apply_disabled_summary(original_count: int) -> dict:
+    return {
+        'original_raw_block_count_before_apply': original_count,
+        'filtered_raw_block_count_during_apply': original_count,
+        'restored_raw_block_count_after_restore': original_count,
+        'removed_during_apply_count': 0,
+        'body_region_removed_count': 0,
+        'rejected_unsure_layout_placeholder_removed_count': 0,
+        'snapshot_created': False,
+        'restore_completed': False,
+        'restore_exact_count_match': True,
+        'restore_fingerprint_match': True,
+        'original_raw_pages_left_mutated': False,
+    }
+
+
+def _guarded_apply_summary(
+        before: list,
+        during: list,
+        after: list,
+        removed_objects: list,
+        mapping_report: dict,
+        snapshot_created: bool,
+        restore_completed: bool,
+        consistency: dict) -> dict:
+    before_fingerprint = _raw_object_page_fingerprint(before)
+    after_fingerprint = _raw_object_page_fingerprint(after)
+    original_count = _raw_object_page_count(before)
+    filtered_count = _raw_object_page_count(during)
+    restored_count = _raw_object_page_count(after)
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    body_removed = sum(1 for item in removed_objects or [] if item.get('region') == REGION_BODY)
+    blocked_removed = sum(
+        1 for item in removed_objects or []
+        if (
+            item.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER or
+            item.get('placeholder_kind') == 'image' or
+            'blocked_review_decision_fingerprint' in item.get('unsafe_signals', [])))
+    count_match = original_count == restored_count
+    fingerprint_match = before_fingerprint == after_fingerprint
+    return {
+        'original_raw_block_count_before_apply': original_count,
+        'filtered_raw_block_count_during_apply': filtered_count,
+        'restored_raw_block_count_after_restore': restored_count,
+        'removed_during_apply_count': len(removed_objects),
+        'approved_candidate_count': mapping_summary.get('approved_candidate_count', 0),
+        'blocked_candidate_count': mapping_summary.get('blocked_candidate_count', 0),
+        'body_region_removed_count': body_removed,
+        'rejected_unsure_layout_placeholder_removed_count': blocked_removed,
+        'snapshot_created': bool(snapshot_created),
+        'restore_completed': bool(restore_completed),
+        'restore_exact_count_match': count_match,
+        'restore_fingerprint_match': fingerprint_match,
+        'original_raw_pages_left_mutated': not (count_match and fingerprint_match),
+        'phase_2m_mapped_raw_object_count': consistency.get('phase_2m_mapped_raw_object_count', 0),
+        'phase_2n_removed_copied_block_count': consistency.get('phase_2n_removed_copied_block_count'),
+        'removed_count_matches_phase_2m': consistency.get('removed_count_matches_phase_2m', False),
+        'removed_count_matches_phase_2n': consistency.get('removed_count_matches_phase_2n', False),
+    }
+
+
+def _guarded_apply_consistency(
+        mapping_report: dict,
+        copied_apply_report: dict,
+        removed_count: int,
+        expected_mapping_count: int = None) -> dict:
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    copied_summary = (copied_apply_report or {}).get('summary') or {}
+    mapped_count = mapping_summary.get('mapped_raw_object_count', 0)
+    copied_removed_count = copied_summary.get('removed_copied_block_count')
+    expected_mapping_count = (
+        expected_mapping_count
+        if expected_mapping_count is not None else
+        mapped_count)
+    return {
+        'phase_2m_mapped_raw_object_count': mapped_count,
+        'phase_2n_removed_copied_block_count': copied_removed_count,
+        'expected_mapping_count': expected_mapping_count,
+        'removed_during_apply_count': removed_count,
+        'removed_count_matches_phase_2m': removed_count == mapped_count,
+        'removed_count_matches_phase_2n': (
+            copied_removed_count is None or removed_count == copied_removed_count),
+        'expected_mapping_count_matches_phase_2m': expected_mapping_count == mapped_count,
+    }
+
+
+def _guarded_apply_downstream_risk_notes(before: list, during: list) -> dict:
+    before_body_count = _raw_object_region_count(before, REGION_BODY)
+    during_body_count = _raw_object_region_count(during, REGION_BODY)
+    before_placeholder_count = _raw_object_placeholder_count(before)
+    during_placeholder_count = _raw_object_placeholder_count(during)
+    return {
+        'margin_input_count_before': _raw_object_page_count(before),
+        'margin_input_count_during_apply': _raw_object_page_count(during),
+        'section_input_count_before': _raw_object_page_count(before),
+        'section_input_count_during_apply': _raw_object_page_count(during),
+        'body_block_count_before': before_body_count,
+        'body_block_count_during_apply': during_body_count,
+        'image_shape_placeholder_count_before': before_placeholder_count,
+        'image_shape_placeholder_count_during_apply': during_placeholder_count,
+        'table_risk_note': (
+            'Guarded apply preserved body-region raw objects during the apply window.'
+            if before_body_count == during_body_count else
+            'Guarded apply removed body-region raw objects during the apply window.'),
+        'paragraph_grouping_risk_note': (
+            'Guarded apply preserved body-region line/block objects during the apply window.'
+            if before_body_count == during_body_count else
+            'Guarded apply removed body-region line/block objects during the apply window.'),
+    }
+
+
+def _guarded_apply_warnings(
+        summary: dict,
+        mapping_report: dict,
+        consistency: dict,
+        apply_skipped_reason: str = '') -> list:
+    warnings = []
+    for warning in (mapping_report or {}).get('safety_warnings', []) or []:
+        warnings.append({
+            'type': f'mapping_{warning.get("type", "warning")}',
+            'message': warning.get('message', ''),
+            'count': warning.get('count'),
+        })
+    if apply_skipped_reason:
+        warnings.append({
+            'type': 'guarded_apply_skipped',
+            'reason': apply_skipped_reason,
+        })
+    for key, warning_type in (
+            ('snapshot_created', 'snapshot_not_created'),
+            ('restore_completed', 'restore_not_completed'),
+            ('restore_exact_count_match', 'restore_count_mismatch'),
+            ('restore_fingerprint_match', 'restore_fingerprint_mismatch')):
+        if not summary.get(key, False):
+            warnings.append({'type': warning_type})
+    if summary.get('original_raw_pages_left_mutated'):
+        warnings.append({'type': 'original_raw_pages_left_mutated'})
+    if summary.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removed_during_guarded_apply',
+            'count': summary.get('body_region_removed_count'),
+        })
+    if summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+        warnings.append({
+            'type': 'blocked_or_placeholder_removed_during_guarded_apply',
+            'count': summary.get('rejected_unsure_layout_placeholder_removed_count'),
+        })
+    if not consistency.get('removed_count_matches_phase_2m', False):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2m',
+            'expected': consistency.get('phase_2m_mapped_raw_object_count'),
+            'observed': consistency.get('removed_during_apply_count'),
+        })
+    if not consistency.get('removed_count_matches_phase_2n', True):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2n',
+            'expected': consistency.get('phase_2n_removed_copied_block_count'),
+            'observed': consistency.get('removed_during_apply_count'),
+        })
+    if not consistency.get('expected_mapping_count_matches_phase_2m', True):
+        warnings.append({
+            'type': 'expected_mapping_count_mismatch_phase_2m',
+            'expected': consistency.get('expected_mapping_count'),
+            'observed': consistency.get('phase_2m_mapped_raw_object_count'),
+        })
+    return warnings
+
+
+def _guarded_apply_safe_for_phase_2p(summary: dict, warnings: list) -> bool:
+    return (
+        bool(summary.get('removed_during_apply_count')) and
+        bool(summary.get('snapshot_created')) and
+        bool(summary.get('restore_completed')) and
+        bool(summary.get('restore_exact_count_match')) and
+        bool(summary.get('restore_fingerprint_match')) and
+        bool(summary.get('removed_count_matches_phase_2m')) and
+        bool(summary.get('removed_count_matches_phase_2n')) and
+        not summary.get('original_raw_pages_left_mutated') and
+        not summary.get('body_region_removed_count', 0) and
+        not summary.get('rejected_unsure_layout_placeholder_removed_count', 0) and
+        not warnings)
+
+
+def _guarded_apply_recommendation(summary: dict, warnings: list) -> str:
+    if _guarded_apply_safe_for_phase_2p(summary, warnings):
+        return 'Guarded raw-page apply/restore removed only validated objects and restored the original raw pages; Phase 2P can remain opt-in and guarded.'
+    return 'Do not enable persistent production filtering yet; resolve guarded apply/restore warnings first.'
+
+
+def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
+    fingerprint = []
+    for page in raw_object_pages or []:
+        page_index = page.get('page_index')
+        page_items = []
+        for raw_object in page.get('raw_objects', []) or []:
+            page_items.append((
+                raw_object.get('raw_object_id'),
+                raw_object.get('fingerprint'),
+                raw_object.get('region'),
+                tuple(_json_bbox(raw_object.get('bbox'))),
+            ))
+        fingerprint.append((page_index, tuple(page_items)))
+    return fingerprint
 
 
 def _copy_raw_object_pages(raw_object_pages: list) -> list:

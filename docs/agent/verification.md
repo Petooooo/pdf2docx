@@ -1985,3 +1985,138 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2O recommendation
 
 Phase 2O is safe to attempt only as an explicitly opt-in, non-default experiment. The next phase can consider a guarded production-object apply path, but it should remain disabled by default and should first verify that raw-page object mutation can be isolated, reversible, and covered by conversion-regression checks.
+
+## Phase 2O
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2O added an internal/report-only guarded apply/restore experiment for actual `raw_page.blocks` objects at the `document_parse` boundary. The experiment snapshots the original block object list, applies reviewed filtering inside a guarded window, validates the temporary filtered state, and restores the original block object list before returning.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No persistent production raw-page filtering was enabled.
+- No `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed by default.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/guarded-raw-page-apply-restore-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, raw-object mapping report, copied apply report, and generated guarded apply/restore report remained ignored.
+
+### Sample summary
+
+- Experiment mode: `guarded_apply_restore`.
+- Original raw block count before apply: 790.
+- Filtered raw block count during apply: 742.
+- Restored raw block count after restore: 790.
+- Removed during apply count: 48.
+- Approved candidate count: 4.
+- Blocked candidate count: 5.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Snapshot created: yes.
+- Restore completed: yes.
+- Restore exact count match: yes.
+- Restore fingerprint match: yes.
+- Original raw pages left mutated: no.
+- Safety warnings: none.
+
+Removed counts by role:
+
+- `header`: 12.
+- `footer`: 24.
+- `page_number`: 12.
+
+Removed counts by page:
+
+- 4 raw blocks per page across 12 pages during the guarded apply window.
+
+Downstream guarded-window checks:
+
+- Margin input count before/during: 790 / 742.
+- Section input count before/during: 790 / 742.
+- Body block count before/during: 520 / 520.
+- Image/shape placeholder count before/during: 86 / 86.
+- Table risk note: body-region raw objects remain preserved during the apply window.
+- Paragraph grouping risk note: body-region line/block objects remain preserved during the apply window.
+
+Consistency:
+
+- Phase 2M mapped raw object count: 48.
+- Phase 2N copied apply removed count: 48.
+- Removed during guarded apply: 48.
+- Removed count matches Phase 2M: yes.
+- Removed count matches Phase 2N: yes.
+- Expected mapping count matches Phase 2M: yes.
+
+### Tests added
+
+- Guarded apply removes only approved mapped raw-like objects during the apply window.
+- Original raw-like objects are restored after the experiment.
+- Restore count matches the original count.
+- Restore fingerprint matches the original fingerprint.
+- Rejected candidates remain.
+- Unsure candidates remain.
+- Layout-placeholder candidates remain.
+- Body-region objects remain.
+- Missing mapping prevents unsafe apply and reports warnings.
+- Ambiguous mapping prevents unsafe apply and reports warnings.
+- Guarded apply count matches Phase 2M and Phase 2N in the safe case.
+- Disabled/default behavior remains unchanged.
+- The internal `Pages` guarded apply path stores a report and leaves fake raw pages restored.
+
+Implementation note:
+
+- The guarded restore path restores the collection's exact internal object list instead of using `Blocks.reset()`, because `reset()` can skip falsey bbox objects and would not be exact enough for this safety experiment.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 129 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 129 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2P recommendation
+
+Phase 2P is safe to attempt only as an explicitly opt-in, non-default production experiment. The next phase can consider leaving reviewed filtering applied through downstream parsing under a private guard, but it must still avoid public CLI exposure and must compare parse/conversion behavior before any default-path change.
