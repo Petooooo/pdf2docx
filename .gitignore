@@ -3,6 +3,9 @@
 *.jp*g
 layout.json
 .vscode/
+.venv/
+local_samples/
+local_reports/
 
 # pdf testing files
 *.pdf
