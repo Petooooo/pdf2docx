@@ -28,6 +28,7 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
+build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragraph_reconstruction_validation_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
@@ -1156,6 +1157,175 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(integrity['summary']['removed_block_count'], 0)
         self.assertEqual(integrity['summary']['filtered_block_count'], 4)
         self.assertEqual(integrity['filtered_pages'], report['pages'])
+
+    def test_paragraph_reconstruction_groups_consistent_body_lines(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('This visual line starts a paragraph', 50, 300, 520, 320),
+                _block('and this visual line continues it', 50, 326, 520, 346),
+                _block('before the same paragraph finishes.', 50, 352, 520, 372),
+                _block('Page 1', 270, 960, 330, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Another body paragraph.', 50, 300, 520, 320),
+                _block('Page 2', 270, 960, 330, 980),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown('\n'.join([
+            _review_markdown(
+                'repeated-1',
+                'annual report||top',
+                'header',
+                'would_exclude',
+                'approve_exclude'),
+            _review_markdown(
+                'repeated-2',
+                f'{PAGE_NUMBER_PLACEHOLDER.lower()}||bottom',
+                'page_number',
+                'would_exclude',
+                'approve_exclude'),
+        ]))
+        diff = build_body_filtering_diff_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+        integrity = build_paragraph_integrity_report(
+            report['pages'],
+            diff,
+            enabled=True)
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            paragraph_integrity_report=integrity,
+            enabled=True)
+
+        self.assertEqual(
+            validation['summary']['body_block_count_before_filtering'], 4)
+        self.assertEqual(
+            validation['summary']['body_block_count_after_filtering'], 4)
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 1)
+        self.assertEqual(
+            validation['pages'][0]['estimated_paragraph_groups'][0]['block_count'], 3)
+        self.assertEqual(validation['summary']['warning_count'], 0)
+
+    def test_paragraph_reconstruction_detects_hard_break_signals(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('First paragraph line one', 50, 300, 520, 320),
+                _block('First paragraph line two.', 50, 326, 520, 346),
+                _block('Indented new paragraph starts', 80, 352, 520, 372),
+                _block(
+                    'Different style paragraph starts',
+                    80, 378, 520, 398,
+                    style={'font': 'Arial', 'size': 12.0}),
+                _block(
+                    'Large gap paragraph starts',
+                    80, 520, 520, 540,
+                    style={'font': 'Arial', 'size': 12.0}),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        groups = validation['pages'][0]['estimated_paragraph_groups']
+        break_reasons = [
+            reason
+            for group in groups
+            for reason in group['break_before_reasons']
+        ]
+        self.assertEqual(validation['pages'][0]['estimated_paragraph_group_count'], 4)
+        self.assertIn('left_boundary_change', break_reasons)
+        self.assertIn('style_change', break_reasons)
+        self.assertIn('large_vertical_gap', break_reasons)
+
+    def test_paragraph_reconstruction_warns_on_excessive_one_line_fragments(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Small bit one', 50, 300, 520, 320),
+                _block('Small bit two', 50, 380, 520, 400),
+                _block('Small bit three', 50, 460, 520, 480),
+                _block('Small bit four', 50, 540, 520, 560),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(
+            validation['summary']['suspicious_single_line_paragraph_count'], 4)
+        self.assertEqual(
+            validation['summary']['suspicious_short_fragment_count'], 4)
+        self.assertIn(
+            'excessive_one_line_fragmentation',
+            {warning['type'] for warning in validation['warnings']})
+
+    def test_paragraph_reconstruction_reports_cross_page_continuation_without_merge(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('This paragraph starts on one page and continues', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('with the same sentence on the next page.', 50, 170, 520, 200),
+            ]),
+        ])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(
+            validation['summary']['possible_cross_page_continuation_count'], 1)
+        self.assertEqual(
+            validation['summary']['estimated_paragraph_group_count'], 2)
+        self.assertIn(
+            'possible_cross_page_continuation',
+            {warning['type'] for warning in validation['warnings']})
+
+    def test_paragraph_reconstruction_report_does_not_mutate_input(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Body line one', 50, 300, 520, 320),
+                _block('Body line two.', 50, 326, 520, 346),
+            ]),
+        ])
+        before = json.loads(json.dumps(report['pages']))
+
+        build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            enabled=True)
+
+        self.assertEqual(report['pages'], before)
+
+    def test_paragraph_reconstruction_disabled_mode_keeps_original_summaries(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body line one', 50, 300, 520, 320),
+                _block('Body line two.', 50, 326, 520, 346),
+            ]),
+        ])
+        diff = _unsafe_diff_report_for_removed_blocks(
+            report['pages'],
+            [(0, 1)])
+
+        validation = build_paragraph_reconstruction_validation_report(
+            report['pages'],
+            body_filtering_diff_report=diff)
+
+        self.assertFalse(validation['enabled'])
+        self.assertEqual(
+            validation['summary']['body_block_count_before_filtering'], 2)
+        self.assertEqual(
+            validation['summary']['body_block_count_after_filtering'], 2)
+        self.assertEqual(
+            validation['summary']['estimated_paragraph_group_count'], 0)
+        self.assertEqual(validation['filtered_pages'], report['pages'])
 
 
 def _page(page_index, blocks):

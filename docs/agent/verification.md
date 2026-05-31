@@ -722,3 +722,102 @@ Result: confirmed local PDF/report/review/diff/paragraph-integrity files, `.venv
 ### Phase 2D recommendation
 
 Phase 2D is safe to attempt only as another explicit opt-in/internal step. Before any production parse-path integration, keep the reviewed filtering gate, preserve a dry-run comparison, and add paragraph reconstruction checks that validate retained line-level body blocks can still be grouped into sensible DOCX paragraphs.
+
+## Phase 2D
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2D added an internal/report-only paragraph reconstruction validation helper. It uses the filtered page-summary copy from the reviewed filtering/integrity reports and estimates whether retained body line/block summaries can form sensible paragraph groups.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+
+### Existing paragraph grouping pipeline
+
+The existing pdf2docx pipeline already has paragraph-like grouping later in layout parsing:
+
+- `Blocks.clean_up()` flattens PyMuPDF text/image blocks into line-level objects and removes invalid or overlapped lines.
+- `Blocks.parse_block()` sorts content in reading order.
+- `Blocks._join_lines_vertically()` joins adjacent lines with similar vertical spacing and line properties into `TextBlock` candidates.
+- `Blocks._split_text_block_vertically()` calls `Lines.split_vertically_by_text()`.
+- `Lines.split_vertically_by_text()` splits grouped lines into paragraph-like groups using sentence-ending punctuation, line width/free-space, and new-paragraph indentation signals.
+- `TextBlock.make_docx()` creates one DOCX paragraph for each parsed `TextBlock`.
+
+Phase 2D did not refactor or call this production grouping pipeline. It only estimates reconstruction quality from layout-analysis summaries.
+
+### Local paragraph reconstruction report
+
+Generated ignored local-only file:
+
+```text
+local_reports/paragraph-reconstruction-validation-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+### Sample summary
+
+- Body blocks before filtering: 520.
+- Body blocks after filtering: 520.
+- Estimated paragraph groups: 388.
+- Average blocks per estimated paragraph: 1.34.
+- Suspicious single-line paragraph count: 153.
+- Suspicious short-fragment count: 151.
+- Suspicious fragmentation warning count: 1.
+- Suspicious vertical-gap warning count: 0.
+- Possible cross-page continuation warnings: 0.
+- Integrity continuation labels remained conservative: 11 `unlikely`, 0 `weak`, 0 `candidate`.
+
+The sample confirms reviewed header/footer filtering does not reduce body block count, but the estimated paragraph grouping remains fragmented. This supports keeping Phase 2E internal and report-driven before any production DOCX paragraph merge path is attempted.
+
+### Tests added
+
+- Consistent line-level body blocks are grouped into one estimated paragraph.
+- Hard paragraph breaks are detected when indentation, gap, or style changes.
+- Excessive one-line paragraph fragmentation triggers a warning.
+- Possible cross-page continuation is reported without merging pages.
+- Original page summaries are not mutated.
+- Disabled/default behavior keeps original summaries unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 51 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 51 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diff/integrity/reconstruction files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2E recommendation
+
+Phase 2E is not ready for production parse-path integration. It is safe to attempt only as another internal/report-only phase focused on improving paragraph grouping signals and validation metrics, not production body mutation or DOCX paragraph merging yet.

@@ -659,6 +659,136 @@ def build_paragraph_integrity_report(
     }
 
 
+def build_paragraph_reconstruction_validation_report(
+        page_summaries: list,
+        paragraph_integrity_report: dict = None,
+        body_filtering_diff_report: dict = None,
+        enabled: bool = False,
+        max_line_gap_ratio: float = 1.6,
+        paragraph_gap_ratio: float = 2.4,
+        indent_tolerance: float = 16.0,
+        single_line_fragment_ratio: float = 0.75,
+        short_fragment_length: int = 45,
+        low_average_blocks_per_group: float = 1.5) -> dict:
+    '''Estimate paragraph grouping quality from filtered page summaries.'''
+    original_pages = _copy_page_summaries(page_summaries)
+    filtered_pages = _reconstruction_filtered_pages(
+        page_summaries,
+        paragraph_integrity_report,
+        body_filtering_diff_report,
+        enabled)
+
+    body_before_count = sum(
+        len(_body_blocks(page))
+        for page in original_pages)
+    body_after_count = sum(
+        len(_body_blocks(page))
+        for page in filtered_pages)
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'paragraph_reconstruction_validation_report_only',
+            'summary': {
+                'body_block_count_before_filtering': body_before_count,
+                'body_block_count_after_filtering': body_before_count,
+                'estimated_paragraph_group_count': 0,
+                'average_blocks_per_estimated_paragraph': 0.0,
+                'suspicious_single_line_paragraph_count': 0,
+                'suspicious_short_fragment_count': 0,
+                'possible_cross_page_continuation_count': 0,
+                'cross_page_continuation_warning_count': 0,
+                'warning_count': 0,
+                'line_level_body_blocks_available': body_before_count > 0,
+            },
+            'pages': [],
+            'filtered_pages': original_pages,
+            'possible_cross_page_continuation_candidates': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2e': False,
+                'reason': 'Paragraph reconstruction validation is disabled; no grouping assumptions were evaluated.',
+            },
+        }
+
+    original_by_page = {
+        page.get('page_index'): page
+        for page in original_pages
+    }
+    pages_report = []
+    warnings = []
+    estimated_group_count = 0
+    suspicious_single_line_count = 0
+    suspicious_short_fragment_count = 0
+
+    for page in filtered_pages:
+        original_page = original_by_page.get(page.get('page_index'), page)
+        page_report = _paragraph_reconstruction_page_report(
+            original_page,
+            page,
+            max_line_gap_ratio,
+            paragraph_gap_ratio,
+            indent_tolerance,
+            single_line_fragment_ratio,
+            short_fragment_length)
+        pages_report.append(page_report)
+        warnings.extend(page_report['warnings'])
+        estimated_group_count += page_report['estimated_paragraph_group_count']
+        suspicious_single_line_count += page_report['suspicious_single_line_paragraph_count']
+        suspicious_short_fragment_count += page_report['suspicious_short_fragment_count']
+
+    continuation_candidates = find_paragraph_continuation_candidates(filtered_pages)
+    possible_continuations = [
+        candidate for candidate in continuation_candidates
+        if candidate.get('label') in {'candidate', 'weak'}
+    ]
+    continuation_warnings = [
+        _cross_page_continuation_warning(candidate)
+        for candidate in possible_continuations
+    ]
+    warnings.extend(continuation_warnings)
+
+    average_blocks_per_group = _safe_ratio(
+        body_after_count,
+        estimated_group_count)
+    if (estimated_group_count >= 10 and
+            0.0 < average_blocks_per_group < low_average_blocks_per_group):
+        warnings.append({
+            'type': 'low_average_blocks_per_estimated_paragraph',
+            'message': 'Estimated paragraph groups average very few body blocks; paragraph reconstruction may remain fragmented.',
+            'estimated_paragraph_group_count': estimated_group_count,
+            'body_block_count_after_filtering': body_after_count,
+            'average_blocks_per_estimated_paragraph': average_blocks_per_group,
+        })
+
+    warning_count = len(warnings)
+    safe = warning_count == 0 and body_after_count > 0
+    return {
+        'enabled': True,
+        'policy': 'paragraph_reconstruction_validation_report_only',
+        'summary': {
+            'body_block_count_before_filtering': body_before_count,
+            'body_block_count_after_filtering': body_after_count,
+            'estimated_paragraph_group_count': estimated_group_count,
+            'average_blocks_per_estimated_paragraph': average_blocks_per_group,
+            'suspicious_single_line_paragraph_count': suspicious_single_line_count,
+            'suspicious_short_fragment_count': suspicious_short_fragment_count,
+            'possible_cross_page_continuation_count': len(possible_continuations),
+            'cross_page_continuation_warning_count': len(continuation_warnings),
+            'warning_count': warning_count,
+            'line_level_body_blocks_available': body_after_count > 0,
+        },
+        'pages': pages_report,
+        'filtered_pages': filtered_pages,
+        'possible_cross_page_continuation_candidates': possible_continuations,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2e': bool(safe),
+            'reason': _paragraph_reconstruction_recommendation(safe, warning_count),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -1307,6 +1437,340 @@ def _paragraph_integrity_recommendation(
     if safe:
         return 'No suspicious body loss or paragraph-gap warnings were detected in the report-only validation.'
     return f'Found {warning_count} warning(s); do not connect filtering to production parsing yet.'
+
+
+def _reconstruction_filtered_pages(
+        page_summaries: list,
+        paragraph_integrity_report: dict,
+        body_filtering_diff_report: dict,
+        enabled: bool) -> list:
+    if not enabled:
+        return _copy_page_summaries(page_summaries)
+
+    if paragraph_integrity_report and paragraph_integrity_report.get('filtered_pages') is not None:
+        return _copy_page_summaries(paragraph_integrity_report.get('filtered_pages'))
+
+    if body_filtering_diff_report:
+        integrity_report = build_paragraph_integrity_report(
+            page_summaries,
+            body_filtering_diff_report,
+            enabled=True)
+        return _copy_page_summaries(integrity_report.get('filtered_pages'))
+
+    return _copy_page_summaries(page_summaries)
+
+
+def _paragraph_reconstruction_page_report(
+        original_page: dict,
+        filtered_page: dict,
+        max_line_gap_ratio: float,
+        paragraph_gap_ratio: float,
+        indent_tolerance: float,
+        single_line_fragment_ratio: float,
+        short_fragment_length: int) -> dict:
+    page_index = filtered_page.get('page_index')
+    original_body_blocks = _body_blocks(original_page)
+    filtered_body_blocks = _body_blocks(filtered_page)
+    groups, gap_warnings = _estimate_paragraph_groups(
+        filtered_page,
+        filtered_body_blocks,
+        max_line_gap_ratio,
+        paragraph_gap_ratio,
+        indent_tolerance,
+        short_fragment_length)
+    suspicious_single_line = [
+        group for group in groups
+        if group.get('suspicious_single_line_paragraph')
+    ]
+    suspicious_short_fragments = [
+        group for group in groups
+        if group.get('suspicious_short_fragment')
+    ]
+    warnings = list(gap_warnings)
+
+    if filtered_body_blocks and not groups:
+        warnings.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'type': 'missing_paragraph_groups',
+            'message': 'Body blocks are present, but no estimated paragraph groups were produced.',
+        })
+
+    if groups:
+        single_line_ratio = len(suspicious_single_line) / len(groups)
+        if len(groups) >= 3 and single_line_ratio >= single_line_fragment_ratio:
+            warnings.append({
+                'page_index': page_index,
+                'page_number': _human_page_number(page_index),
+                'type': 'excessive_one_line_fragmentation',
+                'message': 'Most estimated paragraph groups contain only one body line/block.',
+                'single_line_group_count': len(suspicious_single_line),
+                'estimated_paragraph_group_count': len(groups),
+                'single_line_group_ratio': round(single_line_ratio, 3),
+            })
+
+        short_fragment_ratio = len(suspicious_short_fragments) / len(groups)
+        if len(suspicious_short_fragments) >= 3 and short_fragment_ratio >= 0.5:
+            warnings.append({
+                'page_index': page_index,
+                'page_number': _human_page_number(page_index),
+                'type': 'many_short_fragments',
+                'message': 'Many estimated paragraph groups are short fragments.',
+                'short_fragment_count': len(suspicious_short_fragments),
+                'estimated_paragraph_group_count': len(groups),
+                'short_fragment_ratio': round(short_fragment_ratio, 3),
+            })
+
+    if original_body_blocks and not filtered_body_blocks:
+        warnings.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'type': 'body_blocks_missing_after_filtering',
+            'message': 'Original body blocks exist, but none remain in the filtered summary.',
+            'original_body_block_count': len(original_body_blocks),
+        })
+
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'body_block_count_before_filtering': len(original_body_blocks),
+        'body_block_count_after_filtering': len(filtered_body_blocks),
+        'estimated_paragraph_group_count': len(groups),
+        'average_blocks_per_estimated_paragraph': _safe_ratio(
+            len(filtered_body_blocks),
+            len(groups)),
+        'suspicious_single_line_paragraph_count': len(suspicious_single_line),
+        'suspicious_short_fragment_count': len(suspicious_short_fragments),
+        'estimated_paragraph_groups': groups,
+        'warnings': warnings,
+    }
+
+
+def _estimate_paragraph_groups(
+        page: dict,
+        body_blocks: list,
+        max_line_gap_ratio: float,
+        paragraph_gap_ratio: float,
+        indent_tolerance: float,
+        short_fragment_length: int) -> tuple:
+    groups = []
+    warnings = []
+    if not body_blocks:
+        return groups, warnings
+
+    sorted_blocks = sorted(
+        [dict(block) for block in body_blocks],
+        key=lambda block: block.get('block_index', 0))
+    metrics = _paragraph_line_metrics(sorted_blocks)
+    current_blocks = [sorted_blocks[0]]
+    break_before_reasons = []
+
+    for block in sorted_blocks[1:]:
+        previous = current_blocks[-1]
+        break_reasons, gap_warning = _paragraph_break_reasons(
+            previous,
+            block,
+            metrics,
+            max_line_gap_ratio,
+            paragraph_gap_ratio,
+            indent_tolerance)
+        if gap_warning:
+            warnings.append(_paragraph_gap_warning(page, previous, block, gap_warning))
+
+        if break_reasons:
+            groups.append(_estimated_paragraph_group(
+                page,
+                len(groups),
+                current_blocks,
+                break_before_reasons,
+                short_fragment_length))
+            current_blocks = [block]
+            break_before_reasons = break_reasons
+        else:
+            current_blocks.append(block)
+
+    groups.append(_estimated_paragraph_group(
+        page,
+        len(groups),
+        current_blocks,
+        break_before_reasons,
+        short_fragment_length))
+    return groups, warnings
+
+
+def _paragraph_break_reasons(
+        previous: dict,
+        current: dict,
+        metrics: dict,
+        max_line_gap_ratio: float,
+        paragraph_gap_ratio: float,
+        indent_tolerance: float) -> tuple:
+    reasons = []
+    warning = None
+    previous_bbox = previous.get('bbox', [0.0, 0.0, 0.0, 0.0])
+    current_bbox = current.get('bbox', [0.0, 0.0, 0.0, 0.0])
+    line_height = max(
+        metrics.get('median_line_height', 0.0),
+        _block_height(previous_bbox),
+        _block_height(current_bbox),
+        1.0)
+    vertical_gap = max(0.0, float(current_bbox[1]) - float(previous_bbox[3]))
+    gap_ratio = vertical_gap / line_height
+
+    if gap_ratio >= paragraph_gap_ratio:
+        reasons.append('large_vertical_gap')
+    elif gap_ratio > max_line_gap_ratio:
+        warning = {
+            'type': 'suspicious_vertical_gap_inside_paragraph',
+            'vertical_gap': round(vertical_gap, 2),
+            'gap_ratio': round(gap_ratio, 3),
+        }
+
+    previous_style = normalize_text(previous.get('style', ''))
+    current_style = normalize_text(current.get('style', ''))
+    if previous_style and current_style and previous_style != current_style:
+        reasons.append('style_change')
+
+    left_delta = abs(float(current_bbox[0]) - float(previous_bbox[0]))
+    if left_delta > indent_tolerance:
+        reasons.append('left_boundary_change')
+
+    if _looks_like_heading(current.get('text', '')):
+        reasons.append('next_looks_like_heading')
+
+    if reasons:
+        warning = None
+
+    return reasons, warning
+
+
+def _estimated_paragraph_group(
+        page: dict,
+        group_index: int,
+        blocks: list,
+        break_before_reasons: list,
+        short_fragment_length: int) -> dict:
+    text = normalize_text(' '.join(block.get('text', '') for block in blocks))
+    quality = text_quality_signals(text)
+    one_line = len(blocks) == 1
+    looks_like_heading = _looks_like_heading(text)
+    suspicious_single_line = (
+        one_line and
+        quality.get('meaningful_text') and
+        not looks_like_heading)
+    suspicious_short = (
+        suspicious_single_line and
+        len(text) < short_fragment_length)
+
+    page_index = page.get('page_index')
+    block_indexes = [block.get('block_index') for block in blocks]
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'group_index': group_index,
+        'block_count': len(blocks),
+        'line_count': len(blocks),
+        'block_indexes': block_indexes,
+        'start_block_index': block_indexes[0] if block_indexes else None,
+        'end_block_index': block_indexes[-1] if block_indexes else None,
+        'bbox': _union_bbox(blocks),
+        'text_preview': _preview_text({'text': text}, max_length=120),
+        'break_before_reasons': list(break_before_reasons or []),
+        'suspicious_single_line_paragraph': bool(suspicious_single_line),
+        'suspicious_short_fragment': bool(suspicious_short),
+    }
+
+
+def _paragraph_gap_warning(page: dict, previous: dict, current: dict, gap: dict) -> dict:
+    page_index = page.get('page_index')
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'type': gap.get('type'),
+        'message': 'Adjacent body blocks have a larger-than-expected gap but were kept in one estimated group.',
+        'previous_block_index': previous.get('block_index'),
+        'next_block_index': current.get('block_index'),
+        'vertical_gap': gap.get('vertical_gap'),
+        'gap_ratio': gap.get('gap_ratio'),
+        'previous_preview': _preview_text(previous, max_length=80),
+        'next_preview': _preview_text(current, max_length=80),
+    }
+
+
+def _cross_page_continuation_warning(candidate: dict) -> dict:
+    return {
+        'from_page': candidate.get('from_page'),
+        'to_page': candidate.get('to_page'),
+        'type': 'possible_cross_page_continuation',
+        'message': 'Adjacent-page body blocks may belong to the same paragraph; report only, no merge applied.',
+        'label': candidate.get('label'),
+        'score': candidate.get('score'),
+        'reason': candidate.get('reason'),
+        'previous_text_preview': candidate.get('previous_text_preview', ''),
+        'next_text_preview': candidate.get('next_text_preview', ''),
+    }
+
+
+def _paragraph_reconstruction_recommendation(safe: bool, warning_count: int) -> str:
+    if safe:
+        return 'No paragraph reconstruction warnings were detected in the report-only validation.'
+    return f'Found {warning_count} paragraph reconstruction warning(s); keep production DOCX integration gated.'
+
+
+def _body_blocks(page: dict) -> list:
+    return [
+        block for block in (page or {}).get('text_blocks', []) or []
+        if block.get('region') == REGION_BODY
+    ]
+
+
+def _paragraph_line_metrics(blocks: list) -> dict:
+    heights = [
+        _block_height(block.get('bbox', []))
+        for block in blocks
+        if _block_height(block.get('bbox', [])) > 0.0
+    ]
+    return {
+        'median_line_height': _median_number(heights) or 1.0,
+    }
+
+
+def _block_height(bbox) -> float:
+    if not bbox or len(bbox) < 4:
+        return 0.0
+    return max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def _median_number(values: list) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(float(value) for value in values)
+    middle = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[middle]
+    return (sorted_values[middle-1] + sorted_values[middle]) / 2.0
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float:
+    if not denominator:
+        return 0.0
+    return round(float(numerator) / float(denominator), 3)
+
+
+def _union_bbox(blocks: list) -> list:
+    bboxes = [
+        block.get('bbox', [])
+        for block in blocks
+        if block.get('bbox') and len(block.get('bbox')) >= 4
+    ]
+    if not bboxes:
+        return [0.0, 0.0, 0.0, 0.0]
+    return [
+        round(min(float(bbox[0]) for bbox in bboxes), 2),
+        round(min(float(bbox[1]) for bbox in bboxes), 2),
+        round(max(float(bbox[2]) for bbox in bboxes), 2),
+        round(max(float(bbox[3]) for bbox in bboxes), 2),
+    ]
 
 
 def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:
