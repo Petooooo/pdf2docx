@@ -563,6 +563,161 @@ def build_body_filtering_diff_report(
     }
 
 
+def build_document_parse_filtering_simulation_report(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        body_filtering_diff_report: dict = None,
+        paragraph_integrity_report: dict = None,
+        enabled: bool = False,
+        apply: bool = False,
+        expected_removed_count: int = 48,
+        expected_kept_count: int = 742,
+        expected_body_region_removed_count: int = 0) -> dict:
+    '''Simulate reviewed filtering at the document-parse insertion point.
+
+    This helper never mutates production page/raw-page objects. It works on
+    copied layout-analysis page summaries and reports what a future
+    Pages._parse_document() opt-in experiment would remove.
+    '''
+    original_pages = _copy_page_summaries(page_summaries)
+    original_block_count = _page_summary_block_count(original_pages)
+    if not enabled:
+        return {
+            'enabled': False,
+            'applied': False,
+            'policy': 'document_parse_filtering_simulation_report_only',
+            'insertion_point': 'document_parse',
+            'summary': {
+                'original_block_count': original_block_count,
+                'would_remove_block_count': 0,
+                'simulated_removed_count': 0,
+                'simulated_kept_count': original_block_count,
+                'approved_candidate_count': 0,
+                'blocked_candidate_count': 0,
+                'body_region_removed_count': 0,
+                'rejected_removed_count': 0,
+                'unsure_removed_count': 0,
+                'layout_placeholder_removed_count': 0,
+            },
+            'dry_run': {
+                'would_remove_block_count': 0,
+                'removed_block_count': 0,
+                'kept_block_count': original_block_count,
+            },
+            'simulated_apply': {
+                'applied': False,
+                'removed_block_count': 0,
+                'kept_block_count': original_block_count,
+                'filtered_pages': original_pages,
+            },
+            'removed_counts_by_role': {},
+            'removed_counts_by_page': [],
+            'downstream_availability': _document_parse_downstream_availability(
+                original_pages,
+                original_pages,
+                []),
+            'consistency_checks': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2l': False,
+                'reason': 'Document-parse filtering simulation is disabled; no production integration assumptions were evaluated.',
+            },
+        }
+
+    review_decisions = review_decisions or {}
+    dry_filter = build_reviewed_header_footer_filter_report(
+        original_pages,
+        dry_run_report,
+        review_decisions,
+        enabled=True,
+        apply=False)
+    diff_report = build_body_filtering_diff_report(
+        original_pages,
+        dry_run_report,
+        review_decisions,
+        enabled=True,
+        filtering_report=dry_filter)
+    apply_filter = build_reviewed_header_footer_filter_report(
+        original_pages,
+        dry_run_report,
+        review_decisions,
+        enabled=True,
+        apply=True)
+    simulated_pages = (
+        apply_filter.get('filtered_pages', [])
+        if apply else _copy_page_summaries(original_pages))
+    removed_blocks = _document_parse_removed_blocks(diff_report)
+    would_remove_count = len(removed_blocks)
+    would_keep_count = original_block_count - would_remove_count
+    simulated_removed_count = would_remove_count if apply else 0
+    simulated_kept_count = would_keep_count if apply else original_block_count
+    region_counts = _document_parse_removed_region_counts(removed_blocks)
+    safety = diff_report.get('safety') or _new_safety_summary()
+    consistency_checks = _document_parse_consistency_checks(
+        original_block_count,
+        would_remove_count,
+        would_keep_count,
+        region_counts.get(REGION_BODY, 0),
+        body_filtering_diff_report,
+        paragraph_integrity_report,
+        expected_removed_count,
+        expected_kept_count,
+        expected_body_region_removed_count)
+    warnings = _document_parse_simulation_warnings(
+        review_decisions,
+        dry_filter,
+        safety,
+        consistency_checks,
+        region_counts)
+
+    return {
+        'enabled': True,
+        'applied': bool(apply),
+        'policy': 'document_parse_filtering_simulation_report_only',
+        'insertion_point': 'document_parse',
+        'summary': {
+            'original_block_count': original_block_count,
+            'would_remove_block_count': would_remove_count,
+            'would_keep_block_count': would_keep_count,
+            'simulated_removed_count': simulated_removed_count,
+            'simulated_kept_count': simulated_kept_count,
+            'approved_candidate_count': dry_filter.get('approved_candidate_count', 0),
+            'blocked_candidate_count': dry_filter.get('blocked_candidate_count', 0),
+            'body_region_removed_count': region_counts.get(REGION_BODY, 0),
+            'rejected_removed_count': safety.get('rejected_removed_candidate_count', 0),
+            'unsure_removed_count': safety.get('unsure_removed_candidate_count', 0),
+            'layout_placeholder_removed_count': safety.get('layout_placeholder_removed_candidate_count', 0),
+        },
+        'dry_run': {
+            'would_remove_block_count': would_remove_count,
+            'removed_block_count': 0,
+            'kept_block_count': original_block_count,
+            'removed_blocks_by_page': diff_report.get('removed_blocks_by_page', []),
+        },
+        'simulated_apply': {
+            'applied': bool(apply),
+            'removed_block_count': simulated_removed_count,
+            'kept_block_count': simulated_kept_count,
+            'filtered_pages': simulated_pages,
+        },
+        'removed_counts_by_role': _document_parse_removed_counts_by_role(removed_blocks),
+        'removed_counts_by_page': _document_parse_removed_counts_by_page(diff_report),
+        'removed_blocks_by_page': diff_report.get('removed_blocks_by_page', []),
+        'retained_candidates': diff_report.get('retained_candidates', []),
+        'downstream_availability': _document_parse_downstream_availability(
+            original_pages,
+            simulated_pages,
+            removed_blocks),
+        'consistency_checks': consistency_checks,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2l': _document_parse_safe_for_phase_2l(warnings, region_counts),
+            'reason': _document_parse_recommendation(warnings, region_counts),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -1645,6 +1800,185 @@ def _diff_report_removed_lookup(diff_report: dict) -> dict:
         for block in page.get('blocks', []) or []:
             lookup[(page_index, block.get('block_index'))] = block
     return lookup
+
+
+def _page_summary_block_count(pages: list) -> int:
+    return sum(len(page.get('text_blocks', []) or []) for page in pages or [])
+
+
+def _document_parse_removed_blocks(diff_report: dict) -> list:
+    return [
+        dict(block)
+        for page in (diff_report or {}).get('removed_blocks_by_page', []) or []
+        for block in page.get('blocks', []) or []
+    ]
+
+
+def _document_parse_removed_counts_by_role(removed_blocks: list) -> dict:
+    counts = Counter(block.get('proposed_role', '') for block in removed_blocks or [])
+    return dict(sorted(counts.items()))
+
+
+def _document_parse_removed_counts_by_page(diff_report: dict) -> list:
+    return [
+        {
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'removed_count': page.get('removed_count', 0),
+        }
+        for page in (diff_report or {}).get('removed_blocks_by_page', []) or []
+    ]
+
+
+def _document_parse_removed_region_counts(removed_blocks: list) -> dict:
+    counts = Counter(block.get('region', '') for block in removed_blocks or [])
+    return dict(sorted(counts.items()))
+
+
+def _document_parse_downstream_availability(
+        original_pages: list,
+        simulated_pages: list,
+        removed_blocks: list) -> dict:
+    original_body_count = sum(len(_body_blocks(page)) for page in original_pages or [])
+    simulated_body_count = sum(len(_body_blocks(page)) for page in simulated_pages or [])
+    removed_region_counts = _document_parse_removed_region_counts(removed_blocks)
+    return {
+        'margin_input_block_count': _page_summary_block_count(simulated_pages),
+        'section_input_block_count': _page_summary_block_count(simulated_pages),
+        'table_input_body_block_count': simulated_body_count,
+        'paragraph_grouping_body_block_count': simulated_body_count,
+        'body_region_blocks_preserved': simulated_body_count == original_body_count,
+        'body_region_removed_count': removed_region_counts.get(REGION_BODY, 0),
+        'top_region_removed_count': removed_region_counts.get(REGION_TOP, 0),
+        'bottom_region_removed_count': removed_region_counts.get(REGION_BOTTOM, 0),
+        'image_shape_data_mutated': False,
+        'layout_placeholder_removed_count': sum(
+            1 for block in removed_blocks or []
+            if block.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER),
+        'margin_section_table_risk_note': (
+            'Simulation keeps body-region blocks available for margin, section, and table parsing.'
+            if simulated_body_count == original_body_count else
+            'Simulation would remove body-region blocks; do not integrate production filtering.'),
+        'paragraph_grouping_risk_note': (
+            'Line-level body summaries remain available for later paragraph grouping.'
+            if simulated_body_count == original_body_count else
+            'Paragraph grouping may be damaged because body-region blocks would be removed.'),
+    }
+
+
+def _document_parse_consistency_checks(
+        original_block_count: int,
+        would_remove_count: int,
+        would_keep_count: int,
+        body_region_removed_count: int,
+        body_filtering_diff_report: dict,
+        paragraph_integrity_report: dict,
+        expected_removed_count: int,
+        expected_kept_count: int,
+        expected_body_region_removed_count: int) -> dict:
+    diff_summary = (body_filtering_diff_report or {}).get('summary') or {}
+    integrity_summary = (paragraph_integrity_report or {}).get('summary') or {}
+    diff_expected_removed = diff_summary.get('would_remove_block_count')
+    diff_expected_kept = diff_summary.get('kept_block_count')
+    integrity_body_removed = integrity_summary.get('body_region_removed_count')
+    return {
+        'phase_2b_expected_removed_count': expected_removed_count,
+        'phase_2b_expected_kept_count': expected_kept_count,
+        'phase_2b_removed_match': would_remove_count == expected_removed_count,
+        'phase_2b_kept_match': would_keep_count == expected_kept_count,
+        'phase_2b_report_removed_count': diff_expected_removed,
+        'phase_2b_report_kept_count': diff_expected_kept,
+        'phase_2b_report_removed_match': (
+            diff_expected_removed is None or diff_expected_removed == would_remove_count),
+        'phase_2b_report_kept_match': (
+            diff_expected_kept is None or diff_expected_kept == would_keep_count),
+        'phase_2c_expected_body_region_removed_count': expected_body_region_removed_count,
+        'phase_2c_body_region_removed_count': body_region_removed_count,
+        'phase_2c_body_region_removed_match': (
+            body_region_removed_count == expected_body_region_removed_count),
+        'phase_2c_report_body_region_removed_count': integrity_body_removed,
+        'phase_2c_report_body_region_removed_match': (
+            integrity_body_removed is None or integrity_body_removed == body_region_removed_count),
+        'original_block_count': original_block_count,
+    }
+
+
+def _document_parse_simulation_warnings(
+        review_decisions,
+        filtering_report: dict,
+        safety: dict,
+        consistency_checks: dict,
+        region_counts: dict) -> list:
+    warnings = []
+    decision_map = _review_decision_map(review_decisions or {})
+    if not decision_map:
+        warnings.append({
+            'type': 'missing_review_decisions',
+            'message': 'No explicit review decisions were provided; no reviewed filtering should be applied.',
+        })
+    if not filtering_report.get('approved_candidate_count', 0):
+        warnings.append({
+            'type': 'no_approved_candidates',
+            'message': 'No candidates have explicit approve_exclude decisions.',
+        })
+    if region_counts.get(REGION_BODY, 0):
+        warnings.append({
+            'type': 'body_region_removed',
+            'message': 'Simulation would remove body-region blocks.',
+            'count': region_counts.get(REGION_BODY, 0),
+        })
+    if safety.get('rejected_removed_candidate_count', 0):
+        warnings.append({
+            'type': 'rejected_candidate_removed',
+            'message': 'Simulation would remove rejected candidates.',
+            'count': safety.get('rejected_removed_candidate_count', 0),
+        })
+    if safety.get('unsure_removed_candidate_count', 0):
+        warnings.append({
+            'type': 'unsure_candidate_removed',
+            'message': 'Simulation would remove unsure candidates.',
+            'count': safety.get('unsure_removed_candidate_count', 0),
+        })
+    if safety.get('layout_placeholder_removed_candidate_count', 0):
+        warnings.append({
+            'type': 'layout_placeholder_removed',
+            'message': 'Simulation would remove layout-placeholder candidates.',
+            'count': safety.get('layout_placeholder_removed_candidate_count', 0),
+        })
+    for key in (
+            'phase_2b_removed_match',
+            'phase_2b_kept_match',
+            'phase_2b_report_removed_match',
+            'phase_2b_report_kept_match',
+            'phase_2c_body_region_removed_match',
+            'phase_2c_report_body_region_removed_match'):
+        if not consistency_checks.get(key, True):
+            warnings.append({
+                'type': 'consistency_check_failed',
+                'check': key,
+                'message': f'{key} did not match expected Phase 2B/2C counts.',
+            })
+    return warnings
+
+
+def _document_parse_safe_for_phase_2l(warnings: list, region_counts: dict) -> bool:
+    blocking_warning_types = {
+        'body_region_removed',
+        'rejected_candidate_removed',
+        'unsure_candidate_removed',
+        'layout_placeholder_removed',
+        'consistency_check_failed',
+        'missing_review_decisions',
+        'no_approved_candidates',
+    }
+    warning_types = {warning.get('type') for warning in warnings or []}
+    return not warning_types.intersection(blocking_warning_types) and not region_counts.get(REGION_BODY, 0)
+
+
+def _document_parse_recommendation(warnings: list, region_counts: dict) -> str:
+    if _document_parse_safe_for_phase_2l(warnings, region_counts):
+        return 'Document-parse simulation matches reviewed filtering counts and preserves body-region blocks; Phase 2L can remain opt-in and local-only.'
+    return 'Do not connect production filtering yet; resolve simulation warnings before Phase 2L.'
 
 
 def _integrity_removed_block_summary(page_index, block: dict, removed: dict) -> dict:

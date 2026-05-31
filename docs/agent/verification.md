@@ -1513,3 +1513,131 @@ Result: confirmed local PDF/report files, `.venv/`, and generated caches remain 
 ### Phase 2K recommendation
 
 Phase 2K is safe to attempt only as an internal, opt-in, report-only or local-only simulation at the `document_parse` insertion point. Do not connect filtering to default conversion, public CLI, production DOCX generation, or production paragraph merging yet.
+
+## Phase 2K
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2K added an internal/report-only simulation helper for reviewed header/footer filtering at the preferred `document_parse` insertion point. The helper works on copied page summaries and never mutates production `Pages`, `Page`, raw pages, `Blocks`, `Lines`, `TextBlock`, table, image, or shape objects.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages._parse_document()` filtering was added.
+- No production `Page`, `Layout`, `Blocks`, `Lines`, or `TextBlock` behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/document-parse-filtering-simulation-report.md
+```
+
+The report was not staged or committed. It was generated from the ignored layout report and review pack using copied summaries only.
+
+### Simulation summary
+
+- Insertion point simulated: `document_parse`.
+- Original block count: 790.
+- Would-remove block count: 48.
+- Simulated removed count: 48.
+- Simulated kept count: 742.
+- Approved candidate count: 4.
+- Blocked candidate count: 5.
+- Body-region removed count: 0.
+- Rejected removed count: 0.
+- Unsure removed count: 0.
+- Layout-placeholder removed count: 0.
+
+Removed counts by role:
+
+- `header`: 12.
+- `footer`: 24.
+- `page_number`: 12.
+
+Removed counts by page:
+
+- 4 simulated removals per page across 12 pages.
+
+### Downstream availability
+
+- Margin input block count after simulated copy filtering: 742.
+- Section input block count after simulated copy filtering: 742.
+- Table input body block count: 520.
+- Paragraph grouping body block count: 520.
+- Body-region blocks preserved: yes.
+- Image/shape data mutated: no.
+- Layout placeholders removed: 0.
+
+Risk notes:
+
+- Margin, section, and table parsing still receive body-region content in the copied simulation.
+- Line-level body summaries remain available for later paragraph grouping.
+- This remains a simulation only; no raw page or production parse objects are filtered yet.
+
+### Consistency checks
+
+- Phase 2B expected removed count: 48.
+- Phase 2B expected kept count: 742.
+- Phase 2B removed count match: yes.
+- Phase 2B kept count match: yes.
+- Phase 2C expected body-region removed count: 0.
+- Phase 2C body-region removed count match: yes.
+- Safety warnings: none.
+
+### Tests added
+
+- Document-parse simulation removes only approved candidates.
+- Rejected candidates remain.
+- Unsure candidates remain.
+- Layout-placeholder candidates remain.
+- Body-region blocks remain.
+- Dry-run mode removes zero blocks but reports would-remove counts.
+- Simulated apply mode works only on copied data.
+- Original inputs are not mutated.
+- Simulation counts match expected reviewed filtering counts.
+- Missing review decisions are reported clearly.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 95 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 95 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2L recommendation
+
+Phase 2L is safe to attempt only as another internal opt-in/local-only experiment at the `document_parse` boundary. The next step should still avoid default conversion changes, public CLI exposure, production DOCX header/footer generation, and production paragraph merging.

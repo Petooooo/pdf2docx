@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
 build_filter_insertion_point_analysis_report = LayoutAnalyzer.build_filter_insertion_point_analysis_report
 build_indentation_rule_comparison_report = LayoutAnalyzer.build_indentation_rule_comparison_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
@@ -2034,6 +2035,140 @@ class TestLayoutAnalyzer(unittest.TestCase):
             analysis['summary']['evaluated_insertion_point_count'],
             0)
 
+    def test_document_parse_simulation_removes_only_approved_candidates(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(simulation['insertion_point'], 'document_parse')
+        self.assertEqual(simulation['summary']['would_remove_block_count'], 2)
+        self.assertEqual(simulation['summary']['simulated_removed_count'], 2)
+        self.assertEqual(simulation['removed_counts_by_role'], {
+            ROLE_FOOTER: 1,
+            ROLE_HEADER: 1,
+        })
+
+    def test_document_parse_simulation_keeps_rejected_unsure_and_placeholders(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=2,
+            expected_kept_count=4)
+        kept_fingerprints = {
+            block['fingerprint']
+            for page in simulation['simulated_apply']['filtered_pages']
+            for block in page['text_blocks']
+        }
+
+        self.assertIn('reject-header', kept_fingerprints)
+        self.assertIn('unsure-footer', kept_fingerprints)
+        self.assertIn('image-placeholder', kept_fingerprints)
+        self.assertEqual(simulation['summary']['rejected_removed_count'], 0)
+        self.assertEqual(simulation['summary']['unsure_removed_count'], 0)
+        self.assertEqual(simulation['summary']['layout_placeholder_removed_count'], 0)
+
+    def test_document_parse_simulation_preserves_body_region_blocks(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(simulation['summary']['body_region_removed_count'], 0)
+        self.assertTrue(
+            simulation['downstream_availability']['body_region_blocks_preserved'])
+        self.assertEqual(
+            simulation['downstream_availability']['paragraph_grouping_body_block_count'],
+            1)
+
+    def test_document_parse_simulation_dry_run_removes_zero_blocks(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(simulation['dry_run']['would_remove_block_count'], 2)
+        self.assertEqual(simulation['dry_run']['removed_block_count'], 0)
+        self.assertFalse(simulation['simulated_apply']['applied'])
+        self.assertEqual(simulation['simulated_apply']['removed_block_count'], 0)
+        self.assertEqual(simulation['summary']['simulated_kept_count'], 6)
+
+    def test_document_parse_simulation_apply_uses_copied_data(self):
+        inputs = _document_parse_simulation_inputs()
+        before_pages = json.loads(json.dumps(inputs['page_summaries']))
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(inputs['page_summaries'], before_pages)
+        self.assertIsNot(
+            simulation['simulated_apply']['filtered_pages'][0],
+            inputs['page_summaries'][0])
+        self.assertEqual(
+            len(simulation['simulated_apply']['filtered_pages'][0]['text_blocks']),
+            4)
+
+    def test_document_parse_simulation_counts_match_expected_reviewed_filtering(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        checks = simulation['consistency_checks']
+        self.assertTrue(checks['phase_2b_removed_match'])
+        self.assertTrue(checks['phase_2b_kept_match'])
+        self.assertTrue(checks['phase_2c_body_region_removed_match'])
+        self.assertEqual(simulation['summary']['simulated_kept_count'], 4)
+
+    def test_document_parse_simulation_reports_missing_review_decisions(self):
+        inputs = _document_parse_simulation_inputs()
+        inputs['review_decisions'] = {'decisions': [], 'summary': {'decision_counts': {}}}
+
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=True,
+            expected_removed_count=0,
+            expected_kept_count=6)
+
+        warning_types = {warning['type'] for warning in simulation['safety_warnings']}
+        self.assertIn('missing_review_decisions', warning_types)
+        self.assertIn('no_approved_candidates', warning_types)
+        self.assertEqual(simulation['summary']['would_remove_block_count'], 0)
+
+    def test_document_parse_simulation_disabled_mode_is_clear(self):
+        inputs = _document_parse_simulation_inputs()
+
+        simulation = build_document_parse_filtering_simulation_report(**inputs)
+
+        self.assertFalse(simulation['enabled'])
+        self.assertFalse(simulation['applied'])
+        self.assertEqual(simulation['summary']['would_remove_block_count'], 0)
+        self.assertEqual(simulation['simulated_apply']['kept_block_count'], 6)
+
 
 def _page(page_index, blocks):
     return {
@@ -2287,6 +2422,100 @@ def _filter_insertion_reports(body_region_removed_count=0):
                 'estimator_should_split_count': 22,
             },
         },
+    }
+
+
+def _document_parse_simulation_inputs():
+    page_summaries = [
+        {
+            'page_index': 0,
+            'page_number': 1,
+            'text_block_count': 6,
+            'region_counts': {
+                REGION_TOP: 3,
+                REGION_BODY: 1,
+                REGION_BOTTOM: 2,
+            },
+            'text_blocks': [
+                _summary_block(0, 'approved-header', REGION_TOP, 'Approved Header'),
+                _summary_block(1, 'body-text', REGION_BODY, 'Body paragraph'),
+                _summary_block(2, 'approved-footer', REGION_BOTTOM, 'Approved Footer'),
+                _summary_block(3, 'reject-header', REGION_TOP, 'Rejected Header'),
+                _summary_block(4, 'unsure-footer', REGION_BOTTOM, 'Unsure Footer'),
+                _summary_block(5, 'image-placeholder', REGION_TOP, IMAGE_PLACEHOLDER),
+            ],
+        },
+    ]
+    dry_run_report = {
+        'summary': {'candidate_count': 5},
+        'candidates': [
+            _dry_run_candidate('c-approved-header', 'approved-header', ROLE_HEADER, ACTION_WOULD_EXCLUDE, [0], [REGION_TOP]),
+            _dry_run_candidate('c-approved-footer', 'approved-footer', ROLE_FOOTER, ACTION_WOULD_EXCLUDE, [0], [REGION_BOTTOM]),
+            _dry_run_candidate('c-reject-header', 'reject-header', ROLE_HEADER, ACTION_WOULD_EXCLUDE, [0], [REGION_TOP]),
+            _dry_run_candidate('c-unsure-footer', 'unsure-footer', ROLE_FOOTER, ACTION_WOULD_EXCLUDE, [0], [REGION_BOTTOM]),
+            _dry_run_candidate('c-image-placeholder', 'image-placeholder', ROLE_LAYOUT_PLACEHOLDER, ACTION_WOULD_EXCLUDE, [0], [REGION_TOP]),
+        ],
+    }
+    review_decisions = {
+        'decisions': [
+            _review_decision('c-approved-header', 'approved-header', 'approve_exclude'),
+            _review_decision('c-approved-footer', 'approved-footer', 'approve_exclude'),
+            _review_decision('c-reject-header', 'reject-header', 'reject_exclude'),
+            _review_decision('c-unsure-footer', 'unsure-footer', 'unsure'),
+            _review_decision('c-image-placeholder', 'image-placeholder', 'approve_exclude'),
+        ],
+        'summary': {
+            'decision_counts': {
+                'approve_exclude': 3,
+                'reject_exclude': 1,
+                'unsure': 1,
+            },
+        },
+    }
+    return {
+        'page_summaries': page_summaries,
+        'dry_run_report': dry_run_report,
+        'review_decisions': review_decisions,
+        'body_filtering_diff_report': {
+            'summary': {
+                'would_remove_block_count': 2,
+                'kept_block_count': 4,
+            },
+        },
+        'paragraph_integrity_report': {
+            'summary': {
+                'body_region_removed_count': 0,
+            },
+        },
+    }
+
+
+def _summary_block(block_index, fingerprint, region, text):
+    return {
+        'block_index': block_index,
+        'fingerprint': fingerprint,
+        'region': region,
+        'text': text,
+        'bbox': [50.0, 50.0 + block_index * 20.0, 520.0, 65.0 + block_index * 20.0],
+    }
+
+
+def _dry_run_candidate(candidate_id, fingerprint, role, action, pages, regions):
+    return {
+        'candidate_id': candidate_id,
+        'fingerprint': fingerprint,
+        'proposed_role': role,
+        'action': action,
+        'affected_pages': pages,
+        'regions': regions,
+    }
+
+
+def _review_decision(candidate_id, fingerprint, manual_decision):
+    return {
+        'candidate_id': candidate_id,
+        'fingerprint': fingerprint,
+        'manual_decision': manual_decision,
     }
 
 
