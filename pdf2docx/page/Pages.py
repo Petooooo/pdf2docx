@@ -4,7 +4,10 @@
 
 import logging
 
-from .LayoutAnalyzer import build_layout_analysis_report
+from .LayoutAnalyzer import (
+    build_document_parse_filtering_hook_report,
+    build_layout_analysis_report,
+)
 from .RawPageFactory import RawPageFactory
 from ..common.Collection import BaseCollection
 from ..font.Fonts import Fonts
@@ -16,6 +19,7 @@ class Pages(BaseCollection):
     def __init__(self, instances:list=None, parent=None):
         super().__init__(instances, parent)
         self._layout_analysis_report = None
+        self._document_parse_filtering_hook_report = None
 
 
     @property
@@ -34,6 +38,7 @@ class Pages(BaseCollection):
             settings (dict): Parsing parameters.
         '''
         self._layout_analysis_report = None
+        self._document_parse_filtering_hook_report = None
 
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
@@ -82,9 +87,18 @@ class Pages(BaseCollection):
         # NOTE: blocks structure might be changed in this step, e.g. promote page header/footer,
         # so blocks structure based process, e.g. calculating margin, parse section should be 
         # run after this step.
+        layout_analysis_report = None
         if settings.get('layout_analysis'):
-            self._layout_analysis_report = Pages._build_layout_analysis_report(
+            layout_analysis_report = self._layout_analysis_report = Pages._build_layout_analysis_report(
                 pages, raw_pages, **settings)
+
+        if settings.get('_document_parse_filtering_hook_enabled'):
+            if layout_analysis_report is None:
+                layout_analysis_report = Pages._build_layout_analysis_report(
+                    pages, raw_pages, **settings)
+            self._run_document_parse_filtering_hook(
+                layout_analysis_report,
+                **settings)
 
         header, footer = Pages._parse_document(raw_pages)
 
@@ -108,6 +122,47 @@ class Pages(BaseCollection):
         '''Parse structure in document/pages level, e.g. header, footer'''
         # TODO
         return '', ''
+
+
+    def _run_document_parse_filtering_hook(self, layout_analysis_report:dict, **settings):
+        '''Run the internal document-parse dry-run hook without mutating pages.'''
+        if not settings.get('_document_parse_filtering_hook_enabled'):
+            self._document_parse_filtering_hook_report = None
+            return None
+
+        self._document_parse_filtering_hook_report = Pages._build_document_parse_filtering_hook_report(
+            layout_analysis_report,
+            **settings)
+        return self._document_parse_filtering_hook_report
+
+
+    @staticmethod
+    def _build_document_parse_filtering_hook_report(
+            layout_analysis_report:dict,
+            **settings):
+        layout_analysis_report = layout_analysis_report or {}
+        return build_document_parse_filtering_hook_report(
+            layout_analysis_report.get('pages', []),
+            settings.get('_document_parse_filtering_dry_run_report') or
+            layout_analysis_report.get('header_footer_exclusion_dry_run', {}),
+            settings.get('_document_parse_filtering_review_decisions'),
+            body_filtering_diff_report=settings.get(
+                '_document_parse_filtering_body_diff_report'),
+            paragraph_integrity_report=settings.get(
+                '_document_parse_filtering_paragraph_integrity_report'),
+            phase_2k_simulation_report=settings.get(
+                '_document_parse_filtering_phase_2k_report'),
+            enabled=bool(settings.get('_document_parse_filtering_hook_enabled')),
+            apply=bool(settings.get('_document_parse_filtering_apply', False)),
+            expected_removed_count=settings.get(
+                '_document_parse_filtering_expected_removed_count',
+                48),
+            expected_kept_count=settings.get(
+                '_document_parse_filtering_expected_kept_count',
+                742),
+            expected_body_region_removed_count=settings.get(
+                '_document_parse_filtering_expected_body_region_removed_count',
+                0))
 
 
     @staticmethod

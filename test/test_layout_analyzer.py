@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
 build_filter_insertion_point_analysis_report = LayoutAnalyzer.build_filter_insertion_point_analysis_report
 build_indentation_rule_comparison_report = LayoutAnalyzer.build_indentation_rule_comparison_report
@@ -42,6 +43,11 @@ normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
 parse_exclusion_review_markdown = LayoutAnalyzer.parse_exclusion_review_markdown
 text_block_records = LayoutAnalyzer.text_block_records
+
+try:
+    from pdf2docx.page.Pages import Pages
+except Exception:
+    Pages = None
 
 
 class TestLayoutAnalyzer(unittest.TestCase):
@@ -2169,6 +2175,122 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(simulation['summary']['would_remove_block_count'], 0)
         self.assertEqual(simulation['simulated_apply']['kept_block_count'], 6)
 
+    def test_document_parse_hook_dry_run_reports_without_production_removal(self):
+        inputs = _document_parse_simulation_inputs()
+
+        hook = build_document_parse_filtering_hook_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(hook['hook_location'], 'Pages._parse_document()')
+        self.assertEqual(hook['mode'], 'dry_run_report_only')
+        self.assertEqual(hook['summary']['original_block_count'], 6)
+        self.assertEqual(hook['summary']['would_remove_block_count'], 2)
+        self.assertEqual(hook['summary']['simulated_removed_count'], 0)
+        self.assertEqual(hook['summary']['production_removed_count'], 0)
+        self.assertFalse(hook['summary']['production_objects_mutated'])
+        self.assertFalse(hook['summary']['default_behavior_changed'])
+
+    def test_document_parse_hook_uses_only_explicit_approval(self):
+        inputs = _document_parse_simulation_inputs()
+
+        hook = build_document_parse_filtering_hook_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(hook['summary']['approved_candidate_count'], 2)
+        self.assertEqual(hook['summary']['blocked_candidate_count'], 3)
+        self.assertEqual(hook['summary']['rejected_removed_count'], 0)
+        self.assertEqual(hook['summary']['unsure_removed_count'], 0)
+        self.assertEqual(hook['summary']['layout_placeholder_removed_count'], 0)
+
+    def test_document_parse_hook_counts_match_simulation_helper(self):
+        inputs = _document_parse_simulation_inputs()
+
+        hook = build_document_parse_filtering_hook_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=2,
+            expected_kept_count=4)
+        simulation = build_document_parse_filtering_simulation_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=2,
+            expected_kept_count=4)
+
+        self.assertEqual(
+            hook['summary']['would_remove_block_count'],
+            simulation['summary']['would_remove_block_count'])
+        self.assertEqual(
+            hook['phase_2k_consistency']['would_remove_count_matches_phase_2k'],
+            True)
+        self.assertEqual(
+            hook['phase_2k_consistency']['would_keep_count_matches_phase_2k'],
+            True)
+
+    def test_document_parse_hook_reports_missing_review_decisions(self):
+        inputs = _document_parse_simulation_inputs()
+        inputs['review_decisions'] = {'decisions': [], 'summary': {'decision_counts': {}}}
+
+        hook = build_document_parse_filtering_hook_report(
+            **inputs,
+            enabled=True,
+            apply=False,
+            expected_removed_count=0,
+            expected_kept_count=6)
+
+        warning_types = {warning['type'] for warning in hook['safety_warnings']}
+        self.assertIn('missing_review_decisions', warning_types)
+        self.assertIn('no_approved_candidates', warning_types)
+        self.assertFalse(hook['recommendation']['safe_to_attempt_phase_2m'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_parse_document_default_behavior_remains_unchanged(self):
+        pages = Pages()
+
+        self.assertEqual(Pages._parse_document([object()]), ('', ''))
+        self.assertIsNone(pages._document_parse_filtering_hook_report)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_document_parse_hook_stores_report_without_mutating_input(self):
+        inputs = _document_parse_simulation_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        before = json.loads(json.dumps(layout_report))
+        pages = Pages()
+
+        report = pages._run_document_parse_filtering_hook(
+            layout_report,
+            _document_parse_filtering_hook_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_filtering_body_diff_report=inputs['body_filtering_diff_report'],
+            _document_parse_filtering_paragraph_integrity_report=inputs['paragraph_integrity_report'],
+            _document_parse_filtering_expected_removed_count=2,
+            _document_parse_filtering_expected_kept_count=4)
+
+        self.assertEqual(layout_report, before)
+        self.assertIs(pages._document_parse_filtering_hook_report, report)
+        self.assertEqual(report['summary']['would_remove_block_count'], 2)
+        self.assertEqual(report['summary']['simulated_removed_count'], 0)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_document_parse_hook_disabled_leaves_report_empty(self):
+        inputs = _document_parse_simulation_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        pages = Pages()
+
+        report = pages._run_document_parse_filtering_hook(layout_report)
+
+        self.assertIsNone(report)
+        self.assertIsNone(pages._document_parse_filtering_hook_report)
+
 
 def _page(page_index, blocks):
     return {
@@ -2487,6 +2609,13 @@ def _document_parse_simulation_inputs():
                 'body_region_removed_count': 0,
             },
         },
+    }
+
+
+def _document_parse_hook_layout_report(inputs):
+    return {
+        'pages': inputs['page_summaries'],
+        'header_footer_exclusion_dry_run': inputs['dry_run_report'],
     }
 
 

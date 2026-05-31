@@ -718,6 +718,72 @@ def build_document_parse_filtering_simulation_report(
     }
 
 
+def build_document_parse_filtering_hook_report(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        body_filtering_diff_report: dict = None,
+        paragraph_integrity_report: dict = None,
+        phase_2k_simulation_report: dict = None,
+        enabled: bool = False,
+        apply: bool = False,
+        expected_removed_count: int = 48,
+        expected_kept_count: int = 742,
+        expected_body_region_removed_count: int = 0) -> dict:
+    '''Build the internal Pages._parse_document() hook dry-run report.
+
+    The hook scaffold is report-only. Even when ``apply`` is requested, the
+    underlying simulation works on copied summaries and never mutates
+    production page/raw-page objects.
+    '''
+    simulation = build_document_parse_filtering_simulation_report(
+        page_summaries,
+        dry_run_report,
+        review_decisions,
+        body_filtering_diff_report=body_filtering_diff_report,
+        paragraph_integrity_report=paragraph_integrity_report,
+        enabled=enabled,
+        apply=apply,
+        expected_removed_count=expected_removed_count,
+        expected_kept_count=expected_kept_count,
+        expected_body_region_removed_count=expected_body_region_removed_count)
+    summary = dict(simulation.get('summary') or {})
+    summary.update({
+        'default_behavior_changed': False,
+        'production_objects_mutated': False,
+        'production_removed_count': 0,
+        'hook_report_stored': bool(enabled),
+    })
+    phase_2k_consistency = _document_parse_hook_phase_2k_consistency(
+        simulation,
+        phase_2k_simulation_report)
+    safety_warnings = list(simulation.get('safety_warnings') or [])
+    recommendation = _document_parse_hook_recommendation(
+        enabled,
+        safety_warnings,
+        summary)
+
+    return {
+        'enabled': bool(enabled),
+        'applied': bool(simulation.get('applied')),
+        'production_applied': False,
+        'policy': 'document_parse_hook_scaffold_report_only',
+        'hook_location': 'Pages._parse_document()',
+        'insertion_point': 'document_parse',
+        'mode': 'dry_run_report_only',
+        'summary': summary,
+        'dry_run': simulation.get('dry_run', {}),
+        'simulated_apply': simulation.get('simulated_apply', {}),
+        'simulation': simulation,
+        'phase_2k_consistency': phase_2k_consistency,
+        'safety_warnings': safety_warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2m': recommendation[0],
+            'reason': recommendation[1],
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -1979,6 +2045,69 @@ def _document_parse_recommendation(warnings: list, region_counts: dict) -> str:
     if _document_parse_safe_for_phase_2l(warnings, region_counts):
         return 'Document-parse simulation matches reviewed filtering counts and preserves body-region blocks; Phase 2L can remain opt-in and local-only.'
     return 'Do not connect production filtering yet; resolve simulation warnings before Phase 2L.'
+
+
+def _document_parse_hook_phase_2k_consistency(
+        simulation: dict,
+        phase_2k_simulation_report: dict = None) -> dict:
+    summary = (simulation or {}).get('summary') or {}
+    if phase_2k_simulation_report:
+        phase_summary = phase_2k_simulation_report.get('summary') or {}
+        phase_removed = phase_summary.get(
+            'would_remove_block_count',
+            phase_summary.get('simulated_removed_count'))
+        phase_kept = phase_summary.get(
+            'would_keep_block_count',
+            phase_summary.get('simulated_kept_count'))
+        return {
+            'phase_2k_report_available': True,
+            'phase_2k_would_remove_count': phase_removed,
+            'phase_2k_would_keep_count': phase_kept,
+            'would_remove_count_matches_phase_2k': (
+                phase_removed is None or
+                summary.get('would_remove_block_count') == phase_removed),
+            'would_keep_count_matches_phase_2k': (
+                phase_kept is None or
+                summary.get('would_keep_block_count') == phase_kept),
+            'reason': 'Compared hook dry-run counts with the supplied Phase 2K simulation report.',
+        }
+
+    checks = (simulation or {}).get('consistency_checks') or {}
+    return {
+        'phase_2k_report_available': False,
+        'would_remove_count_matches_phase_2k': checks.get('phase_2b_removed_match', False),
+        'would_keep_count_matches_phase_2k': checks.get('phase_2b_kept_match', False),
+        'body_region_removed_count_matches_phase_2k': checks.get(
+            'phase_2c_body_region_removed_match',
+            False),
+        'reason': 'No Phase 2K report was supplied; using expected Phase 2B/2C count consistency.',
+    }
+
+
+def _document_parse_hook_recommendation(
+        enabled: bool,
+        warnings: list,
+        summary: dict) -> tuple:
+    if not enabled:
+        return (
+            False,
+            'Hook scaffold is disabled; no production integration should be attempted.')
+
+    blocking_counts = (
+        summary.get('body_region_removed_count', 0),
+        summary.get('rejected_removed_count', 0),
+        summary.get('unsure_removed_count', 0),
+        summary.get('layout_placeholder_removed_count', 0),
+        summary.get('production_removed_count', 0),
+    )
+    if warnings or any(blocking_counts):
+        return (
+            False,
+            'Resolve hook safety warnings before any Phase 2M production experiment.')
+
+    return (
+        True,
+        'Hook scaffold is dry-run/report-only and preserves production objects; Phase 2M can remain opt-in and guarded.')
 
 
 def _integrity_removed_block_summary(page_index, block: dict, removed: dict) -> dict:

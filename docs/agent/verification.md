@@ -1641,3 +1641,116 @@ Result: confirmed local PDF/report files, `.venv/`, and generated caches remain 
 ### Phase 2L recommendation
 
 Phase 2L is safe to attempt only as another internal opt-in/local-only experiment at the `document_parse` boundary. The next step should still avoid default conversion changes, public CLI exposure, production DOCX header/footer generation, and production paragraph merging.
+
+## Phase 2L
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2L added an internal opt-in hook scaffold around the future `document_parse` insertion point, represented by `Pages._parse_document()`. The hook is disabled by default and stores only a private diagnostic report when explicitly enabled through internal settings.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No production raw page, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No header/footer content is removed from production page content.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+
+### Hook behavior
+
+- Hook location: `Pages._parse_document()`.
+- Hook mode: dry-run/report-only.
+- Default `Pages._parse_document()` behavior remains `('', '')`.
+- The hook calls the existing document-parse simulation helper on copied layout summaries.
+- The hook uses only explicit `approve_exclude` review decisions.
+- Rejected, unsure, review-only, layout-placeholder, and body-region content remain protected.
+- The hook report is JSON-serializable and stored only in a private `Pages` diagnostic field.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/document-parse-hook-dry-run-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, and generated hook report remained ignored.
+
+### Sample summary
+
+- Original block count: 790.
+- Would-remove block count: 48.
+- Simulated removed count in hook dry-run mode: 0.
+- Simulated kept count in hook dry-run mode: 790.
+- Production removed count: 0.
+- Approved candidate count: 4.
+- Blocked candidate count: 5.
+- Body-region removed count: 0.
+- Rejected removed count: 0.
+- Unsure removed count: 0.
+- Layout-placeholder removed count: 0.
+- Phase 2K/expected count consistency: match.
+- Safety warnings: none.
+
+Would-remove counts by role:
+
+- `header`: 12.
+- `footer`: 24.
+- `page_number`: 12.
+
+### Tests added
+
+- Default `Pages._parse_document()` behavior remains unchanged when the hook is disabled.
+- The hook can be invoked in internal dry-run mode.
+- The hook stores a report without mutating input summaries.
+- The hook uses only explicit `approve_exclude` decisions.
+- Rejected candidates, unsure candidates, layout placeholders, and body-region blocks remain protected.
+- Dry-run mode reports would-remove counts but removes zero production blocks.
+- Hook report counts match the Phase 2K simulation helper.
+- Missing review decisions are reported clearly.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 102 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 102 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2M recommendation
+
+Phase 2M is safe to attempt only as another explicitly opt-in experiment. The next phase should still avoid default conversion changes and should not mutate production raw pages until the hook can prove, in a guarded path, that reviewed filtering decisions map reliably to the actual raw-page block objects.
