@@ -5,6 +5,7 @@
 import logging
 
 from .LayoutAnalyzer import (
+    build_document_parse_copied_raw_page_filtering_apply_report,
     build_document_parse_filtering_hook_report,
     build_document_parse_raw_object_mapping_report,
     build_layout_analysis_report,
@@ -22,6 +23,7 @@ class Pages(BaseCollection):
         self._layout_analysis_report = None
         self._document_parse_filtering_hook_report = None
         self._document_parse_raw_object_mapping_report = None
+        self._document_parse_copied_raw_filtering_apply_report = None
 
 
     @property
@@ -42,6 +44,7 @@ class Pages(BaseCollection):
         self._layout_analysis_report = None
         self._document_parse_filtering_hook_report = None
         self._document_parse_raw_object_mapping_report = None
+        self._document_parse_copied_raw_filtering_apply_report = None
 
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
@@ -113,6 +116,16 @@ class Pages(BaseCollection):
                 raw_pages,
                 **settings)
 
+        if settings.get('_document_parse_copied_raw_filtering_enabled'):
+            if layout_analysis_report is None:
+                layout_analysis_report = Pages._build_layout_analysis_report(
+                    pages, raw_pages, **settings)
+            self._run_document_parse_copied_raw_filtering_apply(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                **settings)
+
         header, footer = Pages._parse_document(raw_pages)
 
 
@@ -168,6 +181,26 @@ class Pages(BaseCollection):
         return self._document_parse_raw_object_mapping_report
 
 
+    def _run_document_parse_copied_raw_filtering_apply(
+            self,
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            **settings):
+        '''Apply reviewed filtering to copied raw-page records only.'''
+        if not settings.get('_document_parse_copied_raw_filtering_enabled'):
+            self._document_parse_copied_raw_filtering_apply_report = None
+            return None
+
+        self._document_parse_copied_raw_filtering_apply_report = Pages._build_document_parse_copied_raw_filtering_apply_report(
+            layout_analysis_report,
+            pages,
+            raw_pages,
+            raw_object_mapping_report=self._document_parse_raw_object_mapping_report,
+            **settings)
+        return self._document_parse_copied_raw_filtering_apply_report
+
+
     @staticmethod
     def _build_document_parse_filtering_hook_report(
             layout_analysis_report:dict,
@@ -214,6 +247,27 @@ class Pages(BaseCollection):
             enabled=bool(settings.get('_document_parse_raw_object_mapping_enabled')),
             expected_would_remove_count=settings.get(
                 '_document_parse_mapping_expected_would_remove_count'))
+
+
+    @staticmethod
+    def _build_document_parse_copied_raw_filtering_apply_report(
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            raw_object_mapping_report:dict=None,
+            **settings):
+        layout_analysis_report = layout_analysis_report or {}
+        raw_object_pages = Pages._raw_object_mapping_pages(pages, raw_pages)
+        return build_document_parse_copied_raw_page_filtering_apply_report(
+            layout_analysis_report.get('pages', []),
+            raw_object_pages,
+            settings.get('_document_parse_mapping_dry_run_report') or
+            layout_analysis_report.get('header_footer_exclusion_dry_run', {}),
+            settings.get('_document_parse_filtering_review_decisions'),
+            raw_object_mapping_report=raw_object_mapping_report,
+            enabled=bool(settings.get('_document_parse_copied_raw_filtering_enabled')),
+            expected_mapping_count=settings.get(
+                '_document_parse_copied_raw_filtering_expected_mapping_count'))
 
 
     @staticmethod

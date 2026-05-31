@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_raw_object_mapping_report = LayoutAnalyzer.build_document_parse_raw_object_mapping_report
 build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
@@ -2443,6 +2444,172 @@ class TestLayoutAnalyzer(unittest.TestCase):
 
         self.assertIsNone(report)
         self.assertIsNone(pages._document_parse_raw_object_mapping_report)
+
+    def test_copied_raw_apply_removes_only_approved_mapped_objects(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+
+        self.assertEqual(apply_report['summary']['removed_copied_block_count'], 2)
+        self.assertEqual(apply_report['summary']['copied_filtered_block_count'], 4)
+        self.assertEqual(apply_report['removed_counts_by_role'], {
+            ROLE_FOOTER: 1,
+            ROLE_HEADER: 1,
+        })
+        self.assertTrue(apply_report['summary']['removed_count_matches_phase_2m'])
+
+    def test_copied_raw_apply_does_not_mutate_original_raw_objects(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        before_raw = json.loads(json.dumps(inputs['raw_object_pages']))
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+
+        self.assertEqual(inputs['raw_object_pages'], before_raw)
+        self.assertFalse(apply_report['summary']['original_objects_mutated'])
+        self.assertIsNot(
+            apply_report['copied_filtered_pages'][0],
+            inputs['raw_object_pages'][0])
+
+    def test_copied_raw_apply_filters_copied_objects_as_expected(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+        remaining = {
+            raw_object['fingerprint']
+            for page in apply_report['copied_filtered_pages']
+            for raw_object in page['raw_objects']
+        }
+
+        self.assertNotIn(_summary_fingerprint('Approved Header', REGION_TOP), remaining)
+        self.assertNotIn(_summary_fingerprint('Approved Footer', REGION_BOTTOM), remaining)
+        self.assertIn(_summary_fingerprint('Body paragraph', REGION_BODY), remaining)
+
+    def test_copied_raw_apply_keeps_rejected_unsure_placeholder_and_body(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+        remaining = {
+            raw_object['fingerprint']
+            for page in apply_report['copied_filtered_pages']
+            for raw_object in page['raw_objects']
+        }
+
+        self.assertIn(_summary_fingerprint('Rejected Header', REGION_TOP), remaining)
+        self.assertIn(_summary_fingerprint('Unsure Footer', REGION_BOTTOM), remaining)
+        self.assertIn(_summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP), remaining)
+        self.assertIn(_summary_fingerprint('Body paragraph', REGION_BODY), remaining)
+        self.assertEqual(apply_report['summary']['body_region_removed_count'], 0)
+        self.assertEqual(
+            apply_report['summary']['rejected_unsure_layout_placeholder_removed_count'],
+            0)
+
+    def test_copied_raw_apply_warns_for_missing_mapping(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'] = [
+            raw_object
+            for raw_object in inputs['raw_object_pages'][0]['raw_objects']
+            if raw_object['fingerprint'] != _summary_fingerprint('Approved Footer', REGION_BOTTOM)
+        ]
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+
+        warning_types = {warning['type'] for warning in apply_report['safety_warnings']}
+        self.assertEqual(apply_report['summary']['removed_copied_block_count'], 1)
+        self.assertIn('mapping_missing_raw_object_match', warning_types)
+        self.assertIn('expected_mapping_count_mismatch_phase_2m', warning_types)
+
+    def test_copied_raw_apply_warns_for_ambiguous_mapping(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        inputs['raw_object_pages'][0]['raw_objects'].append(
+            _raw_object(6, 'Approved Header', REGION_TOP))
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            enabled=True,
+            expected_mapping_count=2)
+
+        warning_types = {warning['type'] for warning in apply_report['safety_warnings']}
+        self.assertEqual(apply_report['summary']['removed_copied_block_count'], 1)
+        self.assertIn('mapping_ambiguous_raw_object_match', warning_types)
+        self.assertIn('expected_mapping_count_mismatch_phase_2m', warning_types)
+
+    def test_copied_raw_apply_count_matches_phase_2m_mapping_count(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(
+            **inputs,
+            raw_object_mapping_report=mapping,
+            enabled=True,
+            expected_mapping_count=2)
+
+        consistency = apply_report['consistency_with_phase_2m']
+        self.assertEqual(consistency['phase_2m_mapped_raw_object_count'], 2)
+        self.assertTrue(consistency['removed_count_matches_phase_2m'])
+        self.assertTrue(apply_report['recommendation']['safe_to_attempt_phase_2o'])
+
+    def test_copied_raw_apply_disabled_mode_is_clear(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        apply_report = build_document_parse_copied_raw_page_filtering_apply_report(**inputs)
+
+        self.assertFalse(apply_report['enabled'])
+        self.assertFalse(apply_report['applied_to_copy'])
+        self.assertEqual(apply_report['summary']['removed_copied_block_count'], 0)
+        self.assertFalse(apply_report['recommendation']['safe_to_attempt_phase_2o'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_copied_raw_apply_path_stores_report_without_mutating_fake_raw_pages(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        fake_pages = [_FakePage(0)]
+        fake_raw_pages = [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])]
+        before_raw_texts = [block.text for block in fake_raw_pages[0].blocks]
+        pages = Pages()
+
+        report = pages._run_document_parse_copied_raw_filtering_apply(
+            layout_report,
+            fake_pages,
+            fake_raw_pages,
+            _document_parse_copied_raw_filtering_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_copied_raw_filtering_expected_mapping_count=2)
+
+        self.assertIs(pages._document_parse_copied_raw_filtering_apply_report, report)
+        self.assertEqual(report['summary']['removed_copied_block_count'], 2)
+        self.assertEqual([block.text for block in fake_raw_pages[0].blocks], before_raw_texts)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_copied_raw_apply_disabled_leaves_report_empty(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        layout_report = _document_parse_hook_layout_report(inputs)
+        pages = Pages()
+
+        report = pages._run_document_parse_copied_raw_filtering_apply(
+            layout_report,
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])])
+
+        self.assertIsNone(report)
+        self.assertIsNone(pages._document_parse_copied_raw_filtering_apply_report)
 
 
 def _page(page_index, blocks):

@@ -870,6 +870,101 @@ def build_document_parse_raw_object_mapping_report(
     }
 
 
+def build_document_parse_copied_raw_page_filtering_apply_report(
+        page_summaries: list = None,
+        raw_object_pages: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        raw_object_mapping_report: dict = None,
+        enabled: bool = False,
+        expected_mapping_count: int = None) -> dict:
+    '''Apply reviewed filtering to copied raw-page-like data only.
+
+    This helper is an internal experiment. It never mutates source raw pages;
+    it removes validated mapping targets only from copied ``raw_object_pages``.
+    '''
+    original_raw_pages = _copy_raw_object_pages(raw_object_pages)
+    original_count = _raw_object_page_count(original_raw_pages)
+    if not enabled:
+        return {
+            'enabled': False,
+            'applied_to_copy': False,
+            'production_applied': False,
+            'policy': 'copied_raw_page_filtering_apply_report_only',
+            'insertion_point': 'document_parse',
+            'summary': _copied_apply_disabled_summary(original_count, expected_mapping_count),
+            'copied_filtered_pages': original_raw_pages,
+            'removed_objects_by_page': [],
+            'removed_counts_by_role': {},
+            'removed_counts_by_page': [],
+            'downstream_inputs': _copied_apply_downstream_inputs(
+                original_raw_pages,
+                original_raw_pages,
+                []),
+            'consistency_with_phase_2m': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2o': False,
+                'reason': 'Copied raw-page filtering experiment is disabled.',
+            },
+        }
+
+    mapping_report = raw_object_mapping_report or build_document_parse_raw_object_mapping_report(
+        page_summaries,
+        raw_object_pages,
+        dry_run_report,
+        review_decisions,
+        enabled=True,
+        expected_would_remove_count=expected_mapping_count)
+    removal_plan = _copied_apply_removal_plan(mapping_report)
+    filtered_pages, removed_objects_by_page, missing_apply_targets = _copied_apply_filter_pages(
+        original_raw_pages,
+        removal_plan)
+    removed_objects = [
+        removed
+        for page in removed_objects_by_page
+        for removed in page.get('objects', []) or []
+    ]
+    consistency = _copied_apply_phase_2m_consistency(
+        mapping_report,
+        len(removed_objects),
+        expected_mapping_count)
+    summary = _copied_apply_summary(
+        original_raw_pages,
+        filtered_pages,
+        removed_objects,
+        mapping_report,
+        consistency)
+    warnings = _copied_apply_warnings(
+        summary,
+        mapping_report,
+        consistency,
+        missing_apply_targets)
+
+    return {
+        'enabled': True,
+        'applied_to_copy': True,
+        'production_applied': False,
+        'policy': 'copied_raw_page_filtering_apply_report_only',
+        'insertion_point': 'document_parse',
+        'summary': summary,
+        'copied_filtered_pages': filtered_pages,
+        'removed_objects_by_page': removed_objects_by_page,
+        'removed_counts_by_role': _copied_apply_removed_counts_by_role(removed_objects),
+        'removed_counts_by_page': _copied_apply_removed_counts_by_page(removed_objects_by_page),
+        'downstream_inputs': _copied_apply_downstream_inputs(
+            original_raw_pages,
+            filtered_pages,
+            removed_objects),
+        'consistency_with_phase_2m': consistency,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2o': _copied_apply_safe_for_phase_2o(summary, warnings),
+            'reason': _copied_apply_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -2550,6 +2645,300 @@ def _raw_mapping_recommendation(summary: dict, warnings: list) -> str:
     if _raw_mapping_safe_for_phase_2n(summary, warnings):
         return 'Every reviewed would-remove summary block maps to exactly one safe raw-page object; Phase 2N can remain opt-in and copied-object only.'
     return 'Do not apply production filtering yet; resolve raw-object mapping warnings first.'
+
+
+def _copied_apply_disabled_summary(
+        original_count: int,
+        expected_mapping_count: int = None) -> dict:
+    return {
+        'original_raw_block_count': original_count,
+        'copied_filtered_block_count': original_count,
+        'removed_copied_block_count': 0,
+        'expected_mapping_count': expected_mapping_count or 0,
+        'body_region_removed_count': 0,
+        'rejected_unsure_layout_placeholder_removed_count': 0,
+        'original_objects_mutated': False,
+        'copied_objects_filtered': False,
+    }
+
+
+def _copied_apply_removal_plan(mapping_report: dict) -> list:
+    plan = []
+    for mapping in (mapping_report or {}).get('mappings', []) or []:
+        if mapping.get('mapping_status') not in {'exact_match', 'fuzzy_match'}:
+            continue
+        selected = mapping.get('selected_raw_objects', []) or []
+        if len(selected) != 1:
+            continue
+        raw_object = selected[0]
+        if raw_object.get('unsafe_signals'):
+            continue
+        plan.append({
+            'page_index': mapping.get('page_index'),
+            'page_number': mapping.get('page_number'),
+            'raw_object_id': raw_object.get('raw_object_id'),
+            'block_index': raw_object.get('block_index'),
+            'object_index': raw_object.get('object_index'),
+            'fingerprint': mapping.get('fingerprint', ''),
+            'candidate_id': mapping.get('candidate_id', ''),
+            'proposed_role': mapping.get('proposed_role', ''),
+            'region': raw_object.get('region', mapping.get('region', '')),
+            'mapping_status': mapping.get('mapping_status'),
+            'text_preview': raw_object.get('text_preview', ''),
+        })
+    return plan
+
+
+def _copied_apply_filter_pages(raw_object_pages: list, removal_plan: list) -> tuple:
+    remove_by_key = {
+        (item.get('page_index'), item.get('raw_object_id')): item
+        for item in removal_plan or []
+    }
+    seen_keys = set()
+    filtered_pages = []
+    removed_by_page = []
+    for page in raw_object_pages or []:
+        page_index = page.get('page_index')
+        kept_objects = []
+        removed_objects = []
+        for raw_object in page.get('raw_objects', []) or []:
+            key = (page_index, raw_object.get('raw_object_id'))
+            plan_item = remove_by_key.get(key)
+            if plan_item:
+                removed = dict(raw_object)
+                removed.update({
+                    'candidate_id': plan_item.get('candidate_id', ''),
+                    'proposed_role': plan_item.get('proposed_role', ''),
+                    'mapping_status': plan_item.get('mapping_status', ''),
+                    'removal_reason': 'approved_reviewed_raw_object_mapping',
+                    'text_preview': plan_item.get('text_preview', ''),
+                })
+                removed_objects.append(removed)
+                seen_keys.add(key)
+            else:
+                kept_objects.append(dict(raw_object))
+
+        filtered_page = dict(page)
+        filtered_page['raw_objects'] = kept_objects
+        filtered_page['raw_object_count'] = len(kept_objects)
+        filtered_pages.append(filtered_page)
+        removed_by_page.append({
+            'page_index': page_index,
+            'page_number': page.get('page_number', _human_page_number(page_index)),
+            'removed_count': len(removed_objects),
+            'objects': removed_objects,
+        })
+
+    missing_apply_targets = [
+        item for item in removal_plan or []
+        if (item.get('page_index'), item.get('raw_object_id')) not in seen_keys
+    ]
+    return filtered_pages, removed_by_page, missing_apply_targets
+
+
+def _copied_apply_summary(
+        original_pages: list,
+        filtered_pages: list,
+        removed_objects: list,
+        mapping_report: dict,
+        consistency: dict) -> dict:
+    original_count = _raw_object_page_count(original_pages)
+    filtered_count = _raw_object_page_count(filtered_pages)
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    return {
+        'original_raw_block_count': original_count,
+        'copied_filtered_block_count': filtered_count,
+        'removed_copied_block_count': len(removed_objects),
+        'approved_candidate_count': mapping_summary.get('approved_candidate_count', 0),
+        'blocked_candidate_count': mapping_summary.get('blocked_candidate_count', 0),
+        'phase_2m_mapped_raw_object_count': mapping_summary.get('mapped_raw_object_count', 0),
+        'expected_mapping_count': consistency.get('expected_mapping_count', 0),
+        'body_region_removed_count': sum(
+            1 for item in removed_objects or []
+            if item.get('region') == REGION_BODY),
+        'rejected_unsure_layout_placeholder_removed_count': sum(
+            1 for item in removed_objects or []
+            if (
+                item.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER or
+                item.get('placeholder_kind') == 'image' or
+                'blocked_review_decision_fingerprint' in item.get('unsafe_signals', []))),
+        'original_objects_mutated': False,
+        'copied_objects_filtered': bool(removed_objects),
+        'removed_count_matches_phase_2m': consistency.get('removed_count_matches_phase_2m', False),
+    }
+
+
+def _copied_apply_phase_2m_consistency(
+        mapping_report: dict,
+        removed_count: int,
+        expected_mapping_count: int = None) -> dict:
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    mapped_count = mapping_summary.get('mapped_raw_object_count', 0)
+    expected_mapping_count = (
+        expected_mapping_count
+        if expected_mapping_count is not None else
+        mapped_count)
+    return {
+        'phase_2m_mapped_raw_object_count': mapped_count,
+        'expected_mapping_count': expected_mapping_count,
+        'removed_count': removed_count,
+        'removed_count_matches_phase_2m': removed_count == mapped_count,
+        'expected_mapping_count_matches_phase_2m': expected_mapping_count == mapped_count,
+    }
+
+
+def _copied_apply_removed_counts_by_role(removed_objects: list) -> dict:
+    counts = Counter(item.get('proposed_role', '') for item in removed_objects or [])
+    return dict(sorted(counts.items()))
+
+
+def _copied_apply_removed_counts_by_page(removed_by_page: list) -> list:
+    return [
+        {
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'removed_count': page.get('removed_count', 0),
+        }
+        for page in removed_by_page or []
+    ]
+
+
+def _copied_apply_downstream_inputs(
+        original_pages: list,
+        filtered_pages: list,
+        removed_objects: list) -> dict:
+    original_body_count = _raw_object_region_count(original_pages, REGION_BODY)
+    filtered_body_count = _raw_object_region_count(filtered_pages, REGION_BODY)
+    original_placeholder_count = _raw_object_placeholder_count(original_pages)
+    filtered_placeholder_count = _raw_object_placeholder_count(filtered_pages)
+    return {
+        'margin_input_count_before': _raw_object_page_count(original_pages),
+        'margin_input_count_after': _raw_object_page_count(filtered_pages),
+        'section_input_count_before': _raw_object_page_count(original_pages),
+        'section_input_count_after': _raw_object_page_count(filtered_pages),
+        'body_block_count_before': original_body_count,
+        'body_block_count_after': filtered_body_count,
+        'image_shape_placeholder_count_before': original_placeholder_count,
+        'image_shape_placeholder_count_after': filtered_placeholder_count,
+        'table_risk_note': (
+            'Copied filtering preserves body-region raw objects for table detection.'
+            if filtered_body_count == original_body_count else
+            'Copied filtering removed body-region raw objects; table detection may be damaged.'),
+        'paragraph_grouping_risk_note': (
+            'Copied filtering preserves body-region line/block objects for paragraph grouping.'
+            if filtered_body_count == original_body_count else
+            'Copied filtering removed body-region line/block objects; paragraph grouping may be damaged.'),
+        'removed_top_bottom_count': sum(
+            1 for item in removed_objects or []
+            if item.get('region') in {REGION_TOP, REGION_BOTTOM}),
+    }
+
+
+def _copied_apply_warnings(
+        summary: dict,
+        mapping_report: dict,
+        consistency: dict,
+        missing_apply_targets: list) -> list:
+    warnings = []
+    for warning in (mapping_report or {}).get('safety_warnings', []) or []:
+        warnings.append({
+            'type': f'mapping_{warning.get("type", "warning")}',
+            'message': warning.get('message', ''),
+            'count': warning.get('count'),
+        })
+    if missing_apply_targets:
+        warnings.append({
+            'type': 'missing_copied_apply_target',
+            'count': len(missing_apply_targets),
+        })
+    if summary.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removed_from_copy',
+            'count': summary.get('body_region_removed_count'),
+        })
+    if summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+        warnings.append({
+            'type': 'blocked_or_placeholder_removed_from_copy',
+            'count': summary.get('rejected_unsure_layout_placeholder_removed_count'),
+        })
+    if not consistency.get('removed_count_matches_phase_2m', False):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2m',
+            'expected': consistency.get('phase_2m_mapped_raw_object_count'),
+            'observed': consistency.get('removed_count'),
+        })
+    if not consistency.get('expected_mapping_count_matches_phase_2m', True):
+        warnings.append({
+            'type': 'expected_mapping_count_mismatch_phase_2m',
+            'expected': consistency.get('expected_mapping_count'),
+            'observed': consistency.get('phase_2m_mapped_raw_object_count'),
+        })
+    return warnings
+
+
+def _copied_apply_safe_for_phase_2o(summary: dict, warnings: list) -> bool:
+    return (
+        bool(summary.get('copied_objects_filtered')) and
+        bool(summary.get('removed_count_matches_phase_2m')) and
+        not warnings and
+        not summary.get('body_region_removed_count', 0) and
+        not summary.get('rejected_unsure_layout_placeholder_removed_count', 0) and
+        not summary.get('original_objects_mutated', False))
+
+
+def _copied_apply_recommendation(summary: dict, warnings: list) -> str:
+    if _copied_apply_safe_for_phase_2o(summary, warnings):
+        return 'Copied raw-page filtering removed only validated reviewed objects; Phase 2O can remain opt-in and non-default.'
+    return 'Do not apply production filtering yet; resolve copied-apply warnings first.'
+
+
+def _copy_raw_object_pages(raw_object_pages: list) -> list:
+    copied = []
+    for page in raw_object_pages or []:
+        copied_page = dict(page)
+        page_height = page.get('height', page.get('page_height', 0))
+        copied_page['raw_objects'] = [
+            _copy_raw_object(raw_object, page_height)
+            for raw_object in page.get('raw_objects', []) or []
+        ]
+        copied.append(copied_page)
+    return copied
+
+
+def _copy_raw_object(raw_object: dict, page_height: float) -> dict:
+    copied = dict(raw_object)
+    text = normalize_text(copied.get('text', ''))
+    bbox = _json_bbox(copied.get('bbox'))
+    region = copied.get('region') or classify_y_band(bbox, page_height)
+    copied['text'] = text
+    copied['bbox'] = bbox
+    copied['region'] = region
+    copied.setdefault('normalized_text', _comparison_text(text))
+    copied.setdefault('fingerprint', make_text_fingerprint(text, region, style=None).get('key'))
+    copied.setdefault('placeholder_kind', _placeholder_kind(text))
+    return copied
+
+
+def _raw_object_page_count(raw_object_pages: list) -> int:
+    return sum(len(page.get('raw_objects', []) or []) for page in raw_object_pages or [])
+
+
+def _raw_object_region_count(raw_object_pages: list, region: str) -> int:
+    return sum(
+        1
+        for page in raw_object_pages or []
+        for raw_object in page.get('raw_objects', []) or []
+        if raw_object.get('region') == region)
+
+
+def _raw_object_placeholder_count(raw_object_pages: list) -> int:
+    return sum(
+        1
+        for page in raw_object_pages or []
+        for raw_object in page.get('raw_objects', []) or []
+        if (
+            raw_object.get('placeholder_kind') == 'image' or
+            _placeholder_kind(raw_object.get('text', '')) == 'image'))
 
 
 def _raw_mapping_reason(status: str, safe_candidates: list, unsafe_candidates: list) -> str:

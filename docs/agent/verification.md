@@ -1867,3 +1867,121 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2N recommendation
 
 Phase 2N is safe to attempt only as an explicitly opt-in copied-object experiment. The next step should still avoid mutating production raw pages by default, but it can test whether a copied `raw_page.blocks` collection can be filtered using the validated one-to-one raw-object mapping.
+
+## Phase 2N
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2N added an internal/report-only copied raw-page filtering apply experiment. It uses the reviewed one-to-one raw-object mapping from Phase 2M, but removes matched objects only from copied raw-page-like dictionaries. Production raw pages and downstream parser objects are not mutated.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No production raw page, `Page`, `Blocks`, `Lines`, `TextBlock`, table, image, or shape behavior changed.
+- No header/footer content is removed from production page content.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/copied-raw-page-filtering-apply-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, hook report, raw-object mapping report, and generated copied-apply report remained ignored.
+
+### Sample summary
+
+- Original raw block count: 790.
+- Copied filtered block count: 742.
+- Removed copied block count: 48.
+- Approved candidate count: 4.
+- Blocked candidate count: 5.
+- Phase 2M mapped raw object count: 48.
+- Expected mapping count: 48.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Original raw pages mutated: no.
+- Removed count matches Phase 2M mapping count: yes.
+- Safety warnings: none.
+
+Removed counts by role:
+
+- `header`: 12.
+- `footer`: 24.
+- `page_number`: 12.
+
+Removed counts by page:
+
+- 4 copied raw blocks per page across 12 pages.
+
+Downstream copied-input checks:
+
+- Margin input count before/after: 790 / 742.
+- Section input count before/after: 790 / 742.
+- Body block count before/after: 520 / 520.
+- Image/shape placeholder count before/after: 86 / 86.
+- Table risk note: body-region raw objects remain preserved in the copied data.
+- Paragraph grouping risk note: body-region line/block objects remain preserved in the copied data.
+
+### Tests added
+
+- Copied apply removes only approved mapped raw-like objects.
+- Original raw-like objects are not mutated.
+- Copied raw-like objects are filtered as expected.
+- Rejected candidates remain.
+- Unsure candidates remain.
+- Layout-placeholder candidates remain.
+- Body-region objects remain.
+- Missing mapping blocks apply partially and report a warning.
+- Ambiguous mapping blocks apply partially and report a warning.
+- Copied apply count matches the Phase 2M expected mapping count in the safe case.
+- Disabled/default behavior remains unchanged.
+- The internal `Pages` copied-apply path stores a report without mutating fake raw pages.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 122 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 122 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2O recommendation
+
+Phase 2O is safe to attempt only as an explicitly opt-in, non-default experiment. The next phase can consider a guarded production-object apply path, but it should remain disabled by default and should first verify that raw-page object mutation can be isolated, reversible, and covered by conversion-regression checks.
