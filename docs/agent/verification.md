@@ -306,3 +306,75 @@ Regenerated the ignored local report at `local_reports/input-layout-analysis-rep
 - Image placeholders are now down-scored semantically, but image identity and placement still need richer metadata.
 - Low-support repeated clusters are marked cautious, but section-specific repeated content still needs explicit section modeling.
 - Continuation scoring remains conservative; Phase 2 should add more debug-only review on varied fixtures before mutating body content.
+
+## Phase 1F
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 1F added a non-destructive `header_footer_exclusion_dry_run` section to the opt-in `layout_analysis` report. It simulates future header/footer exclusion candidates from repeated text clusters, but it does not remove, rewrite, merge, or mutate any page body content.
+
+No production DOCX conversion behavior, public CLI behavior, table behavior, image behavior, shape behavior, or paragraph merging behavior was changed.
+
+### Dry-run policy added
+
+- Strong high-support top-region repeated text is marked as a future `header` candidate with action `would_exclude`.
+- Strong high-support bottom-region repeated text is marked as a future `footer` candidate with action `would_exclude`.
+- Stable bottom page-number placeholders are marked as `page_number` candidates with action `would_exclude`, not semantic body text.
+- Image placeholders are marked as `layout_placeholder` with action `review`, not semantic header/footer text.
+- Cautious low-support or adjacent-only boundary clusters are preserved as `review`.
+- Body-region repeated candidates are kept as body content when the dry-run helper is used with body-region candidates.
+- Every dry-run item includes positive/negative signals and a reason string. The section is JSON-serializable and report-only.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 26 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 26 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Local sample recheck
+
+Regenerated the ignored local report at `local_reports/input-layout-analysis-report.json` from the ignored sample `local_samples/input.pdf`.
+
+- Pages analyzed: 12.
+- Text blocks / placeholders summarized: 790.
+- Repeated text candidate clusters: 9 total.
+- Dry-run candidates: 9 total.
+- Dry-run actions: 4 `would_exclude`, 5 `review`, 0 `keep`.
+- Dry-run proposed roles: 1 `header`, 2 `footer`, 1 `page_number`, 2 `layout_placeholder`, 3 `review_only`.
+- Dry-run regions: 4 top-region candidates and 5 bottom-region candidates.
+- Affected pages: all 12 pages had at least one dry-run candidate signal.
+
+### Local-only file status
+
+- `.venv/`, `local_samples/`, and `local_reports/` remained ignored by Git.
+- The sample PDF and generated JSON report were not staged or committed.
+- No generated DOCX files were created for Phase 1F.
+
+### Remaining risks before actual body filtering
+
+- `would_exclude` means only "future exclusion candidate"; no destructive action should use it until more fixture review is complete.
+- Image placeholders are still layout-only signals and need image identity or placement analysis before semantic treatment.
+- Page-number/footer handling still needs section, first-page, odd/even, and margin modeling before DOCX header/footer generation.
+- Body filtering should remain blocked until a review command or fixture evaluation can compare dry-run candidates against expected retained body text.

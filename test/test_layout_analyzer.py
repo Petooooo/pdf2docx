@@ -15,8 +15,17 @@ REGION_BODY = LayoutAnalyzer.REGION_BODY
 REGION_BOTTOM = LayoutAnalyzer.REGION_BOTTOM
 REGION_TOP = LayoutAnalyzer.REGION_TOP
 IMAGE_PLACEHOLDER = LayoutAnalyzer.IMAGE_PLACEHOLDER
+ACTION_KEEP = LayoutAnalyzer.ACTION_KEEP
+ACTION_REVIEW = LayoutAnalyzer.ACTION_REVIEW
+ACTION_WOULD_EXCLUDE = LayoutAnalyzer.ACTION_WOULD_EXCLUDE
+ROLE_FOOTER = LayoutAnalyzer.ROLE_FOOTER
+ROLE_HEADER = LayoutAnalyzer.ROLE_HEADER
+ROLE_KEEP_BODY = LayoutAnalyzer.ROLE_KEEP_BODY
+ROLE_LAYOUT_PLACEHOLDER = LayoutAnalyzer.ROLE_LAYOUT_PLACEHOLDER
+ROLE_PAGE_NUMBER = LayoutAnalyzer.ROLE_PAGE_NUMBER
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
+build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
@@ -342,6 +351,156 @@ class TestLayoutAnalyzer(unittest.TestCase):
             candidate['next_text_preview'],
             'on the next page with matching text')
 
+    def test_dry_run_marks_strong_all_page_top_text_as_header_candidate(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body two.', 50, 300, 520, 330),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body three.', 50, 300, 520, 330),
+            ]),
+        ])
+        dry_run = _dry_run_by_fingerprint(report)
+        candidate = dry_run['annual report||top']
+
+        self.assertEqual(candidate['action'], ACTION_WOULD_EXCLUDE)
+        self.assertEqual(candidate['proposed_role'], ROLE_HEADER)
+        self.assertIn('top_region', candidate['positive_signals'])
+
+    def test_dry_run_marks_strong_all_page_bottom_text_as_footer_candidate(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Body one.', 50, 300, 520, 330),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+            _page(1, [
+                _block('Body two.', 50, 300, 520, 330),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+            _page(2, [
+                _block('Body three.', 50, 300, 520, 330),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+        ])
+        dry_run = _dry_run_by_fingerprint(report)
+        candidate = dry_run['confidential footer||bottom']
+
+        self.assertEqual(candidate['action'], ACTION_WOULD_EXCLUDE)
+        self.assertEqual(candidate['proposed_role'], ROLE_FOOTER)
+        self.assertIn('bottom_region', candidate['positive_signals'])
+
+    def test_dry_run_marks_page_number_placeholder_as_page_number_candidate(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Body one.', 50, 300, 520, 330),
+                _block('Page 1', 270, 960, 330, 980),
+            ]),
+            _page(1, [
+                _block('Body two.', 50, 300, 520, 330),
+                _block('Page 2', 270, 960, 330, 980),
+            ]),
+            _page(2, [
+                _block('Body three.', 50, 300, 520, 330),
+                _block('Page 3', 270, 960, 330, 980),
+            ]),
+        ])
+        dry_run = _dry_run_by_fingerprint(report)
+        candidate = dry_run[f'{PAGE_NUMBER_PLACEHOLDER.lower()}||bottom']
+
+        self.assertEqual(candidate['action'], ACTION_WOULD_EXCLUDE)
+        self.assertEqual(candidate['proposed_role'], ROLE_PAGE_NUMBER)
+        self.assertNotEqual(candidate['proposed_role'], ROLE_KEEP_BODY)
+        self.assertIn('page_number_placeholder', candidate['positive_signals'])
+
+    def test_dry_run_marks_image_placeholder_as_review_layout_signal(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body two.', 50, 300, 520, 330),
+            ]),
+            _page(2, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body three.', 50, 300, 520, 330),
+            ]),
+        ])
+        dry_run = _dry_run_by_fingerprint(report)
+        candidate = dry_run[f'{IMAGE_PLACEHOLDER.lower()}||top']
+
+        self.assertEqual(candidate['action'], ACTION_REVIEW)
+        self.assertEqual(candidate['proposed_role'], ROLE_LAYOUT_PLACEHOLDER)
+        self.assertIn('placeholder_not_semantic_text', candidate['negative_signals'])
+
+    def test_dry_run_keeps_two_page_cautious_cluster_out_of_automatic_exclusion(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Boundary Note', 50, 960, 300, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Boundary Note', 50, 960, 300, 980),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+            _page(3, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+        ])
+        dry_run = _dry_run_by_fingerprint(report)
+        candidate = dry_run['boundary note||bottom']
+
+        self.assertEqual(candidate['action'], ACTION_REVIEW)
+        self.assertNotEqual(candidate['action'], ACTION_WOULD_EXCLUDE)
+        self.assertIn('low_support', candidate['negative_signals'])
+
+    def test_dry_run_keeps_body_region_repetition_as_body_content(self):
+        pages = [
+            _page(0, [
+                _block('Repeated Body Line', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Repeated Body Line', 50, 310, 520, 340),
+            ]),
+            _page(2, [
+                _block('Repeated Body Line', 50, 320, 520, 350),
+            ]),
+        ]
+        repeated = find_repeated_text_candidates(pages, regions=(REGION_BODY,))
+        dry_run = build_header_footer_exclusion_dry_run(repeated, page_count=3)
+        candidate = dry_run['candidates'][0]
+
+        self.assertEqual(candidate['action'], ACTION_KEEP)
+        self.assertEqual(candidate['proposed_role'], ROLE_KEEP_BODY)
+        self.assertIn('body_region_repetition', candidate['negative_signals'])
+
+    def test_dry_run_does_not_mutate_input_blocks(self):
+        pages = [
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body two.', 50, 300, 520, 330),
+            ]),
+        ]
+        before = json.loads(json.dumps(pages))
+
+        build_layout_analysis_report(pages)
+
+        self.assertEqual(pages, before)
+
 
 def _page(page_index, blocks):
     return {
@@ -357,6 +516,13 @@ def _block(text, x0, y0, x1, y1, style=None):
         'text': text,
         'bbox': [x0, y0, x1, y1],
         'style': style or {'font': 'Times New Roman', 'size': 11.0},
+    }
+
+
+def _dry_run_by_fingerprint(report):
+    return {
+        candidate['fingerprint']: candidate
+        for candidate in report['header_footer_exclusion_dry_run']['candidates']
     }
 
 

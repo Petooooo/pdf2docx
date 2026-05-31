@@ -49,6 +49,25 @@ After regenerating the ignored local report:
 - Continuation labels became 11 `unlikely`, 0 `weak`, and 0 `candidate`.
 - The previous weak continuation entries were successfully made more cautious.
 
+## Phase 1F Dry-run Review
+
+Phase 1F added a non-destructive header/footer exclusion dry-run to the opt-in
+layout report. The dry-run records what a future body-filtering phase might do,
+but it does not alter page blocks or conversion output.
+
+After regenerating the ignored local report:
+
+- Dry-run candidates: 9.
+- Actions: 4 `would_exclude`, 5 `review`, 0 `keep`.
+- Proposed roles: 1 `header`, 2 `footer`, 1 `page_number`, 2
+  `layout_placeholder`, and 3 `review_only`.
+- The all-page/high-support repeated top and bottom text is now separated from
+  low-support boundary text.
+- Page-number-like repetition is separated from semantic body text.
+- Image placeholders remain review-only layout signals.
+- Low-support repeated boundary clusters remain visible but are not proposed for
+  automatic exclusion.
+
 ## Interpretation
 
 - The all-page top and bottom repeated text remains the strongest report-only
@@ -59,6 +78,8 @@ After regenerating the ignored local report:
   identity and placement more precisely.
 - Low-support two-page repeated clusters should stay visible for review, but they
   should not drive destructive body changes.
+- Phase 1F `would_exclude` entries are future candidates only; they are not
+  permission to mutate body content yet.
 
 ## Remaining Risks
 

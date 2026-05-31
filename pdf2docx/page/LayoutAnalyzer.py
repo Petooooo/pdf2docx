@@ -16,6 +16,15 @@ IMAGE_PLACEHOLDER = '<IMAGE>'
 REGION_TOP = 'top'
 REGION_BODY = 'body'
 REGION_BOTTOM = 'bottom'
+ACTION_WOULD_EXCLUDE = 'would_exclude'
+ACTION_REVIEW = 'review'
+ACTION_KEEP = 'keep'
+ROLE_HEADER = 'header'
+ROLE_FOOTER = 'footer'
+ROLE_PAGE_NUMBER = 'page_number'
+ROLE_LAYOUT_PLACEHOLDER = 'layout_placeholder'
+ROLE_REVIEW_ONLY = 'review_only'
+ROLE_KEEP_BODY = 'keep_body'
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
@@ -265,6 +274,38 @@ def find_repeated_text_candidates(
     return candidates
 
 
+def build_header_footer_exclusion_dry_run(
+        repeated_text_candidates: list,
+        page_count: int = None) -> dict:
+    '''Simulate future header/footer exclusion without mutating content.'''
+    candidates = []
+    for index, candidate in enumerate(repeated_text_candidates or []):
+        candidates.append(_dry_run_candidate(candidate, index, page_count))
+
+    action_counts = defaultdict(int)
+    role_counts = defaultdict(int)
+    region_counts = defaultdict(int)
+    affected_pages = set()
+    for candidate in candidates:
+        action_counts[candidate['action']] += 1
+        role_counts[candidate['proposed_role']] += 1
+        for region in candidate['regions']:
+            region_counts[region] += 1
+        affected_pages.update(candidate['affected_pages'])
+
+    return {
+        'policy': 'non_destructive_report_only',
+        'summary': {
+            'candidate_count': len(candidates),
+            'action_counts': dict(sorted(action_counts.items())),
+            'role_counts': dict(sorted(role_counts.items())),
+            'region_counts': dict(sorted(region_counts.items())),
+            'affected_pages': sorted(affected_pages),
+        },
+        'candidates': candidates,
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -304,6 +345,9 @@ def build_layout_analysis_report(
         min_pages=min_pages,
         top_ratio=top_ratio,
         bottom_ratio=bottom_ratio)
+    dry_run = build_header_footer_exclusion_dry_run(
+        repeated,
+        page_count=len(pages))
     continuations = find_paragraph_continuation_candidates(
         page_summaries,
         repeated_text_candidates=repeated,
@@ -319,10 +363,12 @@ def build_layout_analysis_report(
         },
         'pages': page_summaries,
         'repeated_text_candidates': repeated,
+        'header_footer_exclusion_dry_run': dry_run,
         'paragraph_continuation_candidates': continuations,
         'signals': {
             'text_block_count': len(records),
             'repeated_text_candidate_count': len(repeated),
+            'header_footer_exclusion_dry_run_candidate_count': len(dry_run['candidates']),
             'paragraph_continuation_candidate_count': len(continuations),
         },
     }
@@ -483,6 +529,126 @@ def _json_bbox(bbox) -> list:
 
 def _json_number(value) -> float:
     return round(float(value or 0.0), 2)
+
+
+def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:
+    signals = candidate.get('signals', {}) or {}
+    quality = signals.get('text_quality') or text_quality_signals(candidate.get('text', ''))
+    support = int(signals.get('support_pages') or len(candidate.get('pages', []) or []))
+    total_pages = int(page_count or signals.get('total_pages') or support or 0)
+    regions = sorted(candidate.get('regions') or signals.get('regions') or [])
+    if not regions:
+        regions = [REGION_BODY]
+
+    confidence_label = candidate.get('confidence_label', '')
+    semantic_confidence = float(candidate.get('semantic_confidence') or 0.0)
+    support_level = signals.get('support_level') or _support_level(support, total_pages)
+    adjacent_only = bool(signals.get('adjacent_only'))
+    placeholder_kind = quality.get('placeholder_kind', '')
+
+    positive, negative = [], []
+    action = ACTION_KEEP
+    proposed_role = ROLE_KEEP_BODY
+
+    if support_level == 'high':
+        positive.append('high_support')
+    elif support_level == 'medium':
+        positive.append('medium_support')
+    else:
+        negative.append('low_support')
+
+    if adjacent_only:
+        negative.append('adjacent_only_repetition')
+
+    if REGION_BODY in regions:
+        negative.append('body_region_repetition')
+        action = ACTION_KEEP
+        proposed_role = ROLE_KEEP_BODY
+    elif placeholder_kind == 'image':
+        positive.append('layout_placeholder_signal')
+        negative.append('placeholder_not_semantic_text')
+        action = ACTION_REVIEW
+        proposed_role = ROLE_LAYOUT_PLACEHOLDER
+    elif placeholder_kind and placeholder_kind != 'page_number':
+        positive.append('placeholder_signal')
+        negative.append('placeholder_not_semantic_text')
+        action = ACTION_REVIEW
+        proposed_role = ROLE_LAYOUT_PLACEHOLDER
+    elif placeholder_kind == 'page_number':
+        positive.append('page_number_placeholder')
+        proposed_role = ROLE_PAGE_NUMBER
+        if REGION_BOTTOM in regions and _high_support_for_exclusion(support_level, adjacent_only):
+            positive.append('bottom_region')
+            action = ACTION_WOULD_EXCLUDE
+        else:
+            action = ACTION_REVIEW
+            negative.append('page_number_not_stable_footer')
+    elif confidence_label == 'strong' and _high_support_for_exclusion(support_level, adjacent_only):
+        if REGION_TOP in regions and REGION_BOTTOM not in regions:
+            positive.append('top_region')
+            action = ACTION_WOULD_EXCLUDE
+            proposed_role = ROLE_HEADER
+        elif REGION_BOTTOM in regions and REGION_TOP not in regions:
+            positive.append('bottom_region')
+            action = ACTION_WOULD_EXCLUDE
+            proposed_role = ROLE_FOOTER
+        else:
+            action = ACTION_REVIEW
+            proposed_role = ROLE_REVIEW_ONLY
+            negative.append('mixed_or_unknown_boundary_region')
+    elif regions and set(regions).issubset({REGION_TOP, REGION_BOTTOM}):
+        action = ACTION_REVIEW
+        proposed_role = ROLE_REVIEW_ONLY
+        negative.append('not_safe_for_automatic_exclusion')
+    else:
+        negative.append('not_boundary_region')
+
+    return {
+        'candidate_id': f'repeated-{index+1}',
+        'fingerprint': candidate.get('fingerprint', ''),
+        'region': regions[0] if len(regions) == 1 else 'mixed',
+        'regions': regions,
+        'proposed_role': proposed_role,
+        'action': action,
+        'confidence_label': confidence_label,
+        'confidence': candidate.get('confidence', 0.0),
+        'semantic_confidence': round(semantic_confidence, 3),
+        'support_count': support,
+        'page_count': total_pages,
+        'affected_pages': list(candidate.get('pages', []) or []),
+        'positive_signals': positive,
+        'negative_signals': negative,
+        'reason': _dry_run_reason(action, proposed_role, positive, negative),
+    }
+
+
+def _high_support_for_exclusion(support_level: str, adjacent_only: bool) -> bool:
+    return support_level == 'high' and not adjacent_only
+
+
+def _dry_run_reason(
+        action: str,
+        proposed_role: str,
+        positive: list,
+        negative: list) -> str:
+    if action == ACTION_WOULD_EXCLUDE:
+        if proposed_role == ROLE_HEADER:
+            return 'Dry-run only: high-support repeated top text could become a future header exclusion candidate.'
+        if proposed_role == ROLE_FOOTER:
+            return 'Dry-run only: high-support repeated bottom text could become a future footer exclusion candidate.'
+        if proposed_role == ROLE_PAGE_NUMBER:
+            return 'Dry-run only: stable bottom page-number placeholder could become a future page-number/footer candidate.'
+    if 'body_region_repetition' in negative:
+        return 'Repeated text is in the body region, so this dry run keeps it as body content.'
+    if proposed_role == ROLE_LAYOUT_PLACEHOLDER:
+        return 'Placeholder-like layout signal requires review and is not treated as semantic header/footer text.'
+    if 'low_support' in negative or 'adjacent_only_repetition' in negative:
+        return 'Repeated boundary text has limited support, so automatic exclusion is blocked.'
+    if 'not_safe_for_automatic_exclusion' in negative:
+        return 'Boundary repetition is reportable, but not safe enough for automatic exclusion.'
+    if positive or negative:
+        return 'Dry-run candidate requires manual review before any future body filtering.'
+    return 'No header/footer exclusion signal was strong enough.'
 
 
 def _last_body_block(page_summary: dict, excluded_texts: set = None):
