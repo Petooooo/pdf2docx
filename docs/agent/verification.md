@@ -454,3 +454,88 @@ Result: confirmed `local_samples/`, `local_reports/`, `.venv/`, generated caches
 ### Recommendation for Phase 2A
 
 Phase 2A should not consume raw `would_exclude` labels directly. It should start from explicit review decisions in the local review pack, keep filtering opt-in, and include tests that prove default conversion output remains unchanged.
+
+## Phase 2A
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2A added an internal reviewed header/footer filtering prototype in `LayoutAnalyzer.py`. The helper parses manual review decisions and can build an opt-in dry-run/apply filtering report from existing layout-analysis page summaries.
+
+Default behavior remains unchanged:
+
+- No normal PDF-to-DOCX conversion output changes by default.
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No paragraphs are merged.
+- No DOCX headers or footers are generated.
+- No table, image, or shape behavior changed.
+- No filtering runs unless the internal helper is called with `enabled=True`.
+
+### Review decision counts
+
+Parsed local review pack:
+
+- `approve_exclude`: 4.
+- `reject_exclude`: 3.
+- `unsure`: 2.
+
+The reviewed filtering helper treated only the 4 explicit `approve_exclude` candidates as eligible. The 3 rejected and 2 unsure candidates were blocked. Raw `would_exclude` labels without manual approval are not sufficient.
+
+Local sample summary from the ignored report and review pack:
+
+- Approved candidates: 4.
+- Blocked candidates: 5.
+- Opt-in dry-run `would_remove_block_count`: 48.
+- Opt-in dry-run `removed_block_count`: 0.
+- Internal apply-mode sample summary: 48 removed, 742 kept.
+
+### Tests added
+
+- Review markdown decision parsing.
+- Approved candidate is filtered only when opt-in is enabled.
+- Rejected candidates are not filtered.
+- Unsure candidates are not filtered.
+- Raw `would_exclude` without manual approval is not filtered.
+- Layout placeholders are not filtered.
+- Default disabled mode does not mutate page summaries.
+- Filtering report includes original, would-remove, removed, and kept counts.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 33 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 33 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review files, `.venv/`, and generated caches remain ignored. No local report or review file was staged.
+
+### Remaining risks
+
+- This is still an internal prototype over layout-analysis summaries, not production body filtering.
+- The sample apply-mode count is only a review aid and must not be treated as a production deletion result.
+- Phase 2B or later should keep filtering opt-in, connect only to explicitly reviewed decisions, and include fixture-level visual/body-retention checks before any conversion-path integration.

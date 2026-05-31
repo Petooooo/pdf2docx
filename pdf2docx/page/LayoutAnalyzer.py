@@ -25,6 +25,11 @@ ROLE_PAGE_NUMBER = 'page_number'
 ROLE_LAYOUT_PLACEHOLDER = 'layout_placeholder'
 ROLE_REVIEW_ONLY = 'review_only'
 ROLE_KEEP_BODY = 'keep_body'
+DECISION_APPROVE_EXCLUDE = 'approve_exclude'
+DECISION_REJECT_EXCLUDE = 'reject_exclude'
+DECISION_UNSURE = 'unsure'
+DECISION_NONE = 'none'
+DECISION_CONFLICT = 'conflict'
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
@@ -34,6 +39,11 @@ STRONG_SENTENCE_END_PUNC = '.．。?？!！'
 
 _SPACE_RE = re.compile(r'\s+')
 _PLACEHOLDER_RE = re.compile(r'^<[^<>]+>$')
+_REVIEW_SECTION_RE = re.compile(
+    r'^###\s+([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*$')
+_REVIEW_FIELD_RE = re.compile(r'^-\s+([a-zA-Z_]+):\s*(.*)$')
+_REVIEW_DECISION_RE = re.compile(
+    r'(approve_exclude|reject_exclude|unsure):\s*\[([^\]]*)\]')
 _PAGE_NUMBER_RE_LIST = (
     re.compile(r'^(?:page|p\.?)\s*\d+$', re.IGNORECASE),
     re.compile(r'^(?:page|p\.?)\s*\d+\s*(?:/|of)\s*\d+$', re.IGNORECASE),
@@ -306,6 +316,144 @@ def build_header_footer_exclusion_dry_run(
     }
 
 
+def load_exclusion_review_decisions(path: str) -> dict:
+    '''Read a local review markdown file and parse manual decisions.'''
+    with open(path, 'r', encoding='utf-8') as stream:
+        return parse_exclusion_review_markdown(stream.read())
+
+
+def parse_exclusion_review_markdown(markdown_text: str) -> dict:
+    '''Parse Phase 1G local review markdown into structured decisions.'''
+    decisions = []
+    current = None
+
+    def flush_current():
+        if not current:
+            return
+        if current.get('candidate_id') or current.get('fingerprint'):
+            current.setdefault('manual_decision', DECISION_NONE)
+            current.setdefault('checked_decisions', [])
+            decisions.append(current.copy())
+
+    for raw_line in (markdown_text or '').splitlines():
+        line = raw_line.strip()
+        section = _REVIEW_SECTION_RE.match(line)
+        if section:
+            flush_current()
+            current = {
+                'candidate_id': normalize_text(section.group(1)),
+                'proposed_role': normalize_text(section.group(2)),
+                'action': normalize_text(section.group(3)),
+            }
+            continue
+
+        if current is None:
+            continue
+
+        field = _REVIEW_FIELD_RE.match(line)
+        if not field:
+            continue
+
+        field_name = field.group(1)
+        field_value = field.group(2)
+        if field_name == 'fingerprint':
+            current['fingerprint'] = _strip_inline_code(field_value)
+        elif field_name == 'review_recommendation':
+            current['review_recommendation'] = _strip_inline_code(field_value)
+        elif field_name == 'human_decision':
+            decision, checked = _parse_human_decision(field_value)
+            current['manual_decision'] = decision
+            current['checked_decisions'] = checked
+
+    flush_current()
+
+    decision_counts = defaultdict(int)
+    for decision in decisions:
+        decision_counts[decision.get('manual_decision', DECISION_NONE)] += 1
+
+    return {
+        'decisions': decisions,
+        'summary': {
+            'candidate_count': len(decisions),
+            'decision_counts': dict(sorted(decision_counts.items())),
+        },
+    }
+
+
+def build_reviewed_header_footer_filter_report(
+        page_summaries: list,
+        dry_run_report: dict,
+        review_decisions,
+        enabled: bool = False,
+        apply: bool = False) -> dict:
+    '''Build an opt-in reviewed header/footer filtering report.
+
+    The default disabled mode never filters. When enabled, only candidates with
+    explicit approve_exclude review decisions and safe dry-run roles are eligible.
+    '''
+    dry_run_candidates = _dry_run_candidates(dry_run_report)
+    decision_map = _review_decision_map(review_decisions)
+    approved, blocked = _reviewed_exclusion_candidates(dry_run_candidates, decision_map)
+    approved_by_fingerprint = {item['fingerprint']: item for item in approved}
+    should_apply = bool(enabled and apply)
+
+    pages_report = []
+    filtered_pages = []
+    original_block_count = 0
+    would_remove_block_count = 0
+    removed_block_count = 0
+    kept_block_count = 0
+
+    for page in page_summaries or []:
+        page_index = page.get('page_index')
+        blocks = page.get('text_blocks', []) or []
+        kept_blocks = []
+        removed_blocks = []
+
+        for block in blocks:
+            original_block_count += 1
+            candidate = approved_by_fingerprint.get(block.get('fingerprint'))
+            if candidate and _block_matches_reviewed_candidate(block, page_index, candidate):
+                removed_blocks.append(_removed_block_summary(block, candidate))
+                continue
+            kept_blocks.append(dict(block))
+
+        would_remove_block_count += len(removed_blocks)
+        if should_apply:
+            removed_block_count += len(removed_blocks)
+            kept_block_count += len(kept_blocks)
+            filtered_pages.append(_filtered_page_summary(page, kept_blocks))
+        else:
+            kept_block_count += len(blocks)
+
+        pages_report.append({
+            'page_index': page_index,
+            'original_block_count': len(blocks),
+            'would_remove_block_count': len(removed_blocks),
+            'removed_block_count': len(removed_blocks) if should_apply else 0,
+            'kept_block_count': len(kept_blocks) if should_apply else len(blocks),
+            'removed_blocks': removed_blocks if enabled else [],
+        })
+
+    return {
+        'enabled': bool(enabled),
+        'applied': should_apply,
+        'policy': 'review_decision_based',
+        'approved_candidate_count': len(approved),
+        'blocked_candidate_count': len(blocked),
+        'approved_fingerprints': sorted(approved_by_fingerprint),
+        'blocked_candidates': blocked,
+        'summary': {
+            'original_block_count': original_block_count,
+            'would_remove_block_count': would_remove_block_count if enabled else 0,
+            'removed_block_count': removed_block_count,
+            'kept_block_count': kept_block_count,
+        },
+        'pages': pages_report,
+        'filtered_pages': filtered_pages if should_apply else [],
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -529,6 +677,128 @@ def _json_bbox(bbox) -> list:
 
 def _json_number(value) -> float:
     return round(float(value or 0.0), 2)
+
+
+def _strip_inline_code(text: str) -> str:
+    value = normalize_text(text)
+    if value.startswith('`') and value.endswith('`') and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+
+def _parse_human_decision(text: str) -> tuple:
+    checked = [
+        name for name, marker in _REVIEW_DECISION_RE.findall(text or '')
+        if normalize_text(marker).lower() == 'x'
+    ]
+    if len(checked) == 1:
+        return checked[0], checked
+    if not checked:
+        return DECISION_NONE, checked
+    return DECISION_CONFLICT, checked
+
+
+def _dry_run_candidates(dry_run_report: dict) -> list:
+    dry_run_report = dry_run_report or {}
+    if 'header_footer_exclusion_dry_run' in dry_run_report:
+        dry_run_report = dry_run_report.get('header_footer_exclusion_dry_run') or {}
+    return dry_run_report.get('candidates', []) or []
+
+
+def _review_decision_map(review_decisions) -> dict:
+    if isinstance(review_decisions, dict):
+        decisions = review_decisions.get('decisions', [])
+    else:
+        decisions = review_decisions or []
+
+    mapping = {}
+    for decision in decisions:
+        manual_decision = decision.get('manual_decision', DECISION_NONE)
+        for key in (decision.get('fingerprint'), decision.get('candidate_id')):
+            if key:
+                mapping[key] = manual_decision
+    return mapping
+
+
+def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tuple:
+    approved = []
+    blocked = []
+    for candidate in candidates or []:
+        decision = (
+            decision_map.get(candidate.get('fingerprint')) or
+            decision_map.get(candidate.get('candidate_id')) or
+            DECISION_NONE)
+        allowed, reason = _reviewed_candidate_allowed(candidate, decision)
+        item = {
+            'candidate_id': candidate.get('candidate_id', ''),
+            'fingerprint': candidate.get('fingerprint', ''),
+            'proposed_role': candidate.get('proposed_role', ''),
+            'action': candidate.get('action', ''),
+            'manual_decision': decision,
+            'reason': reason,
+            'affected_pages': list(candidate.get('affected_pages', []) or []),
+            'regions': list(candidate.get('regions', []) or []),
+        }
+        if allowed:
+            approved.append(item)
+        else:
+            blocked.append(item)
+    return approved, blocked
+
+
+def _reviewed_candidate_allowed(candidate: dict, decision: str) -> tuple:
+    if decision != DECISION_APPROVE_EXCLUDE:
+        return False, 'manual_decision_not_approved'
+    if candidate.get('action') != ACTION_WOULD_EXCLUDE:
+        return False, 'dry_run_action_not_would_exclude'
+
+    role = candidate.get('proposed_role')
+    if role == ROLE_LAYOUT_PLACEHOLDER:
+        return False, 'layout_placeholder_not_filterable'
+    if role not in {ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER}:
+        return False, 'role_not_filterable'
+    return True, 'approved_review_decision'
+
+
+def _block_matches_reviewed_candidate(block: dict, page_index, candidate: dict) -> bool:
+    if block.get('fingerprint') != candidate.get('fingerprint'):
+        return False
+    affected_pages = set(candidate.get('affected_pages', []) or [])
+    if affected_pages and page_index not in affected_pages:
+        return False
+    regions = set(candidate.get('regions', []) or [])
+    return not regions or block.get('region') in regions
+
+
+def _removed_block_summary(block: dict, candidate: dict) -> dict:
+    return {
+        'block_index': block.get('block_index'),
+        'fingerprint': block.get('fingerprint', ''),
+        'region': block.get('region', ''),
+        'candidate_id': candidate.get('candidate_id', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'text_preview': _preview_text(block, max_length=80),
+    }
+
+
+def _filtered_page_summary(page: dict, kept_blocks: list) -> dict:
+    filtered = dict(page)
+    blocks = [dict(block) for block in kept_blocks]
+    region_counts = {
+        REGION_TOP: 0,
+        REGION_BODY: 0,
+        REGION_BOTTOM: 0,
+    }
+    for block in blocks:
+        region = block.get('region')
+        if region in region_counts:
+            region_counts[region] += 1
+
+    filtered['text_blocks'] = blocks
+    filtered['text_block_count'] = len(blocks)
+    filtered['region_counts'] = region_counts
+    filtered['text'] = normalize_text(' '.join(block.get('text', '') for block in blocks))
+    return filtered
 
 
 def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:

@@ -26,11 +26,13 @@ ROLE_PAGE_NUMBER = LayoutAnalyzer.ROLE_PAGE_NUMBER
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
+build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
+parse_exclusion_review_markdown = LayoutAnalyzer.parse_exclusion_review_markdown
 text_block_records = LayoutAnalyzer.text_block_records
 
 
@@ -501,6 +503,229 @@ class TestLayoutAnalyzer(unittest.TestCase):
 
         self.assertEqual(pages, before)
 
+    def test_parse_exclusion_review_markdown_counts_manual_decisions(self):
+        decisions = parse_exclusion_review_markdown('\n'.join([
+            '### repeated-1 | header | would_exclude',
+            '- fingerprint: `annual report||top`',
+            '- human_decision: approve_exclude: [x]    reject_exclude: [ ]    unsure: [ ]',
+            '### repeated-2 | review_only | review',
+            '- fingerprint: `body note||bottom`',
+            '- human_decision: approve_exclude: [ ]    reject_exclude: [X]    unsure: [ ]',
+            '### repeated-3 | layout_placeholder | review',
+            '- fingerprint: `<image>||top`',
+            '- human_decision: approve_exclude: [ ]    reject_exclude: [ ]    unsure: [x]',
+        ]))
+
+        self.assertEqual(decisions['summary']['decision_counts'], {
+            'approve_exclude': 1,
+            'reject_exclude': 1,
+            'unsure': 1,
+        })
+        self.assertEqual(decisions['decisions'][0]['fingerprint'], 'annual report||top')
+
+    def test_reviewed_filter_removes_approved_candidate_only_when_opted_in(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph two.', 50, 300, 520, 330),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph three.', 50, 300, 520, 330),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            'annual report||top',
+            'header',
+            'would_exclude',
+            'approve_exclude'))
+
+        disabled = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions)
+        dry_run = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True)
+        applied = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True,
+            apply=True)
+
+        self.assertFalse(disabled['enabled'])
+        self.assertEqual(disabled['summary']['removed_block_count'], 0)
+        self.assertEqual(disabled['summary']['would_remove_block_count'], 0)
+        self.assertEqual(dry_run['summary']['would_remove_block_count'], 3)
+        self.assertEqual(dry_run['summary']['removed_block_count'], 0)
+        self.assertEqual(applied['summary']['removed_block_count'], 3)
+        self.assertEqual(applied['summary']['kept_block_count'], 3)
+        self.assertNotIn('Annual Report', applied['filtered_pages'][0]['text'])
+
+    def test_reviewed_filter_does_not_remove_rejected_or_unsure_candidates(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Confidential Footer', 50, 960, 300, 980),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown('\n'.join([
+            _review_markdown(
+                'repeated-1',
+                'annual report||top',
+                'header',
+                'would_exclude',
+                'reject_exclude'),
+            _review_markdown(
+                'repeated-2',
+                'confidential footer||bottom',
+                'footer',
+                'would_exclude',
+                'unsure'),
+        ]))
+
+        applied = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True,
+            apply=True)
+
+        self.assertEqual(applied['approved_candidate_count'], 0)
+        self.assertEqual(applied['summary']['removed_block_count'], 0)
+        self.assertEqual(applied['summary']['kept_block_count'], 6)
+
+    def test_reviewed_filter_does_not_consume_raw_would_exclude_without_approval(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+        ])
+
+        applied = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            review_decisions=[],
+            enabled=True,
+            apply=True)
+
+        self.assertEqual(applied['approved_candidate_count'], 0)
+        self.assertEqual(applied['summary']['removed_block_count'], 0)
+        self.assertEqual(applied['summary']['kept_block_count'], 3)
+
+    def test_reviewed_filter_does_not_remove_layout_placeholder_even_if_approved(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph two.', 50, 300, 520, 330),
+            ]),
+            _page(2, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph three.', 50, 300, 520, 330),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            f'{IMAGE_PLACEHOLDER.lower()}||top',
+            'layout_placeholder',
+            'review',
+            'approve_exclude'))
+
+        applied = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True,
+            apply=True)
+
+        self.assertEqual(applied['approved_candidate_count'], 0)
+        self.assertEqual(applied['summary']['removed_block_count'], 0)
+        self.assertIn(
+            'dry_run_action_not_would_exclude',
+            {item['reason'] for item in applied['blocked_candidates']})
+
+    def test_reviewed_filter_default_does_not_mutate_page_summaries(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Body paragraph.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('More body text.', 50, 300, 520, 330),
+            ]),
+        ])
+        before = json.loads(json.dumps(report['pages']))
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            'annual report||top',
+            'header',
+            'would_exclude',
+            'approve_exclude'))
+
+        build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions)
+
+        self.assertEqual(report['pages'], before)
+
+    def test_reviewed_filter_report_includes_removed_and_kept_counts(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Page 1', 270, 960, 330, 980),
+                _block('Body paragraph one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block('Page 2', 270, 960, 330, 980),
+                _block('Body paragraph two.', 50, 300, 520, 330),
+            ]),
+        ])
+        decisions = parse_exclusion_review_markdown(_review_markdown(
+            'repeated-1',
+            f'{PAGE_NUMBER_PLACEHOLDER.lower()}||bottom',
+            'page_number',
+            'would_exclude',
+            'approve_exclude'))
+
+        applied = build_reviewed_header_footer_filter_report(
+            report['pages'],
+            report['header_footer_exclusion_dry_run'],
+            decisions,
+            enabled=True,
+            apply=True)
+
+        self.assertEqual(applied['summary']['original_block_count'], 4)
+        self.assertEqual(applied['summary']['would_remove_block_count'], 2)
+        self.assertEqual(applied['summary']['removed_block_count'], 2)
+        self.assertEqual(applied['summary']['kept_block_count'], 2)
+
 
 def _page(page_index, blocks):
     return {
@@ -524,6 +749,23 @@ def _dry_run_by_fingerprint(report):
         candidate['fingerprint']: candidate
         for candidate in report['header_footer_exclusion_dry_run']['candidates']
     }
+
+
+def _review_markdown(candidate_id, fingerprint, role, action, decision):
+    markers = {
+        'approve_exclude': '[ ]',
+        'reject_exclude': '[ ]',
+        'unsure': '[ ]',
+    }
+    markers[decision] = '[x]'
+    return '\n'.join([
+        f'### {candidate_id} | {role} | {action}',
+        f'- fingerprint: `{fingerprint}`',
+        '- human_decision: '
+        f'approve_exclude: {markers["approve_exclude"]}    '
+        f'reject_exclude: {markers["reject_exclude"]}    '
+        f'unsure: {markers["unsure"]}',
+    ])
 
 
 if __name__ == '__main__':
