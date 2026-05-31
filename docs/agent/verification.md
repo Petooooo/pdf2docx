@@ -539,3 +539,97 @@ Result: confirmed local PDF/report/review files, `.venv/`, and generated caches 
 - This is still an internal prototype over layout-analysis summaries, not production body filtering.
 - The sample apply-mode count is only a review aid and must not be treated as a production deletion result.
 - Phase 2B or later should keep filtering opt-in, connect only to explicitly reviewed decisions, and include fixture-level visual/body-retention checks before any conversion-path integration.
+
+## Phase 2B
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2B added a local-review body-filtering diff report helper in `LayoutAnalyzer.py`. The helper summarizes which blocks would be removed or kept by the reviewed filtering prototype, grouped by page and approved candidate.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production page body content is mutated.
+- No DOCX headers or footers are generated.
+- No paragraphs are merged.
+- No table, image, or shape behavior changed.
+
+### Local diff report
+
+Generated ignored local-only file:
+
+```text
+local_reports/body-filtering-diff-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+### Review and diff counts
+
+Parsed local review decisions:
+
+- `approve_exclude`: 4.
+- `reject_exclude`: 3.
+- `unsure`: 2.
+
+Sample diff summary:
+
+- Original blocks: 790.
+- Would-remove blocks: 48.
+- Kept blocks: 742.
+- Approved candidates: 4.
+- Blocked candidates: 5.
+- Removed by role: 12 `page_number`, 12 `header`, 24 `footer`.
+- Safety warnings: none.
+- Unapproved removed candidates: 0.
+- Rejected removed candidates: 0.
+- Unsure removed candidates: 0.
+- Layout-placeholder removed candidates: 0.
+
+### Tests added
+
+- Diff report includes removed and kept counts.
+- Removed blocks are grouped by approved candidate.
+- Rejected, unsure, and layout-placeholder candidates remain kept.
+- Report generation does not mutate input summaries.
+- Safety warning appears if an unapproved candidate would be removed.
+- Disabled mode produces zero removed blocks.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 39 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 39 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diff files, `.venv/`, and generated caches remain ignored. No local report or review file was staged.
+
+### Phase 2C recommendation
+
+Phase 2C is reasonable to attempt only as another opt-in/internal step. It should still avoid default conversion changes, use explicit manual approvals, and add fixture-level checks that compare retained body text before any integration with production `Pages`, `Page`, `Blocks`, or DOCX generation paths.

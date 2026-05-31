@@ -454,6 +454,113 @@ def build_reviewed_header_footer_filter_report(
     }
 
 
+def build_body_filtering_diff_report(
+        page_summaries: list,
+        dry_run_report: dict,
+        review_decisions,
+        enabled: bool = False,
+        filtering_report: dict = None) -> dict:
+    '''Build a local-review diff report for reviewed header/footer filtering.'''
+    review_decisions = review_decisions or {}
+    if filtering_report is None:
+        filtering_report = build_reviewed_header_footer_filter_report(
+            page_summaries,
+            dry_run_report,
+            review_decisions,
+            enabled=enabled,
+            apply=False)
+
+    removed_keys, removed_by_key = _removed_block_lookup(filtering_report)
+    decision_counts = _decision_counts(review_decisions)
+    approved_fingerprints = set(filtering_report.get('approved_fingerprints', []))
+    blocked_candidates = filtering_report.get('blocked_candidates', []) or []
+    blocked_by_fingerprint = {
+        item.get('fingerprint'): item
+        for item in blocked_candidates
+        if item.get('fingerprint')
+    }
+
+    removed_by_page = []
+    kept_by_page = []
+    removed_by_candidate = defaultdict(lambda: {
+        'candidate_id': '',
+        'fingerprint': '',
+        'proposed_role': '',
+        'manual_decision': '',
+        'removed_count': 0,
+        'blocks': [],
+    })
+    safety = _new_safety_summary()
+    original_block_count = 0
+    would_remove_block_count = 0
+    kept_block_count = 0
+
+    for page in page_summaries or []:
+        page_index = page.get('page_index')
+        page_removed = []
+        page_kept = []
+
+        for block in page.get('text_blocks', []) or []:
+            original_block_count += 1
+            key = (page_index, block.get('block_index'))
+            removed = removed_by_key.get(key)
+            if enabled and key in removed_keys:
+                summary = _diff_removed_block_summary(page_index, block, removed)
+                page_removed.append(summary)
+                _append_candidate_removed_block(removed_by_candidate, summary)
+                _record_safety_for_removed_block(
+                    safety,
+                    summary,
+                    approved_fingerprints,
+                    blocked_by_fingerprint)
+                continue
+            page_kept.append(_kept_block_summary(page_index, block))
+
+        would_remove_block_count += len(page_removed)
+        kept_block_count += len(page_kept)
+        removed_by_page.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'removed_count': len(page_removed),
+            'blocks': page_removed,
+        })
+        kept_by_page.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'kept_count': len(page_kept),
+            'blocks': page_kept,
+        })
+
+    removed_by_candidate_list = sorted(
+        removed_by_candidate.values(),
+        key=lambda item: (item['candidate_id'], item['fingerprint']))
+    _finalize_safety_warnings(safety)
+
+    blocked_decision_counts = defaultdict(int)
+    for item in blocked_candidates:
+        blocked_decision_counts[item.get('manual_decision', DECISION_NONE)] += 1
+
+    return {
+        'enabled': bool(enabled),
+        'policy': 'reviewed_filtering_diff_only',
+        'summary': {
+            'original_block_count': original_block_count,
+            'would_remove_block_count': would_remove_block_count if enabled else 0,
+            'kept_block_count': kept_block_count,
+            'approved_candidate_count': filtering_report.get('approved_candidate_count', 0),
+            'blocked_candidate_count': filtering_report.get('blocked_candidate_count', 0),
+            'retained_candidate_count': len(blocked_candidates),
+            'decision_counts': decision_counts,
+            'blocked_decision_counts': dict(sorted(blocked_decision_counts.items())),
+        },
+        'removed_blocks_by_page': removed_by_page,
+        'kept_blocks_by_page': kept_by_page,
+        'removed_blocks_by_candidate': removed_by_candidate_list,
+        'retained_candidates': blocked_candidates,
+        'safety': safety,
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -720,6 +827,22 @@ def _review_decision_map(review_decisions) -> dict:
     return mapping
 
 
+def _decision_counts(review_decisions) -> dict:
+    if isinstance(review_decisions, dict):
+        summary = review_decisions.get('summary', {}) or {}
+        counts = summary.get('decision_counts')
+        if counts is not None:
+            return dict(counts)
+        decisions = review_decisions.get('decisions', [])
+    else:
+        decisions = review_decisions or []
+
+    counts = defaultdict(int)
+    for decision in decisions:
+        counts[decision.get('manual_decision', DECISION_NONE)] += 1
+    return dict(sorted(counts.items()))
+
+
 def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tuple:
     approved = []
     blocked = []
@@ -777,6 +900,9 @@ def _removed_block_summary(block: dict, candidate: dict) -> dict:
         'region': block.get('region', ''),
         'candidate_id': candidate.get('candidate_id', ''),
         'proposed_role': candidate.get('proposed_role', ''),
+        'manual_decision': candidate.get('manual_decision', ''),
+        'explicit_approval': candidate.get('manual_decision') == DECISION_APPROVE_EXCLUDE,
+        'removal_reason': candidate.get('reason', ''),
         'text_preview': _preview_text(block, max_length=80),
     }
 
@@ -799,6 +925,124 @@ def _filtered_page_summary(page: dict, kept_blocks: list) -> dict:
     filtered['region_counts'] = region_counts
     filtered['text'] = normalize_text(' '.join(block.get('text', '') for block in blocks))
     return filtered
+
+
+def _removed_block_lookup(filtering_report: dict) -> tuple:
+    removed_keys = set()
+    removed_by_key = {}
+    for page in filtering_report.get('pages', []) or []:
+        page_index = page.get('page_index')
+        for block in page.get('removed_blocks', []) or []:
+            key = (page_index, block.get('block_index'))
+            removed_keys.add(key)
+            removed_by_key[key] = block
+    return removed_keys, removed_by_key
+
+
+def _diff_removed_block_summary(page_index, block: dict, removed: dict) -> dict:
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'block_index': block.get('block_index'),
+        'candidate_id': removed.get('candidate_id', ''),
+        'fingerprint': block.get('fingerprint', ''),
+        'proposed_role': removed.get('proposed_role', ''),
+        'manual_decision': removed.get('manual_decision', ''),
+        'explicit_approval': bool(removed.get('explicit_approval')),
+        'region': block.get('region', ''),
+        'reason': removed.get('removal_reason', ''),
+        'short_preview': _preview_text(block, max_length=100),
+    }
+
+
+def _kept_block_summary(page_index, block: dict) -> dict:
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'block_index': block.get('block_index'),
+        'fingerprint': block.get('fingerprint', ''),
+        'region': block.get('region', ''),
+        'short_preview': _preview_text(block, max_length=100),
+    }
+
+
+def _append_candidate_removed_block(grouped, summary: dict):
+    key = summary.get('candidate_id') or summary.get('fingerprint')
+    item = grouped[key]
+    if not item['candidate_id']:
+        item['candidate_id'] = summary.get('candidate_id', '')
+        item['fingerprint'] = summary.get('fingerprint', '')
+        item['proposed_role'] = summary.get('proposed_role', '')
+        item['manual_decision'] = summary.get('manual_decision', '')
+    item['removed_count'] += 1
+    item['blocks'].append(summary)
+
+
+def _new_safety_summary() -> dict:
+    return {
+        'warnings': [],
+        'unapproved_removed_candidate_count': 0,
+        'unapproved_removed_candidates': [],
+        'rejected_removed_candidate_count': 0,
+        'unsure_removed_candidate_count': 0,
+        'layout_placeholder_removed_candidate_count': 0,
+    }
+
+
+def _record_safety_for_removed_block(
+        safety: dict,
+        summary: dict,
+        approved_fingerprints: set,
+        blocked_by_fingerprint: dict):
+    fingerprint = summary.get('fingerprint')
+    blocked = blocked_by_fingerprint.get(fingerprint)
+    manual_decision = summary.get('manual_decision')
+    proposed_role = summary.get('proposed_role')
+
+    if fingerprint not in approved_fingerprints:
+        _add_unique_safety_candidate(
+            safety,
+            'unapproved_removed_candidates',
+            summary)
+        safety['unapproved_removed_candidate_count'] = len(
+            safety['unapproved_removed_candidates'])
+
+    effective_decision = blocked.get('manual_decision') if blocked else manual_decision
+    if effective_decision == DECISION_REJECT_EXCLUDE:
+        safety['rejected_removed_candidate_count'] += 1
+    elif effective_decision == DECISION_UNSURE:
+        safety['unsure_removed_candidate_count'] += 1
+
+    if proposed_role == ROLE_LAYOUT_PLACEHOLDER:
+        safety['layout_placeholder_removed_candidate_count'] += 1
+
+
+def _add_unique_safety_candidate(safety: dict, key: str, summary: dict):
+    candidate = {
+        'candidate_id': summary.get('candidate_id', ''),
+        'fingerprint': summary.get('fingerprint', ''),
+        'manual_decision': summary.get('manual_decision', ''),
+        'proposed_role': summary.get('proposed_role', ''),
+    }
+    if candidate not in safety[key]:
+        safety[key].append(candidate)
+
+
+def _finalize_safety_warnings(safety: dict):
+    if safety['unapproved_removed_candidate_count']:
+        safety['warnings'].append('Unapproved candidates would be removed.')
+    if safety['rejected_removed_candidate_count']:
+        safety['warnings'].append('Rejected candidates would be removed.')
+    if safety['unsure_removed_candidate_count']:
+        safety['warnings'].append('Unsure candidates would be removed.')
+    if safety['layout_placeholder_removed_candidate_count']:
+        safety['warnings'].append('Layout placeholder candidates would be removed.')
+
+
+def _human_page_number(page_index):
+    if isinstance(page_index, int):
+        return page_index + 1
+    return page_index
 
 
 def _dry_run_candidate(candidate: dict, index: int, page_count: int = None) -> dict:
