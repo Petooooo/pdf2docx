@@ -28,6 +28,7 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
+build_paragraph_production_comparison_report = LayoutAnalyzer.build_paragraph_production_comparison_report
 build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragraph_reconstruction_validation_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
@@ -1439,6 +1440,141 @@ class TestLayoutAnalyzer(unittest.TestCase):
             validation['summary']['estimated_paragraph_group_count'], 0)
         self.assertEqual(validation['filtered_pages'], report['pages'])
 
+    def test_paragraph_production_comparison_includes_estimator_metrics(self):
+        estimator = build_paragraph_reconstruction_validation_report(
+            build_layout_analysis_report([
+                _page(0, [
+                    _block('Body line one', 50, 300, 520, 320),
+                    _block('Body line two.', 50, 326, 520, 346),
+                ]),
+            ])['pages'],
+            enabled=True)
+
+        comparison = build_paragraph_production_comparison_report(
+            estimator,
+            production_pages=[],
+            enabled=True)
+
+        self.assertTrue(comparison['estimator']['available'])
+        self.assertEqual(comparison['estimator']['paragraph_group_count'], 1)
+        self.assertFalse(comparison['production_observed']['available'])
+        self.assertEqual(
+            comparison['warnings'][0]['type'],
+            'production_metrics_unavailable')
+
+    def test_paragraph_production_comparison_includes_production_metrics(self):
+        estimator = build_paragraph_reconstruction_validation_report(
+            build_layout_analysis_report([
+                _page(0, [
+                    _block('Body line one', 50, 300, 520, 320),
+                    _block('Body line two.', 50, 326, 520, 346),
+                    _block('Second paragraph.', 50, 420, 300, 440),
+                ]),
+            ])['pages'],
+            enabled=True)
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(
+                    ['Body line one', 'Body line two.'],
+                    [50, 300, 520, 346]),
+                _production_text_block(
+                    ['Second paragraph.'],
+                    [50, 420, 300, 440]),
+            ]),
+        ]
+
+        comparison = build_paragraph_production_comparison_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertTrue(comparison['production_observed']['available'])
+        self.assertEqual(comparison['production_observed']['paragraph_group_count'], 2)
+        self.assertEqual(comparison['production_observed']['total_body_line_count'], 3)
+        self.assertIn('average_lines_per_group', comparison['production_observed'])
+
+    def test_paragraph_production_comparison_computes_mismatch_ratio(self):
+        estimator = build_paragraph_reconstruction_validation_report(
+            build_layout_analysis_report([
+                _page(0, [
+                    _block('One.', 50, 300, 200, 320),
+                    _block('Two.', 50, 380, 200, 400),
+                    _block('Three.', 50, 460, 200, 480),
+                ]),
+            ])['pages'],
+            enabled=True)
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(
+                    ['One.', 'Two.', 'Three.'],
+                    [50, 300, 200, 480]),
+            ]),
+        ]
+
+        comparison = build_paragraph_production_comparison_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(comparison['mismatch']['estimator_group_count'], 3)
+        self.assertEqual(comparison['mismatch']['production_group_count'], 1)
+        self.assertEqual(comparison['mismatch']['group_count_delta_ratio'], 2.0)
+        self.assertEqual(
+            comparison['warnings'][0]['type'],
+            'high_group_count_mismatch')
+
+    def test_paragraph_production_comparison_does_not_mutate_inputs(self):
+        estimator = build_paragraph_reconstruction_validation_report(
+            build_layout_analysis_report([
+                _page(0, [
+                    _block('Body line one', 50, 300, 520, 320),
+                    _block('Body line two.', 50, 326, 520, 346),
+                ]),
+            ])['pages'],
+            enabled=True)
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(
+                    ['Body line one', 'Body line two.'],
+                    [50, 300, 520, 346]),
+            ]),
+        ]
+        before_estimator = json.loads(json.dumps(estimator))
+        before_production = json.loads(json.dumps(production_pages))
+
+        build_paragraph_production_comparison_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(estimator, before_estimator)
+        self.assertEqual(production_pages, before_production)
+
+    def test_paragraph_production_comparison_disabled_mode_is_clear(self):
+        estimator = build_paragraph_reconstruction_validation_report(
+            build_layout_analysis_report([
+                _page(0, [
+                    _block('Body line one', 50, 300, 520, 320),
+                    _block('Body line two.', 50, 326, 520, 346),
+                ]),
+            ])['pages'],
+            enabled=True)
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(
+                    ['Body line one', 'Body line two.'],
+                    [50, 300, 520, 346]),
+            ]),
+        ]
+
+        comparison = build_paragraph_production_comparison_report(
+            estimator,
+            production_pages=production_pages)
+
+        self.assertFalse(comparison['enabled'])
+        self.assertFalse(comparison['production_observed']['available'])
+        self.assertFalse(comparison['mismatch']['available'])
+
 
 def _page(page_index, blocks):
     return {
@@ -1454,6 +1590,40 @@ def _block(text, x0, y0, x1, y1, style=None):
         'text': text,
         'bbox': [x0, y0, x1, y1],
         'style': style or {'font': 'Times New Roman', 'size': 11.0},
+    }
+
+
+def _production_page(page_index, text_blocks):
+    return {
+        'id': page_index,
+        'width': 600,
+        'height': 1000,
+        'sections': [
+            {
+                'columns': [
+                    {
+                        'blocks': text_blocks,
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _production_text_block(lines, bbox):
+    return {
+        'type': 0,
+        'bbox': bbox,
+        'lines': [
+            {
+                'spans': [
+                    {
+                        'text': line,
+                    },
+                ],
+            }
+            for line in lines
+        ],
     }
 
 

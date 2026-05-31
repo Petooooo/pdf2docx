@@ -802,6 +802,88 @@ def build_paragraph_reconstruction_validation_report(
     }
 
 
+def build_paragraph_production_comparison_report(
+        estimator_report: dict = None,
+        production_pages: list = None,
+        enabled: bool = False,
+        top_ratio: float = DEFAULT_TOP_RATIO,
+        bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
+        short_fragment_length: int = 45) -> dict:
+    '''Compare report-only paragraph estimates with observed production TextBlocks.'''
+    estimator_metrics = _estimator_grouping_metrics(estimator_report)
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'paragraph_production_comparison_report_only',
+            'estimator': estimator_metrics,
+            'production_observed': {
+                'available': False,
+                'reason': 'Production grouping comparison is disabled.',
+            },
+            'mismatch': {
+                'available': False,
+                'reason': 'Comparison is disabled.',
+            },
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2g': False,
+                'reason': 'Production comparison is disabled; no integration assumptions were evaluated.',
+            },
+        }
+
+    warnings = []
+    if not production_pages:
+        warnings.append({
+            'type': 'production_metrics_unavailable',
+            'message': 'No serialized production pages were provided for comparison.',
+        })
+        return {
+            'enabled': True,
+            'policy': 'paragraph_production_comparison_report_only',
+            'estimator': estimator_metrics,
+            'production_observed': {
+                'available': False,
+                'reason': 'No serialized production pages were provided.',
+            },
+            'mismatch': {
+                'available': False,
+                'reason': 'Production-observed metrics are unavailable.',
+            },
+            'warnings': warnings,
+            'recommendation': {
+                'safe_to_attempt_phase_2g': False,
+                'reason': 'Collect production-observed TextBlock metrics before any integration attempt.',
+            },
+        }
+
+    production_metrics = _production_observed_grouping_metrics(
+        production_pages,
+        top_ratio,
+        bottom_ratio,
+        short_fragment_length)
+    mismatch = _paragraph_grouping_mismatch(estimator_metrics, production_metrics)
+    if mismatch.get('group_count_delta_ratio', 0.0) > 0.5:
+        warnings.append({
+            'type': 'high_group_count_mismatch',
+            'message': 'Estimator and production-observed paragraph counts differ substantially.',
+            'group_count_delta_ratio': mismatch.get('group_count_delta_ratio', 0.0),
+        })
+
+    warning_count = len(warnings)
+    return {
+        'enabled': True,
+        'policy': 'paragraph_production_comparison_report_only',
+        'estimator': estimator_metrics,
+        'production_observed': production_metrics,
+        'mismatch': mismatch,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2g': warning_count == 0,
+            'reason': _production_comparison_recommendation(warning_count, mismatch),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -1885,6 +1967,291 @@ def _paragraph_reconstruction_recommendation(safe: bool, warning_count: int) -> 
     if safe:
         return 'No paragraph reconstruction warnings were detected in the report-only validation.'
     return f'Found {warning_count} paragraph reconstruction warning(s); keep production DOCX integration gated.'
+
+
+def _estimator_grouping_metrics(estimator_report: dict) -> dict:
+    estimator_report = estimator_report or {}
+    summary = estimator_report.get('summary') or {}
+    pages = []
+    for page in estimator_report.get('pages', []) or []:
+        pages.append({
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'paragraph_group_count': page.get('estimated_paragraph_group_count', 0),
+            'body_block_count': page.get('body_block_count_after_filtering', 0),
+            'average_blocks_per_group': page.get('average_blocks_per_estimated_paragraph', 0.0),
+            'suspicious_single_line_count': page.get('suspicious_single_line_paragraph_count', 0),
+            'suspicious_short_fragment_count': page.get('suspicious_short_fragment_count', 0),
+        })
+
+    return {
+        'available': bool(estimator_report),
+        'paragraph_group_count': summary.get('estimated_paragraph_group_count', 0),
+        'body_block_count': summary.get('body_block_count_after_filtering', 0),
+        'average_blocks_per_group': summary.get('average_blocks_per_estimated_paragraph', 0.0),
+        'suspicious_single_line_count': summary.get('suspicious_single_line_paragraph_count', 0),
+        'suspicious_short_fragment_count': summary.get('suspicious_short_fragment_count', 0),
+        'one_line_group_ratio': summary.get('one_line_group_ratio', 0.0),
+        'short_fragment_ratio': summary.get('short_fragment_ratio', 0.0),
+        'pages': pages,
+        'diagnostics': estimator_report.get('diagnostics', {}),
+    }
+
+
+def _production_observed_grouping_metrics(
+        production_pages: list,
+        top_ratio: float,
+        bottom_ratio: float,
+        short_fragment_length: int) -> dict:
+    page_reports = []
+    all_groups = []
+    body_groups = []
+    for fallback_page_index, page in enumerate(production_pages or []):
+        page_index = page.get('page_index', page.get('id', fallback_page_index))
+        page_height = page.get('height', page.get('page_height', 0.0))
+        groups = _production_text_groups(
+            page,
+            page_index,
+            page_height,
+            top_ratio,
+            bottom_ratio,
+            short_fragment_length)
+        page_body_groups = [
+            group for group in groups
+            if group.get('region') == REGION_BODY
+        ]
+        page_report = _production_page_grouping_metrics(
+            page,
+            page_index,
+            groups,
+            page_body_groups,
+            short_fragment_length)
+        page_reports.append(page_report)
+        all_groups.extend(groups)
+        body_groups.extend(page_body_groups)
+
+    return {
+        'available': True,
+        'policy': 'serialized_production_textblock_observation',
+        'page_count': len(production_pages or []),
+        'all_text_group_count': len(all_groups),
+        'body_text_group_count': len(body_groups),
+        'paragraph_group_count': len(body_groups),
+        'total_body_line_count': sum(group.get('line_count', 0) for group in body_groups),
+        'average_lines_per_group': _safe_ratio(
+            sum(group.get('line_count', 0) for group in body_groups),
+            len(body_groups)),
+        'average_blocks_per_group': _safe_ratio(
+            sum(group.get('line_count', 0) for group in body_groups),
+            len(body_groups)),
+        'suspicious_single_line_count': sum(
+            1 for group in body_groups
+            if group.get('suspicious_single_line_paragraph')),
+        'suspicious_short_fragment_count': sum(
+            1 for group in body_groups
+            if group.get('suspicious_short_fragment')),
+        'one_line_group_ratio': _safe_ratio(
+            sum(1 for group in body_groups if group.get('line_count') == 1),
+            len(body_groups)),
+        'short_fragment_ratio': _safe_ratio(
+            sum(1 for group in body_groups if group.get('suspicious_short_fragment')),
+            len(body_groups)),
+        'pages': page_reports,
+    }
+
+
+def _production_text_groups(
+        page: dict,
+        page_index,
+        page_height: float,
+        top_ratio: float,
+        bottom_ratio: float,
+        short_fragment_length: int) -> list:
+    groups = []
+    group_index = 0
+    for section in page.get('sections', []) or []:
+        for column_index, column in enumerate(section.get('columns', []) or []):
+            for block in column.get('blocks', []) or []:
+                if block.get('type') != 0:
+                    continue
+                group = _production_text_group(
+                    block,
+                    page_index,
+                    _human_page_number(page_index),
+                    group_index,
+                    column_index,
+                    page_height,
+                    top_ratio,
+                    bottom_ratio,
+                    short_fragment_length)
+                groups.append(group)
+                group_index += 1
+    return groups
+
+
+def _production_text_group(
+        block: dict,
+        page_index,
+        page_number,
+        group_index: int,
+        column_index: int,
+        page_height: float,
+        top_ratio: float,
+        bottom_ratio: float,
+        short_fragment_length: int) -> dict:
+    lines = block.get('lines', []) or []
+    text = normalize_text(' '.join(_production_line_text(line) for line in lines))
+    bbox = _json_bbox(block.get('bbox'))
+    region = classify_y_band(bbox, page_height, top_ratio, bottom_ratio) if page_height else REGION_BODY
+    quality = text_quality_signals(text)
+    line_count = len(lines)
+    looks_like_heading = _looks_like_heading(text)
+    looks_like_list = _looks_like_list_item(text)
+    suspicious_single_line = (
+        line_count == 1 and
+        quality.get('meaningful_text') and
+        not looks_like_heading and
+        not looks_like_list)
+    suspicious_short = suspicious_single_line and len(text) < short_fragment_length
+    return {
+        'page_index': page_index,
+        'page_number': page_number,
+        'group_index': group_index,
+        'column_index': column_index,
+        'region': region,
+        'bbox': bbox,
+        'line_count': line_count,
+        'block_count': line_count,
+        'text_preview': _preview_text({'text': text}, max_length=120),
+        'heading_like': bool(looks_like_heading),
+        'starts_with_list_marker': bool(looks_like_list),
+        'suspicious_single_line_paragraph': bool(suspicious_single_line),
+        'suspicious_short_fragment': bool(suspicious_short),
+    }
+
+
+def _production_page_grouping_metrics(
+        page: dict,
+        page_index,
+        groups: list,
+        body_groups: list,
+        short_fragment_length: int) -> dict:
+    single_line_count = sum(
+        1 for group in body_groups
+        if group.get('line_count') == 1 and
+        group.get('suspicious_single_line_paragraph'))
+    short_fragment_count = sum(
+        1 for group in body_groups
+        if group.get('suspicious_short_fragment') and
+        len(group.get('text_preview', '')) < short_fragment_length)
+    line_count = sum(group.get('line_count', 0) for group in body_groups)
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'all_text_group_count': len(groups),
+        'paragraph_group_count': len(body_groups),
+        'body_text_group_count': len(body_groups),
+        'line_count': line_count,
+        'average_lines_per_group': _safe_ratio(line_count, len(body_groups)),
+        'suspicious_single_line_count': single_line_count,
+        'suspicious_short_fragment_count': short_fragment_count,
+        'one_line_group_ratio': _safe_ratio(
+            sum(1 for group in body_groups if group.get('line_count') == 1),
+            len(body_groups)),
+    }
+
+
+def _production_line_text(line: dict) -> str:
+    texts = []
+    for span in line.get('spans', []) or []:
+        text = span.get('text', '')
+        if text:
+            texts.append(text)
+    return normalize_text(''.join(texts))
+
+
+def _paragraph_grouping_mismatch(estimator: dict, production: dict) -> dict:
+    if not production.get('available'):
+        return {
+            'available': False,
+            'reason': 'Production metrics are unavailable.',
+        }
+
+    estimator_count = int(estimator.get('paragraph_group_count') or 0)
+    production_count = int(production.get('paragraph_group_count') or 0)
+    delta = estimator_count - production_count
+    page_mismatches = _paragraph_grouping_page_mismatches(
+        estimator.get('pages', []),
+        production.get('pages', []))
+    return {
+        'available': True,
+        'estimator_group_count': estimator_count,
+        'production_group_count': production_count,
+        'absolute_group_count_delta': abs(delta),
+        'signed_group_count_delta': delta,
+        'estimator_to_production_group_ratio': _safe_ratio(estimator_count, production_count),
+        'group_count_delta_ratio': _safe_ratio(abs(delta), production_count),
+        'average_group_size_delta': round(
+            float(estimator.get('average_blocks_per_group') or 0.0) -
+            float(production.get('average_lines_per_group') or 0.0),
+            3),
+        'one_line_ratio_delta': round(
+            float(estimator.get('one_line_group_ratio') or 0.0) -
+            float(production.get('one_line_group_ratio') or 0.0),
+            3),
+        'pages_with_largest_mismatch': page_mismatches[:5],
+        'likely_reason': _paragraph_grouping_mismatch_reason(delta, page_mismatches),
+    }
+
+
+def _paragraph_grouping_page_mismatches(estimator_pages: list, production_pages: list) -> list:
+    estimator_by_page = {
+        page.get('page_index'): page
+        for page in estimator_pages or []
+    }
+    production_by_page = {
+        page.get('page_index'): page
+        for page in production_pages or []
+    }
+    page_indexes = sorted(set(estimator_by_page) | set(production_by_page))
+    mismatches = []
+    for page_index in page_indexes:
+        estimator_page = estimator_by_page.get(page_index, {})
+        production_page = production_by_page.get(page_index, {})
+        estimator_count = int(estimator_page.get('paragraph_group_count') or 0)
+        production_count = int(production_page.get('paragraph_group_count') or 0)
+        delta = estimator_count - production_count
+        mismatches.append({
+            'page_index': page_index,
+            'page_number': _human_page_number(page_index),
+            'estimator_group_count': estimator_count,
+            'production_group_count': production_count,
+            'absolute_group_count_delta': abs(delta),
+            'signed_group_count_delta': delta,
+            'delta_ratio': _safe_ratio(abs(delta), production_count),
+        })
+
+    return sorted(
+        mismatches,
+        key=lambda item: (
+            -item['absolute_group_count_delta'],
+            item['page_number']))
+
+
+def _paragraph_grouping_mismatch_reason(delta: int, page_mismatches: list) -> str:
+    if delta == 0:
+        return 'Estimator and production-observed body TextBlock counts match.'
+    if delta > 0:
+        return 'Estimator has more groups than production-observed TextBlocks; report-only grouping may still be more fragmented.'
+    return 'Production-observed TextBlocks exceed estimator groups; production may split by layout, tables, columns, or formatting beyond report-only signals.'
+
+
+def _production_comparison_recommendation(warning_count: int, mismatch: dict) -> str:
+    if warning_count:
+        return 'Review production comparison warnings before attempting any production integration.'
+    if mismatch.get('group_count_delta_ratio', 0.0) <= 0.25:
+        return 'Estimator is close enough to production-observed grouping for another report-only validation phase.'
+    return 'Keep comparison report-only; mismatch remains large enough to require further diagnostics.'
 
 
 def _empty_paragraph_grouping_diagnostics() -> dict:

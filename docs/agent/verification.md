@@ -926,3 +926,117 @@ Result: confirmed local PDF/report/review/diff/integrity/reconstruction/diagnost
 ### Phase 2F recommendation
 
 Phase 2F is safe to attempt only as another internal/report-only phase. The estimator is much less fragmented than Phase 2D, but the remaining warning and split-reason distribution should be reviewed before any production paragraph merge or DOCX integration is considered.
+
+## Phase 2F
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2F added an internal/report-only comparison helper that compares Phase 2E paragraph estimator metrics with production-observed `TextBlock` grouping metrics. Production metrics are read from serialized `Converter.parse().store()` output only.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated for the sample comparison.
+
+### Local comparison report
+
+Generated ignored local-only file:
+
+```text
+local_reports/paragraph-production-comparison-report.md
+```
+
+The file was not staged or committed.
+
+### Comparison method
+
+The comparison uses:
+
+- Phase 2E report-only estimated paragraph groups from filtered page summaries.
+- Production-observed serialized `TextBlock` groups from an in-memory `Converter.parse()` call.
+- Body-region classification of production `TextBlock` bounding boxes for approximate comparison with the body-only estimator.
+
+This is an observation adapter, not a production parser change.
+
+### Sample metrics
+
+Estimator metrics:
+
+- Paragraph group count: 125.
+- Body block count: 520.
+- Average blocks per group: 4.16.
+- Suspicious single-line count: 36.
+- Suspicious short-fragment count: 16.
+
+Production-observed metrics:
+
+- Serialized production pages: 12.
+- All production text groups: 87.
+- Body-region production text groups: 52.
+- Total body-region production lines: 152.
+- Average production lines per body group: 2.923.
+- Production suspicious single-line count: 8.
+- Production suspicious short-fragment count: 8.
+
+Mismatch summary:
+
+- Estimator group count: 125.
+- Production body `TextBlock` count: 52.
+- Absolute group-count delta: 73.
+- Estimator-to-production group ratio: 2.404.
+- Group-count delta ratio: 1.404.
+- Warning count: 1 `high_group_count_mismatch`.
+- Largest page-level mismatches were on pages 4, 10, 7, 3, and 5.
+
+The estimator remains more fragmented than the observed production grouping. This is useful because it means production already performs stronger grouping than the report estimator in the current sample, but it also means report-only heuristics still should not be connected to production paragraph merging without another validation phase.
+
+### Tests added
+
+- Comparison report includes estimator metrics.
+- Comparison report includes production-observed metrics when serialized pages are available.
+- Group-count mismatch ratio is computed.
+- Missing production metrics are reported clearly.
+- Input estimator reports and serialized production pages are not mutated.
+- Disabled/default behavior remains explicit and non-observing.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 61 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 61 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diff/integrity/reconstruction/diagnostics/comparison files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2G recommendation
+
+Phase 2G is safe to attempt only as another internal/report-only diagnostic phase. Do not connect filtering, paragraph merging, or DOCX generation yet; first investigate why the report estimator still reports substantially more groups than production-observed `TextBlock` grouping.
