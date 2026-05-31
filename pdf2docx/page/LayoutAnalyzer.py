@@ -884,6 +884,122 @@ def build_paragraph_production_comparison_report(
     }
 
 
+def build_paragraph_mismatch_analysis_report(
+        estimator_report: dict = None,
+        production_comparison_report: dict = None,
+        production_pages: list = None,
+        enabled: bool = False,
+        top_ratio: float = DEFAULT_TOP_RATIO,
+        bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
+        short_fragment_length: int = 45,
+        page_limit: int = 8) -> dict:
+    '''Explain estimator-vs-production paragraph grouping mismatches.'''
+    estimator_metrics = _estimator_grouping_metrics(estimator_report)
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'paragraph_mismatch_analysis_report_only',
+            'estimator': estimator_metrics,
+            'production_observed': {
+                'available': False,
+                'reason': 'Mismatch analysis is disabled.',
+            },
+            'summary': {
+                'available': False,
+                'reason': 'Mismatch analysis is disabled.',
+            },
+            'pages': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2h': False,
+                'reason': 'Mismatch analysis is disabled; no integration assumptions were evaluated.',
+            },
+        }
+
+    comparison = production_comparison_report or {}
+    if not comparison.get('enabled') and production_pages:
+        comparison = build_paragraph_production_comparison_report(
+            estimator_report,
+            production_pages=production_pages,
+            enabled=True,
+            top_ratio=top_ratio,
+            bottom_ratio=bottom_ratio,
+            short_fragment_length=short_fragment_length)
+
+    production_metrics = comparison.get('production_observed') or {}
+    warnings = []
+    if not production_metrics.get('available'):
+        warnings.append({
+            'type': 'production_metrics_unavailable',
+            'message': 'Production-observed grouping metrics are unavailable for mismatch analysis.',
+        })
+        return {
+            'enabled': True,
+            'policy': 'paragraph_mismatch_analysis_report_only',
+            'estimator': estimator_metrics,
+            'production_observed': production_metrics or {
+                'available': False,
+                'reason': 'Production-observed metrics are unavailable.',
+            },
+            'summary': {
+                'available': False,
+                'reason': 'Production-observed metrics are unavailable.',
+            },
+            'pages': [],
+            'warnings': warnings,
+            'recommendation': {
+                'safe_to_attempt_phase_2h': False,
+                'reason': 'Collect production-observed TextBlock metrics before further diagnostics.',
+            },
+        }
+
+    page_analyses = _paragraph_mismatch_page_analyses(
+        estimator_report,
+        production_metrics)
+    cause_counts = Counter(
+        page['likely_cause']
+        for page in page_analyses
+        if page.get('likely_cause'))
+    dominant_cause = cause_counts.most_common(1)[0][0] if cause_counts else 'insufficient_data'
+    mismatch = comparison.get('mismatch') or _paragraph_grouping_mismatch(
+        estimator_metrics,
+        production_metrics)
+
+    if mismatch.get('group_count_delta_ratio', 0.0) > 0.5:
+        warnings.append({
+            'type': 'high_group_count_mismatch',
+            'message': 'Estimator and production-observed paragraph counts differ substantially.',
+            'group_count_delta_ratio': mismatch.get('group_count_delta_ratio', 0.0),
+        })
+
+    return {
+        'enabled': True,
+        'policy': 'paragraph_mismatch_analysis_report_only',
+        'estimator': estimator_metrics,
+        'production_observed': production_metrics,
+        'summary': {
+            'available': True,
+            'estimator_group_count': mismatch.get('estimator_group_count', 0),
+            'production_group_count': mismatch.get('production_group_count', 0),
+            'absolute_group_count_delta': mismatch.get('absolute_group_count_delta', 0),
+            'signed_group_count_delta': mismatch.get('signed_group_count_delta', 0),
+            'group_count_delta_ratio': mismatch.get('group_count_delta_ratio', 0.0),
+            'dominant_mismatch_cause': dominant_cause,
+            'cause_counts': dict(sorted(cause_counts.items())),
+            'mostly_estimator_over_splitting': mismatch.get('signed_group_count_delta', 0) > 0,
+            'mostly_production_over_merging': (
+                mismatch.get('signed_group_count_delta', 0) > 0 and
+                dominant_cause == 'production_possible_over_merge'),
+        },
+        'pages': page_analyses[:page_limit],
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2h': False,
+            'reason': _mismatch_analysis_recommendation(dominant_cause, warnings),
+        },
+    }
+
+
 def build_layout_analysis_report(
         pages: list,
         min_pages: int = 2,
@@ -2158,6 +2274,10 @@ def _production_page_grouping_metrics(
         'one_line_group_ratio': _safe_ratio(
             sum(1 for group in body_groups if group.get('line_count') == 1),
             len(body_groups)),
+        'body_text_groups': [
+            _production_group_summary(group)
+            for group in body_groups
+        ],
     }
 
 
@@ -2252,6 +2372,188 @@ def _production_comparison_recommendation(warning_count: int, mismatch: dict) ->
     if mismatch.get('group_count_delta_ratio', 0.0) <= 0.25:
         return 'Estimator is close enough to production-observed grouping for another report-only validation phase.'
     return 'Keep comparison report-only; mismatch remains large enough to require further diagnostics.'
+
+
+def _production_group_summary(group: dict) -> dict:
+    return {
+        'page_index': group.get('page_index'),
+        'page_number': group.get('page_number'),
+        'group_index': group.get('group_index'),
+        'line_count': group.get('line_count', 0),
+        'block_count': group.get('block_count', 0),
+        'region': group.get('region', ''),
+        'bbox': list(group.get('bbox', []) or []),
+        'text_preview': group.get('text_preview', ''),
+        'suspicious_single_line_paragraph': bool(group.get('suspicious_single_line_paragraph')),
+        'suspicious_short_fragment': bool(group.get('suspicious_short_fragment')),
+    }
+
+
+def _paragraph_mismatch_page_analyses(
+        estimator_report: dict,
+        production_metrics: dict) -> list:
+    estimator_pages = (estimator_report or {}).get('pages', []) or []
+    estimator_by_page = {
+        page.get('page_index'): page
+        for page in estimator_pages
+    }
+    production_by_page = {
+        page.get('page_index'): page
+        for page in production_metrics.get('pages', []) or []
+    }
+    page_indexes = sorted(set(estimator_by_page) | set(production_by_page))
+    analyses = []
+    for page_index in page_indexes:
+        estimator_page = estimator_by_page.get(page_index, {})
+        production_page = production_by_page.get(page_index, {})
+        analyses.append(_paragraph_mismatch_page_analysis(
+            page_index,
+            estimator_page,
+            production_page))
+
+    return sorted(
+        analyses,
+        key=lambda item: (
+            -item['absolute_group_count_delta'],
+            item['page_number']))
+
+
+def _paragraph_mismatch_page_analysis(
+        page_index,
+        estimator_page: dict,
+        production_page: dict) -> dict:
+    estimator_count = int(estimator_page.get('estimated_paragraph_group_count') or 0)
+    production_count = int(production_page.get('paragraph_group_count') or 0)
+    delta = estimator_count - production_count
+    split_reason_counts = _page_split_reason_counts(estimator_page)
+    production_line_counts = [
+        group.get('line_count', 0)
+        for group in production_page.get('body_text_groups', []) or []
+    ]
+    cause = _classify_mismatch_cause(
+        delta,
+        split_reason_counts,
+        production_line_counts,
+        estimator_page,
+        production_page)
+    return {
+        'page_index': page_index,
+        'page_number': _human_page_number(page_index),
+        'estimator_group_count': estimator_count,
+        'production_group_count': production_count,
+        'absolute_group_count_delta': abs(delta),
+        'signed_group_count_delta': delta,
+        'delta_ratio': _safe_ratio(abs(delta), production_count),
+        'estimator_split_reason_counts': dict(sorted(split_reason_counts.items())),
+        'production_textblock_line_counts': production_line_counts,
+        'production_average_lines_per_group': _safe_ratio(
+            sum(production_line_counts),
+            len(production_line_counts)),
+        'likely_cause': cause,
+        'cause_signals': _mismatch_cause_signals(
+            delta,
+            split_reason_counts,
+            production_line_counts,
+            estimator_page,
+            production_page),
+        'estimator_group_previews': _estimator_group_previews(estimator_page),
+        'production_group_previews': _production_group_previews(production_page),
+    }
+
+
+def _page_split_reason_counts(estimator_page: dict) -> Counter:
+    counts = Counter()
+    for boundary in estimator_page.get('split_boundaries', []) or []:
+        for reason in boundary.get('reasons', []) or []:
+            counts[reason] += 1
+    return counts
+
+
+def _classify_mismatch_cause(
+        delta: int,
+        split_reason_counts: Counter,
+        production_line_counts: list,
+        estimator_page: dict,
+        production_page: dict) -> str:
+    if not estimator_page or not production_page:
+        return 'insufficient_data'
+    if delta < 0:
+        return 'production_possible_over_split'
+    if delta == 0:
+        return 'counts_aligned'
+
+    if split_reason_counts.get('indentation_change', 0) >= max(2, abs(delta) // 3):
+        return 'estimator_over_split_by_indentation'
+    if split_reason_counts.get('style_change', 0) >= max(2, abs(delta) // 3):
+        return 'estimator_over_split_by_style_change'
+    if split_reason_counts.get('sentence_end_with_trailing_space', 0) >= 2:
+        return 'estimator_over_split_by_sentence_end'
+    heading_list_count = (
+        split_reason_counts.get('heading_like', 0) +
+        split_reason_counts.get('previous_heading_like', 0) +
+        split_reason_counts.get('list_marker', 0) +
+        split_reason_counts.get('previous_list_item', 0))
+    if heading_list_count >= 2:
+        return 'heading_or_list_boundary_difference'
+    if production_line_counts and max(production_line_counts) >= 6:
+        return 'production_possible_over_merge'
+    if estimator_page.get('body_block_count_after_filtering') and production_page.get('line_count'):
+        if estimator_page.get('body_block_count_after_filtering') > production_page.get('line_count') * 2:
+            return 'estimator_missing_line_join_metadata'
+    return 'estimator_over_splitting'
+
+
+def _mismatch_cause_signals(
+        delta: int,
+        split_reason_counts: Counter,
+        production_line_counts: list,
+        estimator_page: dict,
+        production_page: dict) -> dict:
+    return {
+        'estimator_has_more_groups': delta > 0,
+        'production_has_more_groups': delta < 0,
+        'max_production_lines_per_group': max(production_line_counts or [0]),
+        'estimator_body_block_count': estimator_page.get('body_block_count_after_filtering', 0),
+        'production_line_count': production_page.get('line_count', 0),
+        'dominant_split_reason': (
+            split_reason_counts.most_common(1)[0][0]
+            if split_reason_counts else ''),
+        'dominant_split_reason_count': (
+            split_reason_counts.most_common(1)[0][1]
+            if split_reason_counts else 0),
+    }
+
+
+def _estimator_group_previews(estimator_page: dict, limit: int = 3) -> list:
+    return [
+        {
+            'group_index': group.get('group_index'),
+            'line_count': group.get('line_count', 0),
+            'block_count': group.get('block_count', 0),
+            'break_before_reasons': list(group.get('break_before_reasons', []) or []),
+            'text_preview': group.get('text_preview', ''),
+        }
+        for group in (estimator_page.get('estimated_paragraph_groups', []) or [])[:limit]
+    ]
+
+
+def _production_group_previews(production_page: dict, limit: int = 3) -> list:
+    return [
+        {
+            'group_index': group.get('group_index'),
+            'line_count': group.get('line_count', 0),
+            'text_preview': group.get('text_preview', ''),
+        }
+        for group in (production_page.get('body_text_groups', []) or [])[:limit]
+    ]
+
+
+def _mismatch_analysis_recommendation(dominant_cause: str, warnings: list) -> str:
+    if warnings:
+        return 'Keep the work report-only and investigate the mismatch causes before production integration.'
+    if dominant_cause in {'counts_aligned'}:
+        return 'Counts align in this report, but keep the next phase internal before integration.'
+    return f'Dominant mismatch cause is {dominant_cause}; keep Phase 2H diagnostic/report-only.'
 
 
 def _empty_paragraph_grouping_diagnostics() -> dict:

@@ -28,6 +28,7 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_paragraph_integrity_report = LayoutAnalyzer.build_paragraph_integrity_report
+build_paragraph_mismatch_analysis_report = LayoutAnalyzer.build_paragraph_mismatch_analysis_report
 build_paragraph_production_comparison_report = LayoutAnalyzer.build_paragraph_production_comparison_report
 build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragraph_reconstruction_validation_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
@@ -1575,6 +1576,140 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(comparison['production_observed']['available'])
         self.assertFalse(comparison['mismatch']['available'])
 
+    def test_paragraph_mismatch_analysis_identifies_estimator_over_splitting(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(
+                0,
+                group_count=5,
+                body_blocks=10,
+                split_reasons=['indentation_change'] * 4),
+        ])
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(['Line one', 'Line two', 'Line three'], [50, 300, 520, 360]),
+            ]),
+        ]
+
+        analysis = build_paragraph_mismatch_analysis_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(
+            analysis['summary']['dominant_mismatch_cause'],
+            'estimator_over_split_by_indentation')
+        self.assertEqual(
+            analysis['pages'][0]['likely_cause'],
+            'estimator_over_split_by_indentation')
+        self.assertIn('indentation_change', analysis['pages'][0]['estimator_split_reason_counts'])
+
+    def test_paragraph_mismatch_analysis_identifies_possible_production_over_merge(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(
+                0,
+                group_count=4,
+                body_blocks=8,
+                split_reasons=[]),
+        ])
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(
+                    ['Line one', 'Line two', 'Line three', 'Line four', 'Line five', 'Line six'],
+                    [50, 300, 520, 460]),
+            ]),
+        ]
+
+        analysis = build_paragraph_mismatch_analysis_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(
+            analysis['pages'][0]['likely_cause'],
+            'production_possible_over_merge')
+        self.assertTrue(analysis['summary']['mostly_production_over_merging'])
+
+    def test_paragraph_mismatch_analysis_lists_worst_pages(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(0, group_count=2, body_blocks=4, split_reasons=[]),
+            _estimator_page_for_mismatch(1, group_count=8, body_blocks=16, split_reasons=['style_change'] * 7),
+        ])
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(['One'], [50, 300, 520, 320]),
+            ]),
+            _production_page(1, [
+                _production_text_block(['One', 'Two'], [50, 300, 520, 350]),
+            ]),
+        ]
+
+        analysis = build_paragraph_mismatch_analysis_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(analysis['pages'][0]['page_number'], 2)
+        self.assertEqual(analysis['pages'][0]['absolute_group_count_delta'], 7)
+        self.assertEqual(
+            analysis['pages'][0]['likely_cause'],
+            'estimator_over_split_by_style_change')
+
+    def test_paragraph_mismatch_analysis_handles_missing_production_metrics(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(0, group_count=2, body_blocks=4, split_reasons=[]),
+        ])
+
+        analysis = build_paragraph_mismatch_analysis_report(
+            estimator,
+            enabled=True)
+
+        self.assertFalse(analysis['summary']['available'])
+        self.assertEqual(
+            analysis['warnings'][0]['type'],
+            'production_metrics_unavailable')
+
+    def test_paragraph_mismatch_analysis_does_not_mutate_inputs(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(
+                0,
+                group_count=3,
+                body_blocks=6,
+                split_reasons=['sentence_end_with_trailing_space'] * 2),
+        ])
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(['One', 'Two'], [50, 300, 520, 350]),
+            ]),
+        ]
+        before_estimator = json.loads(json.dumps(estimator))
+        before_production = json.loads(json.dumps(production_pages))
+
+        build_paragraph_mismatch_analysis_report(
+            estimator,
+            production_pages=production_pages,
+            enabled=True)
+
+        self.assertEqual(estimator, before_estimator)
+        self.assertEqual(production_pages, before_production)
+
+    def test_paragraph_mismatch_analysis_disabled_mode_is_clear(self):
+        estimator = _estimator_report_for_mismatch([
+            _estimator_page_for_mismatch(0, group_count=2, body_blocks=4, split_reasons=[]),
+        ])
+        production_pages = [
+            _production_page(0, [
+                _production_text_block(['One'], [50, 300, 520, 320]),
+            ]),
+        ]
+
+        analysis = build_paragraph_mismatch_analysis_report(
+            estimator,
+            production_pages=production_pages)
+
+        self.assertFalse(analysis['enabled'])
+        self.assertFalse(analysis['summary']['available'])
+        self.assertEqual(analysis['pages'], [])
+
 
 def _page(page_index, blocks):
     return {
@@ -1623,6 +1758,61 @@ def _production_text_block(lines, bbox):
                 ],
             }
             for line in lines
+        ],
+    }
+
+
+def _estimator_report_for_mismatch(pages):
+    group_count = sum(page['estimated_paragraph_group_count'] for page in pages)
+    body_blocks = sum(page['body_block_count_after_filtering'] for page in pages)
+    return {
+        'enabled': True,
+        'summary': {
+            'estimated_paragraph_group_count': group_count,
+            'body_block_count_after_filtering': body_blocks,
+            'average_blocks_per_estimated_paragraph': (
+                round(body_blocks / group_count, 3)
+                if group_count else 0.0),
+            'suspicious_single_line_paragraph_count': 0,
+            'suspicious_short_fragment_count': 0,
+            'one_line_group_ratio': 0.0,
+            'short_fragment_ratio': 0.0,
+        },
+        'pages': pages,
+        'diagnostics': {},
+    }
+
+
+def _estimator_page_for_mismatch(page_index, group_count, body_blocks, split_reasons):
+    groups = [
+        {
+            'group_index': index,
+            'line_count': 1,
+            'block_count': 1,
+            'break_before_reasons': split_reasons[index-1:index],
+            'text_preview': f'Estimator group {index}',
+        }
+        for index in range(group_count)
+    ]
+    return {
+        'page_index': page_index,
+        'page_number': page_index + 1,
+        'estimated_paragraph_group_count': group_count,
+        'body_block_count_after_filtering': body_blocks,
+        'average_blocks_per_estimated_paragraph': (
+            round(body_blocks / group_count, 3)
+            if group_count else 0.0),
+        'suspicious_single_line_paragraph_count': 0,
+        'suspicious_short_fragment_count': 0,
+        'estimated_paragraph_groups': groups,
+        'split_boundaries': [
+            {
+                'boundary_index': index,
+                'reasons': [reason],
+                'previous_text_preview': f'Previous {index}',
+                'next_text_preview': f'Next {index}',
+            }
+            for index, reason in enumerate(split_reasons)
         ],
     }
 

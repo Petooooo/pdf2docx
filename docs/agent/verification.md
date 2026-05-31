@@ -1040,3 +1040,103 @@ Result: confirmed local PDF/report/review/diff/integrity/reconstruction/diagnost
 ### Phase 2G recommendation
 
 Phase 2G is safe to attempt only as another internal/report-only diagnostic phase. Do not connect filtering, paragraph merging, or DOCX generation yet; first investigate why the report estimator still reports substantially more groups than production-observed `TextBlock` grouping.
+
+## Phase 2G
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 2G added an internal/report-only mismatch analysis helper. It explains the page-level difference between the Phase 2E estimator and production-observed serialized `TextBlock` grouping.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` behavior changed.
+- No public CLI behavior changed.
+- No production `Pages`, `Page`, `Blocks`, table, image, or shape behavior changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge or body filtering was added.
+- No DOCX was generated for the sample analysis.
+
+### Local mismatch analysis report
+
+Generated ignored local-only file:
+
+```text
+local_reports/paragraph-mismatch-analysis-report.md
+```
+
+The file may contain short extracted previews and was not staged or committed.
+
+### Sample summary
+
+- Estimator body paragraph groups: 125.
+- Production-observed body `TextBlock` groups: 52.
+- Absolute group-count delta: 73.
+- Dominant mismatch cause: `estimator_over_split_by_indentation`.
+- Mostly estimator over-splitting: yes.
+- Mostly production over-merging: no.
+- Warning count: 1 `high_group_count_mismatch`.
+
+Cause counts:
+
+- `estimator_over_split_by_indentation`: 9 pages.
+- `estimator_over_split_by_style_change`: 1 page.
+- `production_possible_over_split`: 1 page.
+- `counts_aligned`: 1 page.
+
+Worst mismatch pages:
+
+- Page 4.
+- Page 10.
+- Page 7.
+- Page 3.
+- Page 5.
+
+The mismatch appears mostly caused by the report estimator treating indentation changes as paragraph boundaries more aggressively than the production grouping pipeline. Production-observed `TextBlock` grouping is not clearly over-merging in this sample; it appears to preserve larger paragraph-like groups than the estimator.
+
+### Tests added
+
+- Mismatch report identifies estimator over-splitting.
+- Mismatch report identifies possible production over-merge.
+- Mismatch report lists worst mismatch pages.
+- Mismatch cause classification is included.
+- Missing production metrics are handled clearly.
+- Input estimator reports and production-observed pages are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 67 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 67 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review/diagnostics/comparison/mismatch files, `.venv/`, and generated caches remain ignored. No local sample or generated report was staged.
+
+### Phase 2H recommendation
+
+Phase 2H is safe to attempt only as another internal/report-only diagnostic phase. The next useful step is to inspect indentation-sensitive estimator split rules against production `Blocks._join_lines_vertically()` / `Lines.split_vertically_by_text()` behavior before any production integration is considered.
