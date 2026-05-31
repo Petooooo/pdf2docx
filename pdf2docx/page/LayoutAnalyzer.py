@@ -12,15 +12,19 @@ from collections import defaultdict
 
 
 PAGE_NUMBER_PLACEHOLDER = '<PAGE_NUMBER>'
+IMAGE_PLACEHOLDER = '<IMAGE>'
 REGION_TOP = 'top'
 REGION_BODY = 'body'
 REGION_BOTTOM = 'bottom'
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
+MIN_MEANINGFUL_TEXT_LENGTH = 12
+MIN_MEANINGFUL_WORDS = 2
 STRONG_SENTENCE_END_PUNC = '.．。?？!！'
 
 _SPACE_RE = re.compile(r'\s+')
+_PLACEHOLDER_RE = re.compile(r'^<[^<>]+>$')
 _PAGE_NUMBER_RE_LIST = (
     re.compile(r'^(?:page|p\.?)\s*\d+$', re.IGNORECASE),
     re.compile(r'^(?:page|p\.?)\s*\d+\s*(?:/|of)\s*\d+$', re.IGNORECASE),
@@ -97,6 +101,39 @@ def make_text_fingerprint(
     }
 
 
+def text_quality_signals(text) -> dict:
+    '''Return conservative semantic-quality signals for report scoring.'''
+    normalized = normalize_text(text)
+    comparable = _comparison_text(normalized)
+    placeholder_kind = _placeholder_kind(comparable)
+    words = comparable.split()
+    alnum_count = sum(1 for char in comparable if char.isalnum())
+    short_text = alnum_count < MIN_MEANINGFUL_TEXT_LENGTH and len(words) < MIN_MEANINGFUL_WORDS
+    placeholder_like = bool(placeholder_kind)
+    meaningful_text = bool(comparable) and not placeholder_like and not short_text
+
+    if placeholder_kind == 'page_number':
+        semantic_weight = 0.85
+    elif placeholder_like:
+        semantic_weight = 0.35
+    elif short_text:
+        semantic_weight = 0.55
+    else:
+        semantic_weight = 1.0
+
+    return {
+        'normalized_text': comparable,
+        'character_count': len(normalized),
+        'alnum_count': alnum_count,
+        'word_count': len(words),
+        'placeholder_like': placeholder_like,
+        'placeholder_kind': placeholder_kind,
+        'short_text': short_text,
+        'meaningful_text': meaningful_text,
+        'semantic_weight': semantic_weight,
+    }
+
+
 def classify_y_band(
         bbox,
         page_height: float,
@@ -139,6 +176,7 @@ def text_block_records(
             region = classify_y_band(bbox, page_height, top_ratio, bottom_ratio)
             style = block.get('style') or _style_from_block(block)
             fingerprint = make_text_fingerprint(text, region, style=None)
+            quality = text_quality_signals(text)
 
             records.append({
                 'page_index': page_index,
@@ -149,6 +187,7 @@ def text_block_records(
                 'region': region,
                 'style': normalize_style_key(style),
                 'fingerprint': fingerprint['key'],
+                'signals': quality,
             })
 
     return records
@@ -182,6 +221,19 @@ def find_repeated_text_candidates(
         regions_seen = sorted({record['region'] for record in group})
         support = len(pages_seen)
         confidence = round(support / total_pages, 3) if total_pages else 0.0
+        support_level = _support_level(support, total_pages)
+        adjacent_only = _is_adjacent_only(pages_seen, total_pages)
+        quality = text_quality_signals(group[0]['normalized_text'])
+        semantic_confidence = _semantic_confidence(
+            confidence,
+            support,
+            total_pages,
+            quality)
+        confidence_label = _confidence_label(
+            semantic_confidence,
+            support_level,
+            adjacent_only,
+            quality)
         candidates.append({
             'fingerprint': key,
             'text': group[0]['normalized_text'],
@@ -189,11 +241,22 @@ def find_repeated_text_candidates(
             'count': len(group),
             'regions': regions_seen,
             'confidence': confidence,
+            'semantic_confidence': semantic_confidence,
+            'confidence_label': confidence_label,
+            'reason': _repeated_candidate_reason(
+                semantic_confidence,
+                support_level,
+                adjacent_only,
+                quality),
             'signals': {
                 'support_pages': support,
                 'total_pages': total_pages,
+                'support_ratio': confidence,
+                'support_level': support_level,
+                'adjacent_only': adjacent_only,
                 'instance_count': len(group),
                 'regions': regions_seen,
+                'text_quality': quality,
             },
             'instances': group,
         })
@@ -243,6 +306,7 @@ def build_layout_analysis_report(
         bottom_ratio=bottom_ratio)
     continuations = find_paragraph_continuation_candidates(
         page_summaries,
+        repeated_text_candidates=repeated,
         top_ratio=top_ratio,
         bottom_ratio=bottom_ratio)
 
@@ -266,21 +330,28 @@ def build_layout_analysis_report(
 
 def find_paragraph_continuation_candidates(
         page_summaries: list,
+        repeated_text_candidates: list = None,
         top_ratio: float = DEFAULT_TOP_RATIO,
         bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
         near_edge_ratio: float = DEFAULT_NEAR_BODY_EDGE_RATIO) -> list:
     '''Score adjacent-page paragraph continuation candidates.'''
     candidates = []
     page_summaries = page_summaries or []
+    repeated_boundary_texts = _likely_repeated_boundary_texts(repeated_text_candidates)
     for index, previous_page in enumerate(page_summaries[:-1]):
         next_page = page_summaries[index+1]
-        previous_block = _last_body_block(previous_page)
-        next_block = _first_body_block(next_page)
+        previous_block = _last_body_block(
+            previous_page,
+            excluded_texts=repeated_boundary_texts)
+        next_block = _first_body_block(
+            next_page,
+            excluded_texts=repeated_boundary_texts)
         candidates.append(score_paragraph_continuation(
             previous_page,
             next_page,
             previous_block,
             next_block,
+            repeated_boundary_texts=repeated_boundary_texts,
             top_ratio=top_ratio,
             bottom_ratio=bottom_ratio,
             near_edge_ratio=near_edge_ratio))
@@ -292,6 +363,7 @@ def score_paragraph_continuation(
         next_page: dict,
         previous_block: dict = None,
         next_block: dict = None,
+        repeated_boundary_texts: set = None,
         top_ratio: float = DEFAULT_TOP_RATIO,
         bottom_ratio: float = DEFAULT_BOTTOM_RATIO,
         near_edge_ratio: float = DEFAULT_NEAR_BODY_EDGE_RATIO) -> dict:
@@ -319,6 +391,19 @@ def score_paragraph_continuation(
     next_text = normalize_text(next_block.get('text', ''))
     previous_bbox = previous_block.get('bbox', [0.0, 0.0, 0.0, 0.0])
     next_bbox = next_block.get('bbox', [0.0, 0.0, 0.0, 0.0])
+    repeated_boundary_texts = repeated_boundary_texts or set()
+    previous_quality = text_quality_signals(previous_text)
+    next_quality = text_quality_signals(next_text)
+
+    score += _text_quality_score_delta('previous', previous_quality, negative)
+    score += _text_quality_score_delta('next', next_quality, negative)
+
+    if _comparison_text(previous_text) in repeated_boundary_texts:
+        negative.append('previous_repeated_boundary_text')
+        score -= 0.35
+    if _comparison_text(next_text) in repeated_boundary_texts:
+        negative.append('next_repeated_boundary_text')
+        score -= 0.35
 
     if _near_body_bottom(previous_bbox, previous_page, bottom_ratio, near_edge_ratio):
         positive.append('previous_near_body_bottom')
@@ -400,26 +485,142 @@ def _json_number(value) -> float:
     return round(float(value or 0.0), 2)
 
 
-def _last_body_block(page_summary: dict):
-    body_blocks = _body_blocks(page_summary)
+def _last_body_block(page_summary: dict, excluded_texts: set = None):
+    body_blocks = _body_blocks(page_summary, excluded_texts=excluded_texts)
     if not body_blocks:
         return None
     return sorted(body_blocks, key=lambda block: (block['bbox'][3], block['block_index']))[-1]
 
 
-def _first_body_block(page_summary: dict):
-    body_blocks = _body_blocks(page_summary)
+def _first_body_block(page_summary: dict, excluded_texts: set = None):
+    body_blocks = _body_blocks(page_summary, excluded_texts=excluded_texts)
     if not body_blocks:
         return None
     return sorted(body_blocks, key=lambda block: (block['bbox'][1], block['block_index']))[0]
 
 
-def _body_blocks(page_summary: dict) -> list:
+def _body_blocks(page_summary: dict, excluded_texts: set = None) -> list:
     blocks = page_summary.get('text_blocks', []) or []
+    excluded_texts = excluded_texts or set()
     return [
         block for block in blocks
         if block.get('region') == REGION_BODY and normalize_text(block.get('text'))
+        and _comparison_text(block.get('text', '')) not in excluded_texts
     ]
+
+
+def _comparison_text(text) -> str:
+    return normalize_page_number(normalize_text(text)).lower()
+
+
+def _placeholder_kind(text) -> str:
+    comparable = _comparison_text(text)
+    if not comparable:
+        return ''
+    if comparable == PAGE_NUMBER_PLACEHOLDER.lower():
+        return 'page_number'
+    if comparable == IMAGE_PLACEHOLDER.lower():
+        return 'image'
+    if _PLACEHOLDER_RE.match(comparable):
+        return 'generic'
+    return ''
+
+
+def _support_level(support: int, total_pages: int) -> str:
+    if not total_pages:
+        return 'none'
+    if support <= 2 and total_pages > 2:
+        return 'low'
+
+    ratio = support / total_pages
+    if ratio >= 0.75:
+        return 'high'
+    if ratio >= 0.5:
+        return 'medium'
+    return 'low'
+
+
+def _is_adjacent_only(pages_seen: list, total_pages: int) -> bool:
+    if len(pages_seen) < 2 or len(pages_seen) == total_pages:
+        return False
+    return pages_seen == list(range(pages_seen[0], pages_seen[-1]+1))
+
+
+def _semantic_confidence(
+        confidence: float,
+        support: int,
+        total_pages: int,
+        quality: dict) -> float:
+    support_penalty = 0.6 if support <= 2 and total_pages > 2 else 1.0
+    semantic_weight = float(quality.get('semantic_weight', 1.0))
+    return round(max(0.0, min(1.0, confidence * support_penalty * semantic_weight)), 3)
+
+
+def _confidence_label(
+        semantic_confidence: float,
+        support_level: str,
+        adjacent_only: bool,
+        quality: dict) -> str:
+    placeholder_kind = quality.get('placeholder_kind')
+    if placeholder_kind and placeholder_kind != 'page_number':
+        return 'placeholder'
+    if support_level == 'low' or adjacent_only:
+        return 'cautious'
+    if semantic_confidence >= 0.75:
+        return 'strong'
+    if semantic_confidence >= 0.4:
+        return 'moderate'
+    return 'cautious'
+
+
+def _repeated_candidate_reason(
+        semantic_confidence: float,
+        support_level: str,
+        adjacent_only: bool,
+        quality: dict) -> str:
+    placeholder_kind = quality.get('placeholder_kind')
+    if placeholder_kind == 'image':
+        return 'Repeated image placeholder is reportable, but not strong semantic header/footer evidence by itself.'
+    if placeholder_kind and placeholder_kind != 'page_number':
+        return 'Repeated placeholder-like text is reportable, but semantic confidence is limited.'
+    if support_level == 'low' or adjacent_only:
+        return 'Low-support repeated boundary text; preserve as a cautious candidate.'
+    if quality.get('short_text'):
+        return 'Repeated short text has limited semantic confidence.'
+    if semantic_confidence >= 0.75:
+        return 'Repeated boundary text has strong support across pages.'
+    if semantic_confidence >= 0.4:
+        return 'Repeated boundary text has moderate support.'
+    return 'Repeated boundary text has weak or mixed support signals.'
+
+
+def _likely_repeated_boundary_texts(candidates: list) -> set:
+    texts = set()
+    for candidate in candidates or []:
+        regions = set(candidate.get('regions', []) or [])
+        if not regions.intersection({REGION_TOP, REGION_BOTTOM}):
+            continue
+
+        signals = candidate.get('signals', {}) or {}
+        support = int(signals.get('support_pages') or 0)
+        confidence = float(candidate.get('confidence') or 0.0)
+        if support >= 3 or confidence >= 0.5:
+            texts.add(_comparison_text(candidate.get('text', '')))
+    return texts
+
+
+def _text_quality_score_delta(prefix: str, quality: dict, negative: list) -> float:
+    delta = 0.0
+    if quality.get('placeholder_like'):
+        negative.append(f'{prefix}_placeholder_text')
+        delta -= 0.45
+    if quality.get('short_text'):
+        negative.append(f'{prefix}_short_text')
+        delta -= 0.25
+    if not quality.get('meaningful_text'):
+        negative.append(f'{prefix}_low_meaningful_text')
+        delta -= 0.15
+    return delta
 
 
 def _near_body_bottom(bbox, page_summary, bottom_ratio: float, near_edge_ratio: float) -> bool:
@@ -518,6 +719,12 @@ def _continuation_label(score: float) -> str:
 def _continuation_reason(score: float, positive: list, negative: list) -> str:
     if 'no_previous_body_block' in negative or 'no_next_body_block' in negative:
         return 'Missing body text candidate on one side of the page break.'
+    if 'previous_repeated_boundary_text' in negative or 'next_repeated_boundary_text' in negative:
+        return 'Candidate endpoint matches likely repeated header/footer boundary text.'
+    if 'previous_placeholder_text' in negative or 'next_placeholder_text' in negative:
+        return 'Candidate endpoint is placeholder-like text, so continuation confidence is limited.'
+    if 'previous_short_text' in negative or 'next_short_text' in negative:
+        return 'Candidate endpoint text is too short to be strong continuation evidence.'
     if 'previous_strong_sentence_end' in negative:
         return 'Previous text ends with strong sentence punctuation.'
     if 'next_looks_like_heading' in negative:

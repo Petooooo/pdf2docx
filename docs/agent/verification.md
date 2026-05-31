@@ -238,3 +238,71 @@ Paragraph continuation observations:
 - Repeated body text near page boundaries can still look like a header/footer candidate when it appears on adjacent pages.
 - Section-specific headers and first-page exceptions need explicit modeling before Phase 2 header/footer removal.
 - Next phase should remain report-only or introduce more debug-only scoring signals first: minimum text length filters, placeholder-specific handling, list/number-only suppression, repeated-cluster exclusion during continuation scoring, and richer body-region margin inference.
+
+## Phase 1E
+
+Date: 2026-05-31
+
+### Scope
+
+Phase 1E hardened the opt-in `layout_analysis` report only. No body filtering, header/footer removal, paragraph merge, DOCX generation behavior, public CLI behavior, table behavior, image behavior, or shape behavior was changed.
+
+### Heuristics improved
+
+- Added per-block text-quality signals for short text, placeholder-like text, placeholder kind, word count, and semantic weight.
+- Added repeated-candidate `semantic_confidence`, `confidence_label`, support level, adjacent-only signal, and reason text while preserving the raw support-based `confidence`.
+- Down-scored placeholder-like and very short text in paragraph continuation scoring.
+- Excluded likely repeated top/bottom boundary text from continuation endpoint selection when building the opt-in report.
+- Added clearer continuation reasons for short text, placeholder text, and repeated boundary text.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 19 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 19 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Local sample recheck
+
+Regenerated the ignored local report at `local_reports/input-layout-analysis-report.json` from the ignored sample `local_samples/input.pdf`.
+
+- Pages analyzed: 12.
+- Text blocks / placeholders summarized: 790.
+- Repeated text candidate clusters: 9 total.
+- Repeated confidence labels after hardening: 4 `strong`, 2 `placeholder`, 3 `cautious`.
+- Repeated placeholder kinds: 1 page-number placeholder cluster, 2 image-placeholder clusters, 6 normal text clusters.
+- Paragraph continuation entries: 11 page-pair entries.
+- Continuation labels after hardening: 11 `unlikely`, 0 `weak`, 0 `candidate`.
+- The two previously weak continuation entries were down-scored by short-text, placeholder, repeated-boundary, or mismatch signals.
+
+### Local-only file status
+
+- `.venv/`, `local_samples/`, and `local_reports/` remained ignored by Git.
+- The sample PDF and generated JSON report were not staged or committed.
+- No generated DOCX files were created for Phase 1E.
+
+### Remaining risks before Phase 2
+
+- The report is still heuristic and text-block centric; it does not prove safe removal or paragraph merging.
+- Image placeholders are now down-scored semantically, but image identity and placement still need richer metadata.
+- Low-support repeated clusters are marked cautious, but section-specific repeated content still needs explicit section modeling.
+- Continuation scoring remains conservative; Phase 2 should add more debug-only review on varied fixtures before mutating body content.

@@ -14,6 +14,7 @@ PAGE_NUMBER_PLACEHOLDER = LayoutAnalyzer.PAGE_NUMBER_PLACEHOLDER
 REGION_BODY = LayoutAnalyzer.REGION_BODY
 REGION_BOTTOM = LayoutAnalyzer.REGION_BOTTOM
 REGION_TOP = LayoutAnalyzer.REGION_TOP
+IMAGE_PLACEHOLDER = LayoutAnalyzer.IMAGE_PLACEHOLDER
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
@@ -231,6 +232,115 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(candidate['next_text_preview'], '')
         self.assertIn('no_previous_body_block', candidate['negative_signals'])
         self.assertIn('no_next_body_block', candidate['negative_signals'])
+
+    def test_short_text_does_not_become_strong_continuation_evidence(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Note', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('x', 50, 170, 520, 200),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'unlikely')
+        self.assertIn('previous_short_text', candidate['negative_signals'])
+        self.assertIn('next_short_text', candidate['negative_signals'])
+        self.assertIn('too short', candidate['reason'])
+
+    def test_page_number_placeholder_is_not_normal_body_continuation_text(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Page 1', 50, 805, 520, 835),
+            ]),
+            _page(1, [
+                _block('continued body text with matching layout', 50, 170, 520, 200),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(candidate['label'], 'unlikely')
+        self.assertIn('previous_placeholder_text', candidate['negative_signals'])
+        self.assertIn('placeholder-like', candidate['reason'])
+
+    def test_image_placeholder_is_reported_but_not_strong_semantic_repeated_text(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph one.', 50, 300, 520, 330),
+            ]),
+            _page(1, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph two.', 50, 300, 520, 330),
+            ]),
+            _page(2, [
+                _block(IMAGE_PLACEHOLDER, 50, 20, 120, 40),
+                _block('Body paragraph three.', 50, 300, 520, 330),
+            ]),
+        ])
+        by_text = {candidate['text']: candidate for candidate in report['repeated_text_candidates']}
+        candidate = by_text[IMAGE_PLACEHOLDER.lower()]
+
+        self.assertEqual(candidate['confidence'], 1.0)
+        self.assertLess(candidate['semantic_confidence'], candidate['confidence'])
+        self.assertEqual(candidate['confidence_label'], 'placeholder')
+        self.assertEqual(candidate['signals']['text_quality']['placeholder_kind'], 'image')
+
+    def test_two_page_repeated_cluster_is_more_cautious_than_all_page_header(self):
+        pages = [
+            _page(0, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Boundary Note', 50, 955, 300, 980),
+            ]),
+            _page(1, [
+                _block('Annual Report', 50, 20, 300, 40),
+                _block('Boundary Note', 50, 955, 300, 980),
+            ]),
+            _page(2, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+            _page(3, [
+                _block('Annual Report', 50, 20, 300, 40),
+            ]),
+        ]
+        report = build_layout_analysis_report(pages)
+        by_text = {candidate['text']: candidate for candidate in report['repeated_text_candidates']}
+
+        self.assertGreater(
+            by_text['annual report']['semantic_confidence'],
+            by_text['boundary note']['semantic_confidence'])
+        self.assertEqual(by_text['annual report']['confidence_label'], 'strong')
+        self.assertEqual(by_text['boundary note']['confidence_label'], 'cautious')
+        self.assertEqual(by_text['boundary note']['signals']['support_level'], 'low')
+
+    def test_continuation_avoids_likely_repeated_header_footer_blocks(self):
+        report = build_layout_analysis_report([
+            _page(0, [
+                _block('Running Footer', 50, 960, 300, 980),
+                _block('The paragraph continues across pages', 50, 805, 520, 835),
+                _block('Running Footer', 50, 830, 300, 850),
+            ]),
+            _page(1, [
+                _block('Running Footer', 50, 20, 300, 40),
+                _block('Running Footer', 50, 170, 300, 190),
+                _block('on the next page with matching text', 50, 205, 520, 235),
+                _block('Running Footer', 50, 960, 300, 980),
+            ]),
+            _page(2, [
+                _block('Running Footer', 50, 20, 300, 40),
+                _block('Another body paragraph.', 50, 300, 520, 330),
+                _block('Running Footer', 50, 960, 300, 980),
+            ]),
+        ])
+        candidate = report['paragraph_continuation_candidates'][0]
+
+        self.assertEqual(
+            candidate['previous_text_preview'],
+            'The paragraph continues across pages')
+        self.assertEqual(
+            candidate['next_text_preview'],
+            'on the next page with matching text')
 
 
 def _page(page_index, blocks):
