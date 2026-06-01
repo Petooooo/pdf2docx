@@ -10,7 +10,7 @@ from pathlib import Path
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'pdf2docx' / 'page' / 'LayoutAnalyzer.py'
 SPEC = util.spec_from_file_location('LayoutAnalyzer', MODULE_PATH)
 LayoutAnalyzer = util.module_from_spec(SPEC)
-# Load the pure helper directly so these tests do not need PyMuPDF.
+# Load pure helpers directly; synthetic PDF tests import PyMuPDF only when available.
 SPEC.loader.exec_module(LayoutAnalyzer)
 
 PAGE_NUMBER_PLACEHOLDER = LayoutAnalyzer.PAGE_NUMBER_PLACEHOLDER
@@ -70,6 +70,13 @@ try:
     from pdf2docx.page.Pages import Pages
 except Exception:
     Pages = None
+
+try:
+    import fitz
+    from pdf2docx import Converter
+except Exception:
+    fitz = None
+    Converter = None
 
 
 class TestLayoutAnalyzer(unittest.TestCase):
@@ -4266,6 +4273,140 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['candidate_count'], 0)
         self.assertEqual(summary['summary']['sample_count'], 0)
 
+    def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'repeated-header-footer.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            dry_run = layout['header_footer_exclusion_dry_run']
+            roles = {candidate['proposed_role'] for candidate in dry_run['candidates']}
+
+            self.assertIn(ROLE_HEADER, roles)
+            self.assertIn(ROLE_FOOTER, roles)
+            self.assertIn(ROLE_PAGE_NUMBER, roles)
+
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            body_validation = _synthetic_body_text_validation(layout, filtering)
+            diagnostics = _run_synthetic_document_parse_diagnostics(
+                pdf_path,
+                decisions,
+                expected_remove_count=filtering['summary']['removed_block_count'])
+
+            self.assertEqual(filtering['approved_candidate_count'], 3)
+            self.assertEqual(filtering['summary']['removed_block_count'], 12)
+            self.assertEqual(_removed_region_count(filtering, REGION_BODY), 0)
+            self.assertTrue(body_validation['body_text_signature_preserved'])
+            self.assertEqual(
+                diagnostics['mapping']['summary']['exact_match_count'],
+                filtering['summary']['removed_block_count'])
+            self.assertTrue(
+                diagnostics['guarded']['summary']['restore_fingerprint_match'])
+            self.assertFalse(
+                diagnostics['guarded']['summary']['original_raw_pages_left_mutated'])
+
+    def test_synthetic_body_table_near_footer_preserves_body_content(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'body-table-near-footer.pdf'
+            _write_synthetic_pdf(pdf_path, 'body_table_near_footer')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            body_validation = _synthetic_body_text_validation(layout, filtering)
+
+            self.assertGreater(filtering['summary']['removed_block_count'], 0)
+            self.assertEqual(_removed_region_count(filtering, REGION_BODY), 0)
+            self.assertEqual(_removed_text_match_count(filtering, 'Body Table'), 0)
+            self.assertIn('body table cell alpha', body_validation['filtered_signature'])
+            self.assertTrue(body_validation['body_text_signature_preserved'])
+
+    def test_synthetic_no_header_footer_negative_control_requires_manual_approval(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            negative_pdf = Path(tmp) / 'no-header-footer.pdf'
+            repeated_pdf = Path(tmp) / 'raw-would-exclude-needs-review.pdf'
+            _write_synthetic_pdf(negative_pdf, 'no_header_footer')
+            _write_synthetic_pdf(repeated_pdf, 'repeated_header_footer')
+
+            negative_layout = _parse_synthetic_layout(negative_pdf)
+            repeated_layout = _parse_synthetic_layout(repeated_pdf)
+            no_decision_filter = _synthetic_filtering_report(
+                repeated_layout,
+                {'decisions': [], 'summary': {'candidate_count': 0}})
+
+            self.assertEqual(
+                negative_layout['header_footer_exclusion_dry_run']['summary']['candidate_count'],
+                0)
+            self.assertGreater(
+                repeated_layout['header_footer_exclusion_dry_run']['summary']['candidate_count'],
+                0)
+            self.assertEqual(no_decision_filter['approved_candidate_count'], 0)
+            self.assertEqual(no_decision_filter['summary']['removed_block_count'], 0)
+
+    def test_synthetic_first_page_odd_even_headers_remain_review_gated(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'first-page-odd-even.pdf'
+            _write_synthetic_pdf(pdf_path, 'first_page_odd_even_headers')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            top_candidates = [
+                candidate
+                for candidate in layout['header_footer_exclusion_dry_run']['candidates']
+                if candidate.get('region') == REGION_TOP
+            ]
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_REVIEW_ONLY})
+            filtering = _synthetic_filtering_report(layout, decisions)
+
+            self.assertTrue(top_candidates)
+            self.assertTrue(all(
+                candidate['action'] == ACTION_REVIEW
+                for candidate in top_candidates))
+            self.assertTrue(all(
+                candidate['support_count'] < candidate['page_count']
+                for candidate in top_candidates))
+            self.assertEqual(filtering['approved_candidate_count'], 0)
+            self.assertEqual(filtering['summary']['removed_block_count'], 0)
+
+    def test_synthetic_paragraph_continuity_preserves_body_text_signature(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'paragraph-continuity.pdf'
+            _write_synthetic_pdf(pdf_path, 'paragraph_continuity')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            body_validation = _synthetic_body_text_validation(
+                layout,
+                filtering,
+                baseline_body_text_block_count=3,
+                filtered_body_text_block_count=2)
+
+            continuation_labels = {
+                candidate.get('label')
+                for candidate in layout.get('paragraph_continuation_candidates', []) or []
+            }
+
+            self.assertIn('candidate', continuation_labels)
+            self.assertEqual(_removed_region_count(filtering, REGION_BODY), 0)
+            self.assertTrue(body_validation['body_text_signature_preserved'])
+            self.assertEqual(
+                body_validation['body_text_block_delta_classification'],
+                'acceptable_boundary_or_grouping_shift')
+
 
 def _page(page_index, blocks):
     return {
@@ -5173,6 +5314,250 @@ def _corpus_review_decisions(*items):
                 decision['manual_decision'] for decision in decisions)),
         },
     }
+
+
+def _require_synthetic_pdf_support(testcase):
+    if fitz is None or Converter is None or Pages is None:
+        testcase.skipTest('Synthetic PDF regression tests require PyMuPDF and pdf2docx.')
+
+
+def _write_synthetic_pdf(path, scenario):
+    doc = fitz.open()
+    try:
+        if scenario == 'repeated_header_footer':
+            for page_index in range(4):
+                page = _synthetic_page(doc)
+                _synthetic_header(page, 'SYNTHETIC REPORT HEADER')
+                _synthetic_body_line(
+                    page,
+                    120,
+                    f'Synthetic body paragraph page {page_index + 1} remains editable.')
+                _synthetic_body_line(
+                    page,
+                    142,
+                    'The body region text must remain after reviewed filtering.')
+                _synthetic_footer(page, 'SYNTHETIC REPORT FOOTER')
+                _synthetic_page_number(page, page_index + 1, 4)
+        elif scenario == 'body_table_near_footer':
+            for page_index in range(3):
+                page = _synthetic_page(doc)
+                _synthetic_body_line(
+                    page,
+                    110,
+                    f'Synthetic body introduction {page_index + 1}.')
+                _synthetic_body_table(page, page_index)
+                _synthetic_footer(page, 'SYNTHETIC TABLE FOOTER')
+                _synthetic_page_number(page, page_index + 1, 3)
+        elif scenario == 'no_header_footer':
+            for page_index in range(3):
+                page = _synthetic_page(doc)
+                _synthetic_body_line(
+                    page,
+                    160,
+                    f'Unique synthetic body paragraph {page_index + 1}.')
+                _synthetic_body_line(
+                    page,
+                    190,
+                    f'No repeated header or footer appears on page {page_index + 1}.')
+        elif scenario == 'first_page_odd_even_headers':
+            for page_index in range(5):
+                page = _synthetic_page(doc)
+                if page_index == 0:
+                    header = 'SYNTHETIC FIRST PAGE HEADER'
+                elif (page_index + 1) % 2:
+                    header = 'SYNTHETIC ODD HEADER'
+                else:
+                    header = 'SYNTHETIC EVEN HEADER'
+                _synthetic_header(page, header)
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic body page {page_index + 1} with varied headers.')
+        elif scenario == 'paragraph_continuity':
+            page = _synthetic_page(doc)
+            _synthetic_header(page, 'SYNTHETIC CONTINUITY HEADER')
+            _synthetic_body_line(
+                page,
+                620,
+                'This synthetic paragraph continues across the page break and ends with a hyphen-')
+            _synthetic_footer(page, 'SYNTHETIC CONTINUITY FOOTER')
+            _synthetic_page_number(page, 1, 2)
+
+            page = _synthetic_page(doc)
+            _synthetic_header(page, 'SYNTHETIC CONTINUITY HEADER')
+            _synthetic_body_line(
+                page,
+                135,
+                'ated continuation text resumes in the same paragraph with matching style.')
+            _synthetic_body_line(
+                page,
+                170,
+                'A later body sentence remains available for paragraph grouping.')
+            _synthetic_footer(page, 'SYNTHETIC CONTINUITY FOOTER')
+            _synthetic_page_number(page, 2, 2)
+        else:
+            raise ValueError(f'Unknown synthetic scenario: {scenario}')
+
+        doc.save(str(path))
+    finally:
+        doc.close()
+
+
+def _synthetic_page(doc):
+    return doc.new_page(width=612, height=792)
+
+
+def _synthetic_header(page, text):
+    page.insert_text((54, 36), text, fontsize=9)
+
+
+def _synthetic_footer(page, text):
+    page.insert_text((54, 732), text, fontsize=9)
+
+
+def _synthetic_page_number(page, page_number, page_count):
+    page.insert_text((276, 758), f'Page {page_number} of {page_count}', fontsize=9)
+
+
+def _synthetic_body_line(page, y, text):
+    page.insert_text((54, y), text, fontsize=11)
+
+
+def _synthetic_body_table(page, page_index):
+    x0, y0, x1, y1 = 54, 596, 420, 668
+    page.draw_rect(fitz.Rect(x0, y0, x1, y1), width=0.5)
+    page.draw_line((x0, y0 + 24), (x1, y0 + 24), width=0.5)
+    page.draw_line((x0, y0 + 48), (x1, y0 + 48), width=0.5)
+    page.draw_line((190, y0), (190, y1), width=0.5)
+    _synthetic_body_line(page, 612, 'Body Table Header')
+    _synthetic_body_line(page, 636, f'Body table cell alpha {page_index + 1}')
+    _synthetic_body_line(page, 660, f'Body table cell beta {page_index + 1}')
+
+
+def _parse_synthetic_layout(pdf_path):
+    converter = Converter(str(pdf_path))
+    settings = converter.default_settings.copy()
+    settings.update({'layout_analysis': True})
+    try:
+        converter.load_pages().parse_document(**settings)
+        return converter.pages.layout_analysis_report
+    finally:
+        converter.close()
+
+
+def _synthetic_review_decisions(layout, approve_roles):
+    decisions = []
+    for candidate in layout['header_footer_exclusion_dry_run']['candidates']:
+        decision = (
+            'approve_exclude'
+            if candidate.get('proposed_role') in approve_roles else
+            'reject_exclude')
+        decisions.append({
+            'candidate_id': candidate.get('candidate_id', ''),
+            'fingerprint': candidate.get('fingerprint', ''),
+            'proposed_role': candidate.get('proposed_role', ''),
+            'action': candidate.get('action', ''),
+            'manual_decision': decision,
+            'checked_decisions': [decision],
+        })
+    return {
+        'decisions': decisions,
+        'summary': {
+            'candidate_count': len(decisions),
+            'decision_counts': dict(Counter(
+                decision['manual_decision'] for decision in decisions)),
+        },
+    }
+
+
+def _synthetic_filtering_report(layout, decisions):
+    return build_reviewed_header_footer_filter_report(
+        layout.get('pages', []),
+        layout.get('header_footer_exclusion_dry_run', {}),
+        decisions,
+        enabled=True,
+        apply=True)
+
+
+def _run_synthetic_document_parse_diagnostics(
+        pdf_path,
+        decisions,
+        expected_remove_count):
+    converter = Converter(str(pdf_path))
+    settings = converter.default_settings.copy()
+    settings.update({
+        'layout_analysis': True,
+        '_document_parse_raw_object_mapping_enabled': True,
+        '_document_parse_copied_raw_filtering_enabled': True,
+        '_document_parse_guarded_raw_apply_restore_enabled': True,
+        '_document_parse_filtering_review_decisions': decisions,
+        '_document_parse_mapping_expected_would_remove_count': expected_remove_count,
+        '_document_parse_copied_raw_filtering_expected_mapping_count': expected_remove_count,
+        '_document_parse_guarded_raw_apply_restore_expected_mapping_count': expected_remove_count,
+    })
+    try:
+        converter.load_pages().parse_document(**settings)
+        return {
+            'mapping': converter.pages._document_parse_raw_object_mapping_report,
+            'copied': converter.pages._document_parse_copied_raw_filtering_apply_report,
+            'guarded': converter.pages._document_parse_guarded_raw_apply_restore_report,
+        }
+    finally:
+        converter.close()
+
+
+def _synthetic_body_text_validation(
+        layout,
+        filtering_report,
+        baseline_body_text_block_count=None,
+        filtered_body_text_block_count=None):
+    original_signature = _body_text_signature(layout.get('pages', []))
+    filtered_pages = filtering_report.get('filtered_pages', []) or layout.get('pages', [])
+    filtered_signature = _body_text_signature(filtered_pages)
+    signature_preserved = original_signature == filtered_signature
+    count_delta = None
+    classification = 'signature_preserved' if signature_preserved else 'unsafe_body_text_loss'
+    if (
+            baseline_body_text_block_count is not None and
+            filtered_body_text_block_count is not None):
+        count_delta = filtered_body_text_block_count - baseline_body_text_block_count
+        if count_delta and signature_preserved:
+            classification = 'acceptable_boundary_or_grouping_shift'
+        elif count_delta:
+            classification = 'unsafe_body_text_loss'
+    return {
+        'original_signature': original_signature,
+        'filtered_signature': filtered_signature,
+        'body_text_signature_preserved': signature_preserved,
+        'body_text_block_delta': count_delta,
+        'body_text_block_delta_classification': classification,
+    }
+
+
+def _body_text_signature(pages):
+    return normalize_text(' '.join(
+        normalize_text(block.get('text', '')).lower()
+        for page in pages or []
+        for block in page.get('text_blocks', []) or []
+        if block.get('region') == REGION_BODY
+    ))
+
+
+def _removed_region_count(filtering_report, region):
+    return sum(
+        1
+        for page in filtering_report.get('pages', []) or []
+        for block in page.get('removed_blocks', []) or []
+        if block.get('region') == region)
+
+
+def _removed_text_match_count(filtering_report, text):
+    needle = normalize_text(text).lower()
+    return sum(
+        1
+        for page in filtering_report.get('pages', []) or []
+        for block in page.get('removed_blocks', []) or []
+        if needle in normalize_text(block.get('text_preview', '')).lower())
 
 
 def _corpus_warning_types(report):

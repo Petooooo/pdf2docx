@@ -83,3 +83,41 @@ Guardrails for Phase 2Y:
 - Require table visual approval evidence when table geometry changes.
 - Keep generated reports and DOCX outputs local-only unless they contain no
   extracted or private text.
+
+## Synthetic Fixture Regression Coverage
+
+Phase 2Z added committed synthetic regression coverage using generated PDFs
+created at test runtime with PyMuPDF. The generated PDFs are written to
+temporary directories only, use artificial test text, and are not committed.
+
+Covered by committed tests:
+
+- Repeated top header, repeated bottom footer, and repeated page numbers.
+- Reviewed approval removes only explicitly approved header/footer/page-number
+  candidates in internal report/guarded diagnostic paths.
+- Body-region removal remains 0 for approved synthetic filtering.
+- Body table-like content near a footer remains protected.
+- A no-header/no-footer negative control produces no removable candidates.
+- Raw `would_exclude` candidates are not treated as approved without explicit
+  review decisions.
+- First-page and odd/even header variation remains review-gated instead of
+  being treated as one all-page header.
+- A hyphenated paragraph crossing a page boundary remains available as body
+  text after approved header/footer filtering.
+- Body text signatures are checked independently of body TextBlock count so a
+  grouping-count delta can be reported as a warning instead of becoming an
+  automatic text-loss conclusion when text is preserved.
+
+Still not fully covered by committed synthetic tests:
+
+- Callout/text-box content that visually resembles a table.
+- List item and heading boundary interactions with reviewed filtering.
+- Full synthetic DOCX residual comparison with generated baseline/filtered
+  DOCX files.
+- Table parser geometry deltas under filtered parsing with a synthetic true
+  table fixture.
+
+Production default integration remains blocked. The new synthetic coverage
+reduces reliance on ignored local PDFs, but future phases should add the
+remaining synthetic scenarios before any public or default filtering behavior is
+considered.

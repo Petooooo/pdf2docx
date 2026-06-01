@@ -3618,3 +3618,144 @@ Committed synthetic fixture work should proceed next, using only safe generated
 documents. Production integration should remain blocked until the synthetic
 fixtures cover the approval flow and the `input3.pdf` body TextBlock delta has a
 committed regression analogue or a follow-up explanation.
+
+## Phase 2Z
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2Z added committed synthetic regression coverage for reviewed
+header/footer filtering. The tests generate small PDFs at runtime with PyMuPDF
+in temporary directories and use only artificial test text.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Synthetic fixture strategy
+
+- Synthetic PDFs are generated during tests using existing PyMuPDF/`fitz`
+  support.
+- Generated PDF binaries are temporary and are not committed.
+- The tests reuse internal layout-analysis/report helpers and internal
+  document-parse diagnostic hooks.
+- Heavy DOCX comparison is not run for every synthetic case; tests focus on
+  layout analysis, dry-run reviewed filtering, raw-object mapping, copied or
+  guarded diagnostics, and body text signature preservation.
+
+### Committed scenarios covered
+
+- Repeated text header, footer, and page numbers.
+- Body table-like content near a footer.
+- No-header/no-footer negative control.
+- Raw `would_exclude` without explicit approval.
+- First-page different header plus odd/even header variation.
+- Hyphenated paragraph continuation across a page break.
+
+### Validation results
+
+Synthetic repeated header/footer/page-number fixture:
+
+- Detected top/bottom/page-number candidates.
+- Explicitly approved candidates removed 12 synthetic boundary objects in the
+  internal report/guarded path.
+- Body-region removed count: 0.
+- Raw-object mapping exact matches: 12.
+- Guarded apply/restore restored the original raw-page fingerprint.
+
+Synthetic body table-like content near footer:
+
+- Approved footer/page-number filtering removed only boundary artifacts.
+- Body-region removed count: 0.
+- Body table-like text remained in the filtered body signature.
+
+Synthetic no-header/no-footer negative control:
+
+- No removable candidates were produced.
+- A separate repeated-boundary fixture confirmed raw `would_exclude` labels
+  remove nothing without explicit approval.
+
+Synthetic first-page/odd-even variation:
+
+- Repeated odd/even headers were low-support/review-gated.
+- No approved removal occurred from approving review-only top-region candidates.
+
+Synthetic paragraph continuity:
+
+- Cross-page continuation candidate was reported.
+- Approved header/footer filtering removed no body-region text.
+- Body text signature was preserved.
+- A simulated body TextBlock count delta is classified as
+  `acceptable_boundary_or_grouping_shift` when the text signature is preserved.
+
+### Remaining gaps
+
+- Callout/text-box content that looks table-like is not yet covered by committed
+  synthetic tests.
+- List item and heading boundary interactions are not yet covered by committed
+  synthetic tests.
+- Synthetic filtered DOCX residual comparison is still local/manual rather than
+  committed.
+- Synthetic true table geometry delta coverage remains to be added before
+  production integration.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 228 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 228 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local sample PDFs, generated local reports, `.venv/`,
+generated caches, and conversion test outputs remain ignored. No generated PDF
+fixture binary was committed; synthetic PDFs were created only in temporary test
+directories.
+
+Generated ignored local-only report:
+
+```text
+local_reports/synthetic-fixture-regression-report.md
+```
+
+### Phase 2Z recommendation
+
+Production integration should remain blocked. The next phase should add the
+remaining synthetic fixture coverage for callout/text-box content, list/heading
+boundaries, and synthetic table geometry/DOCX residual behavior before any
+default or public opt-in integration is attempted.
