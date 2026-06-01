@@ -8,6 +8,7 @@ header/footer analysis incrementally without changing conversion output.
 '''
 
 import re
+import os
 from collections import Counter, defaultdict
 
 
@@ -1593,6 +1594,83 @@ def build_table_geometry_visual_approval_gate_report(
         'recommendation': {
             'safe_to_attempt_phase_2v': gate_status == 'passed',
             'reason': _table_geometry_visual_gate_recommendation(gate_status, blocking_reasons),
+        },
+    }
+
+
+def build_filtered_docx_generation_comparison_report(
+        filtered_parse_experiment_report: dict = None,
+        table_visual_approval_gate_report: dict = None,
+        baseline_docx_path: str = '',
+        filtered_docx_path: str = '',
+        baseline_docx_metrics: dict = None,
+        filtered_docx_metrics: dict = None,
+        normal_conversion_check: dict = None,
+        body_serialization_residual_check: dict = None,
+        enabled: bool = False) -> dict:
+    '''Build a report for a local-only filtered DOCX generation experiment.'''
+    experiment_report = filtered_parse_experiment_report or {}
+    gate_report = table_visual_approval_gate_report or {}
+    baseline_metrics = dict(baseline_docx_metrics or {})
+    filtered_metrics = dict(filtered_docx_metrics or {})
+    normal_check = dict(normal_conversion_check or {})
+    residual_check = dict(body_serialization_residual_check or {})
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'filtered_docx_generation_comparison_local_only',
+            'summary': _filtered_docx_disabled_summary(
+                baseline_docx_path,
+                filtered_docx_path,
+                experiment_report,
+                gate_report),
+            'docx_files': _filtered_docx_files_report(
+                baseline_docx_path,
+                filtered_docx_path,
+                baseline_metrics,
+                filtered_metrics),
+            'safety_warnings': [],
+            'gate_report': _filtered_docx_gate_summary(gate_report),
+            'body_serialization_residual_check': residual_check,
+            'normal_conversion_check': normal_check,
+            'recommendation': {
+                'safe_to_attempt_phase_2w': False,
+                'reason': 'Filtered DOCX generation comparison is disabled.',
+            },
+        }
+
+    summary = _filtered_docx_summary(
+        experiment_report,
+        gate_report,
+        baseline_metrics,
+        filtered_metrics,
+        normal_check)
+    docx_files = _filtered_docx_files_report(
+        baseline_docx_path,
+        filtered_docx_path,
+        baseline_metrics,
+        filtered_metrics)
+    warnings = _filtered_docx_warnings(
+        summary,
+        docx_files,
+        gate_report,
+        normal_check)
+
+    return {
+        'enabled': True,
+        'policy': 'filtered_docx_generation_comparison_local_only',
+        'summary': summary,
+        'docx_files': docx_files,
+        'gate_report': _filtered_docx_gate_summary(gate_report),
+        'header_footer_pollution_reduction': dict(
+            experiment_report.get('header_footer_pollution_reduction') or {}),
+        'body_serialization_residual_check': residual_check,
+        'normal_conversion_check': normal_check,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2w': _filtered_docx_safe_for_phase_2w(summary, warnings),
+            'reason': _filtered_docx_recommendation(summary, warnings),
         },
     }
 
@@ -5379,6 +5457,223 @@ def _table_geometry_visual_gate_recommendation(gate_status: str, blocking_reason
         return 'Visual approval gate passed; Phase 2V may remain internal, opt-in, and guarded.'
     reason_types = ', '.join(reason.get('type', '') for reason in blocking_reasons or [])
     return f'Visual approval gate blocked; resolve: {reason_types}.'
+
+
+def _filtered_docx_disabled_summary(
+        baseline_docx_path: str,
+        filtered_docx_path: str,
+        experiment_report: dict,
+        gate_report: dict) -> dict:
+    experiment_summary = (experiment_report or {}).get('summary') or {}
+    return {
+        'baseline_docx_path': baseline_docx_path or '',
+        'filtered_docx_path': filtered_docx_path or '',
+        'table_visual_approval_gate_status': _filtered_docx_gate_summary(gate_report).get('gate_status'),
+        'baseline_raw_block_count': experiment_summary.get('baseline_raw_block_count', 0),
+        'filtered_raw_block_count': experiment_summary.get('filtered_raw_block_count', 0),
+        'removed_approved_header_footer_page_number_count': experiment_summary.get('removed_raw_block_count', 0),
+        'body_region_removed_count': experiment_summary.get('body_region_removed_count', 0),
+        'gate_status': 'blocked',
+    }
+
+
+def _filtered_docx_summary(
+        experiment_report: dict,
+        gate_report: dict,
+        baseline_docx_metrics: dict,
+        filtered_docx_metrics: dict,
+        normal_conversion_check: dict) -> dict:
+    experiment_summary = (experiment_report or {}).get('summary') or {}
+    pollution = (experiment_report or {}).get('header_footer_pollution_reduction') or {}
+    gate_status = _filtered_docx_gate_summary(gate_report).get('gate_status')
+    return {
+        'table_visual_approval_gate_status': gate_status,
+        'baseline_raw_block_count': experiment_summary.get('baseline_raw_block_count', 0),
+        'filtered_raw_block_count': experiment_summary.get('filtered_raw_block_count', 0),
+        'removed_approved_header_footer_page_number_count': experiment_summary.get('removed_raw_block_count', 0),
+        'baseline_parsed_text_block_count': experiment_summary.get('baseline_parsed_text_block_count', 0),
+        'filtered_parsed_text_block_count': experiment_summary.get('filtered_parsed_text_block_count', 0),
+        'baseline_body_text_block_count': experiment_summary.get('baseline_body_text_block_count', 0),
+        'filtered_body_text_block_count': experiment_summary.get('filtered_body_text_block_count', 0),
+        'baseline_table_count': experiment_summary.get('baseline_table_count', 0),
+        'filtered_table_count': experiment_summary.get('filtered_table_count', 0),
+        'baseline_image_count': experiment_summary.get('baseline_image_count', 0),
+        'filtered_image_count': experiment_summary.get('filtered_image_count', 0),
+        'baseline_section_count': experiment_summary.get('baseline_section_count', 0),
+        'filtered_section_count': experiment_summary.get('filtered_section_count', 0),
+        'body_region_removed_count': experiment_summary.get('body_region_removed_count', 0),
+        'rejected_unsure_layout_placeholder_removed_count': experiment_summary.get(
+            'rejected_unsure_layout_placeholder_removed_count', 0),
+        'parsed_text_block_delta': pollution.get('parsed_text_block_delta', 0),
+        'body_text_block_delta': pollution.get('body_text_block_delta', 0),
+        'baseline_docx_paragraph_count': baseline_docx_metrics.get('paragraph_count', 0),
+        'filtered_docx_paragraph_count': filtered_docx_metrics.get('paragraph_count', 0),
+        'baseline_docx_table_count': baseline_docx_metrics.get('table_count', 0),
+        'filtered_docx_table_count': filtered_docx_metrics.get('table_count', 0),
+        'normal_conversion_still_works': bool(normal_conversion_check.get('passed', False)),
+        'state_restored_or_reloaded': bool(normal_conversion_check.get('state_restored_or_reloaded', False)),
+    }
+
+
+def _filtered_docx_gate_summary(gate_report: dict) -> dict:
+    gate_report = gate_report or {}
+    summary = gate_report.get('summary') or {}
+    return {
+        'gate_status': gate_report.get('gate_status') or summary.get('gate_status') or '',
+        'approve_count': summary.get('approve_count', 0),
+        'reject_count': summary.get('reject_count', 0),
+        'unsure_count': summary.get('unsure_count', 0),
+        'missing_decision_count': summary.get('missing_decision_count', 0),
+        'expected_review_item_count': summary.get('expected_review_item_count', 0),
+        'parsed_review_item_count': summary.get('parsed_review_item_count', 0),
+    }
+
+
+def _filtered_docx_files_report(
+        baseline_docx_path: str,
+        filtered_docx_path: str,
+        baseline_docx_metrics: dict,
+        filtered_docx_metrics: dict) -> dict:
+    baseline_status = _filtered_docx_file_status(
+        baseline_docx_path,
+        baseline_docx_metrics)
+    filtered_status = _filtered_docx_file_status(
+        filtered_docx_path,
+        filtered_docx_metrics)
+    return {
+        'baseline': baseline_status,
+        'filtered': filtered_status,
+    }
+
+
+def _filtered_docx_file_status(path: str, metrics: dict) -> dict:
+    path = path or ''
+    exists = os.path.exists(path) if path else False
+    size = int(metrics.get('size_bytes') or (os.path.getsize(path) if exists else 0))
+    return {
+        'path': path,
+        'local_only_path': _is_local_report_path(path),
+        'exists': bool(metrics.get('exists', exists)),
+        'size_bytes': size,
+        'empty': size <= 0,
+        'paragraph_count': int(metrics.get('paragraph_count') or 0),
+        'table_count': int(metrics.get('table_count') or 0),
+    }
+
+
+def _is_local_report_path(path: str) -> bool:
+    normalized = normalize_text(path).replace('\\', '/')
+    return normalized.startswith('local_reports/')
+
+
+def _filtered_docx_warnings(
+        summary: dict,
+        docx_files: dict,
+        gate_report: dict,
+        normal_conversion_check: dict) -> list:
+    warnings = []
+    gate_summary = _filtered_docx_gate_summary(gate_report)
+    if gate_summary.get('gate_status') != 'passed':
+        warnings.append({
+            'type': 'table_visual_approval_gate_not_passed',
+            'gate_status': gate_summary.get('gate_status'),
+        })
+    for label in ('baseline', 'filtered'):
+        status = docx_files.get(label, {})
+        if not status.get('local_only_path'):
+            warnings.append({
+                'type': f'{label}_docx_path_not_local_only',
+                'path': status.get('path'),
+            })
+        if not status.get('exists'):
+            warnings.append({
+                'type': f'{label}_docx_missing',
+                'path': status.get('path'),
+            })
+        elif status.get('empty'):
+            warnings.append({
+                'type': f'{label}_docx_empty',
+                'path': status.get('path'),
+            })
+    if summary.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removed_during_filtered_docx_experiment',
+            'count': summary.get('body_region_removed_count'),
+        })
+    if summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+        warnings.append({
+            'type': 'blocked_or_placeholder_removed_during_filtered_docx_experiment',
+            'count': summary.get('rejected_unsure_layout_placeholder_removed_count'),
+        })
+    if summary.get('body_text_block_delta', 0):
+        warnings.append({
+            'type': 'body_text_block_count_changed',
+            'delta': summary.get('body_text_block_delta'),
+        })
+    if summary.get('baseline_image_count') != summary.get('filtered_image_count'):
+        warnings.append({
+            'type': 'image_count_changed_unexpectedly',
+            'baseline': summary.get('baseline_image_count'),
+            'filtered': summary.get('filtered_image_count'),
+        })
+    if summary.get('baseline_section_count') != summary.get('filtered_section_count'):
+        warnings.append({
+            'type': 'section_count_changed_unexpectedly',
+            'baseline': summary.get('baseline_section_count'),
+            'filtered': summary.get('filtered_section_count'),
+        })
+    if (
+            summary.get('baseline_table_count') != summary.get('filtered_table_count') and
+            gate_summary.get('gate_status') != 'passed'):
+        warnings.append({
+            'type': 'table_count_changed_without_visual_approval',
+            'baseline': summary.get('baseline_table_count'),
+            'filtered': summary.get('filtered_table_count'),
+        })
+    if not normal_conversion_check.get('passed', False):
+        warnings.append({
+            'type': 'normal_conversion_check_failed',
+            'message': normal_conversion_check.get('message', ''),
+        })
+    if not normal_conversion_check.get('state_restored_or_reloaded', False):
+        warnings.append({
+            'type': 'state_restore_or_reload_not_confirmed',
+        })
+    return warnings
+
+
+def _filtered_docx_safe_for_phase_2w(summary: dict, warnings: list) -> bool:
+    blocking_types = {
+        'table_visual_approval_gate_not_passed',
+        'baseline_docx_path_not_local_only',
+        'filtered_docx_path_not_local_only',
+        'baseline_docx_missing',
+        'filtered_docx_missing',
+        'baseline_docx_empty',
+        'filtered_docx_empty',
+        'body_region_removed_during_filtered_docx_experiment',
+        'blocked_or_placeholder_removed_during_filtered_docx_experiment',
+        'body_text_block_count_changed',
+        'image_count_changed_unexpectedly',
+        'section_count_changed_unexpectedly',
+        'table_count_changed_without_visual_approval',
+        'normal_conversion_check_failed',
+        'state_restore_or_reload_not_confirmed',
+    }
+    warning_types = {warning.get('type') for warning in warnings or []}
+    return (
+        summary.get('table_visual_approval_gate_status') == 'passed' and
+        summary.get('normal_conversion_still_works') and
+        summary.get('state_restored_or_reloaded') and
+        not warning_types.intersection(blocking_types))
+
+
+def _filtered_docx_recommendation(summary: dict, warnings: list) -> str:
+    if _filtered_docx_safe_for_phase_2w(summary, warnings):
+        if warnings:
+            return 'Filtered DOCX generation completed with non-blocking warnings; Phase 2W can remain internal and guarded.'
+        return 'Filtered DOCX generation comparison passed guarded checks; Phase 2W can remain internal and guarded.'
+    return 'Keep production integration blocked; resolve filtered DOCX generation warnings first.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:

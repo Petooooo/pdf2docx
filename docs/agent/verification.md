@@ -2788,3 +2788,143 @@ Result: confirmed local PDF/report/review image files, `.venv/`, generated cache
 ### Phase 2V recommendation
 
 Phase 2V is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. The table visual approval gate passed, but reviewed filtering must still not become default behavior and must not be connected to production conversion without another approval step.
+
+## Phase 2V
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2V added an internal/report-only filtered DOCX generation comparison helper and ran a local-only experiment that generated baseline and reviewed-filtered DOCX files under ignored paths. The filtered DOCX generation was gated by the Phase 2U table visual approval report and used only explicit `approve_exclude` header/footer/page-number review decisions.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local artifacts
+
+Generated ignored local-only files:
+
+```text
+local_reports/docx_compare/baseline.docx
+local_reports/docx_compare/filtered.docx
+local_reports/docx_compare/normal-check.docx
+local_reports/filtered-docx-generation-comparison-report.md
+```
+
+The local sample PDF, source reports, visual review files/images, generated DOCX files, and generated comparison report remained ignored and were not staged or committed.
+
+### Sample summary
+
+- Baseline DOCX path: `local_reports/docx_compare/baseline.docx`.
+- Filtered DOCX path: `local_reports/docx_compare/filtered.docx`.
+- Table visual approval gate status: `passed`.
+- Baseline raw block count: 790.
+- Filtered raw block count: 742.
+- Removed approved header/footer/page-number count: 48.
+- Baseline parsed text block count: 523.
+- Filtered parsed text block count: 486.
+- Baseline body TextBlock count: 393.
+- Filtered body TextBlock count: 393.
+- Baseline table count: 139.
+- Filtered table count: 127.
+- Baseline image count: 0.
+- Filtered image count: 0.
+- Baseline section count: 50.
+- Filtered section count: 50.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Baseline DOCX paragraph count: 364.
+- Filtered DOCX paragraph count: 351.
+- Baseline DOCX table count: 139.
+- Filtered DOCX table count: 127.
+
+DOCX file checks:
+
+- Baseline DOCX exists and is non-empty: 280904 bytes.
+- Filtered DOCX exists and is non-empty: 279079 bytes.
+- Normal conversion after the experiment still works: yes.
+- State restored or reloaded after the experiment: yes.
+
+Header/footer pollution reduction:
+
+- Removed boundary raw block count: 48.
+- Removed header/footer/page-number count: 48.
+- Parsed text block delta: 37.
+- Body text block delta: 0.
+
+Body serialization residual check:
+
+- Exact removed-text residual check found 1 residual unique string out of 15 removed strings.
+- This is recorded as a local diagnostic count only; no extracted text was committed.
+
+Table delta explanation:
+
+- The table count delta remains the known Phase 2P/2Q/2R/2S/2U delta.
+- Phase 2S showed the changed body table geometry items preserve row/column/cell counts and text/cell signatures.
+- Phase 2U visual approval gate passed for all 8 changed body table geometry items.
+
+Safety warnings:
+
+- None from the Phase 2V comparison helper.
+
+### Tests added
+
+- Filtered DOCX experiment requires explicit enablement.
+- Filtered DOCX experiment blocks when table visual approval gate is missing.
+- Filtered DOCX experiment blocks when table visual approval gate failed.
+- Baseline and filtered DOCX output paths are local-only/ignored-style paths.
+- Approved header/footer/page-number removal count is reported.
+- Body-region removal count remains zero.
+- Baseline vs filtered structural metrics are reported.
+- Generated DOCX path validation reports missing/empty files clearly.
+- Experiment requires restore/reload confirmation.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 184 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 184 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review image/generated DOCX files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample, generated report, review JSON, review image, or DOCX output was staged.
+
+### Phase 2W recommendation
+
+Phase 2W is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. The local filtered DOCX experiment produced non-empty baseline and filtered DOCX outputs, preserved body TextBlock, image, and section counts, and produced no blocking warnings; it still must not become default production behavior.

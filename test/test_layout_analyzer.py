@@ -31,6 +31,7 @@ build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
 build_table_geometry_visual_approval_gate_report = LayoutAnalyzer.build_table_geometry_visual_approval_gate_report
 build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
+build_filtered_docx_generation_comparison_report = LayoutAnalyzer.build_filtered_docx_generation_comparison_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
@@ -3573,6 +3574,114 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['gate_status'], 'blocked')
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2v'])
 
+    def test_filtered_docx_experiment_requires_explicit_enablement(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=_passed_table_visual_gate_report(),
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx')
+
+        self.assertFalse(report['enabled'])
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2w'])
+
+    def test_filtered_docx_experiment_blocks_missing_gate(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx',
+            baseline_docx_metrics=_docx_metrics(),
+            filtered_docx_metrics=_docx_metrics(),
+            normal_conversion_check=_normal_conversion_check(),
+            enabled=True)
+
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2w'])
+        self.assertIn(
+            'table_visual_approval_gate_not_passed',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_filtered_docx_experiment_blocks_failed_gate(self):
+        gate = _passed_table_visual_gate_report()
+        gate['gate_status'] = 'blocked'
+        gate['summary']['gate_status'] = 'blocked'
+
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=gate,
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx',
+            baseline_docx_metrics=_docx_metrics(),
+            filtered_docx_metrics=_docx_metrics(),
+            normal_conversion_check=_normal_conversion_check(),
+            enabled=True)
+
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2w'])
+        self.assertEqual(report['summary']['table_visual_approval_gate_status'], 'blocked')
+
+    def test_filtered_docx_experiment_reports_local_only_paths(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=_passed_table_visual_gate_report(),
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx',
+            baseline_docx_metrics=_docx_metrics(),
+            filtered_docx_metrics=_docx_metrics(),
+            normal_conversion_check=_normal_conversion_check(),
+            enabled=True)
+
+        self.assertTrue(report['docx_files']['baseline']['local_only_path'])
+        self.assertTrue(report['docx_files']['filtered']['local_only_path'])
+
+    def test_filtered_docx_experiment_reports_reviewed_removal_and_metrics(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=_passed_table_visual_gate_report(),
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx',
+            baseline_docx_metrics=_docx_metrics(paragraphs=20, tables=3),
+            filtered_docx_metrics=_docx_metrics(paragraphs=17, tables=2),
+            normal_conversion_check=_normal_conversion_check(),
+            enabled=True)
+
+        summary = report['summary']
+        self.assertEqual(summary['removed_approved_header_footer_page_number_count'], 48)
+        self.assertEqual(summary['body_region_removed_count'], 0)
+        self.assertEqual(summary['baseline_parsed_text_block_count'], 523)
+        self.assertEqual(summary['filtered_parsed_text_block_count'], 486)
+        self.assertEqual(summary['baseline_body_text_block_count'], 393)
+        self.assertEqual(summary['filtered_body_text_block_count'], 393)
+        self.assertEqual(summary['baseline_table_count'], 139)
+        self.assertEqual(summary['filtered_table_count'], 127)
+
+    def test_filtered_docx_experiment_reports_missing_and_empty_files(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=_passed_table_visual_gate_report(),
+            baseline_docx_path='local_reports/docx_compare/missing-baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/empty-filtered.docx',
+            filtered_docx_metrics=_docx_metrics(size=0),
+            normal_conversion_check=_normal_conversion_check(),
+            enabled=True)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertIn('baseline_docx_missing', warning_types)
+        self.assertIn('filtered_docx_empty', warning_types)
+
+    def test_filtered_docx_experiment_requires_state_reload_confirmation(self):
+        report = build_filtered_docx_generation_comparison_report(
+            filtered_parse_experiment_report=_filtered_docx_experiment_report(),
+            table_visual_approval_gate_report=_passed_table_visual_gate_report(),
+            baseline_docx_path='local_reports/docx_compare/baseline.docx',
+            filtered_docx_path='local_reports/docx_compare/filtered.docx',
+            baseline_docx_metrics=_docx_metrics(),
+            filtered_docx_metrics=_docx_metrics(),
+            normal_conversion_check={'passed': True, 'state_restored_or_reloaded': False},
+            enabled=True)
+
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2w'])
+        self.assertIn(
+            'state_restore_or_reload_not_confirmed',
+            {warning['type'] for warning in report['safety_warnings']})
+
 
 def _page(page_index, blocks):
     return {
@@ -4165,6 +4274,65 @@ def _table_visual_review_markdown(
             '',
         ])
     return '\n'.join(lines)
+
+
+def _filtered_docx_experiment_report():
+    return {
+        'summary': {
+            'baseline_raw_block_count': 790,
+            'filtered_raw_block_count': 742,
+            'removed_raw_block_count': 48,
+            'baseline_parsed_text_block_count': 523,
+            'filtered_parsed_text_block_count': 486,
+            'baseline_body_text_block_count': 393,
+            'filtered_body_text_block_count': 393,
+            'baseline_table_count': 139,
+            'filtered_table_count': 127,
+            'baseline_image_count': 0,
+            'filtered_image_count': 0,
+            'baseline_section_count': 50,
+            'filtered_section_count': 50,
+            'body_region_removed_count': 0,
+            'rejected_unsure_layout_placeholder_removed_count': 0,
+        },
+        'header_footer_pollution_reduction': {
+            'removed_header_footer_page_number_count': 48,
+            'parsed_text_block_delta': 37,
+            'body_text_block_delta': 0,
+        },
+    }
+
+
+def _passed_table_visual_gate_report():
+    return {
+        'gate_status': 'passed',
+        'summary': {
+            'gate_status': 'passed',
+            'expected_review_item_count': 8,
+            'parsed_review_item_count': 8,
+            'approve_count': 8,
+            'reject_count': 0,
+            'unsure_count': 0,
+            'missing_decision_count': 0,
+        },
+    }
+
+
+def _docx_metrics(size=1200, paragraphs=10, tables=2):
+    return {
+        'exists': True,
+        'size_bytes': size,
+        'paragraph_count': paragraphs,
+        'table_count': tables,
+    }
+
+
+def _normal_conversion_check(passed=True):
+    return {
+        'passed': passed,
+        'state_restored_or_reloaded': passed,
+        'message': '' if passed else 'conversion failed',
+    }
 
 
 def _table_record(
