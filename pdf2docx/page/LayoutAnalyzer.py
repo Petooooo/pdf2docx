@@ -1828,6 +1828,85 @@ def build_local_corpus_validation_summary_report(
     }
 
 
+def build_local_corpus_manual_review_pack(
+        sample_result: dict = None,
+        enabled: bool = False) -> dict:
+    '''Build local-only manual review data for one corpus sample.'''
+    sample = sample_result or {}
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_manual_review_pack_only',
+            'summary': _corpus_manual_review_disabled_summary(sample),
+            'review_items': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2y2': False,
+                'reason': 'Corpus manual review pack generation is disabled.',
+            },
+        }
+
+    missing_inputs = []
+    if not sample_result:
+        missing_inputs.append('corpus_sample_report')
+    layout_report = sample.get('layout_analysis_report') or {}
+    if not layout_report:
+        missing_inputs.append('layout_analysis_report')
+
+    items = _corpus_manual_review_items(layout_report) if layout_report else []
+    summary = _corpus_manual_review_pack_summary(sample, items, missing_inputs)
+    warnings = _corpus_manual_review_pack_warnings(summary, missing_inputs)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_manual_review_pack_only',
+        'sample_name': summary.get('sample_name', ''),
+        'summary': summary,
+        'review_items': items,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2y2': bool(
+                summary.get('ready_for_human_approval', False)),
+            'reason': _corpus_manual_review_pack_recommendation(summary, warnings),
+        },
+    }
+
+
+def build_local_corpus_manual_review_summary_report(
+        review_packs: list = None,
+        enabled: bool = False) -> dict:
+    '''Summarize selected local corpus manual review packs.'''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_manual_review_summary_only',
+            'summary': _corpus_manual_review_summary_empty(),
+            'samples': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2y2': False,
+                'reason': 'Corpus manual review summary is disabled.',
+            },
+        }
+
+    samples = [
+        _corpus_manual_review_sample_row(pack)
+        for pack in review_packs or []
+    ]
+    summary = _corpus_manual_review_summary(samples)
+    warnings = _corpus_manual_review_summary_warnings(samples)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_manual_review_summary_only',
+        'summary': summary,
+        'samples': samples,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2y2': bool(summary.get('review_packs_ready_count', 0)),
+            'reason': _corpus_manual_review_summary_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -7003,6 +7082,313 @@ def _corpus_validation_recommendation(summary: dict, warnings: list) -> str:
     if summary.get('recommended_for_phase_2y1_manual_review'):
         return 'Proceed only to local Phase 2Y1 manual review for the recommended samples; do not enable production integration.'
     return 'Corpus analysis completed, but no sample has clear reviewed-filtering candidates yet.'
+
+
+def _corpus_manual_review_disabled_summary(sample: dict) -> dict:
+    return {
+        'sample_name': sample.get('sample_name', '') if sample else '',
+        'candidate_count': 0,
+        'would_exclude_candidate_count': 0,
+        'would_remove_block_count': 0,
+        'review_only_candidate_count': 0,
+        'cautious_candidate_count': 0,
+        'placeholder_candidate_count': 0,
+        'ready_for_human_approval': False,
+        'recommended_next_action': 'disabled',
+        'auto_approved_decision_count': 0,
+    }
+
+
+def _corpus_manual_review_items(layout_report: dict) -> list:
+    dry_run = (layout_report or {}).get('header_footer_exclusion_dry_run') or {}
+    repeated_by_fingerprint = {
+        item.get('fingerprint', ''): item
+        for item in (layout_report or {}).get('repeated_text_candidates', []) or []
+    }
+    return [
+        _corpus_manual_review_item(candidate, repeated_by_fingerprint)
+        for candidate in dry_run.get('candidates', []) or []
+    ]
+
+
+def _corpus_manual_review_item(candidate: dict, repeated_by_fingerprint: dict) -> dict:
+    repeated = repeated_by_fingerprint.get(candidate.get('fingerprint', ''), {})
+    action = candidate.get('action', '')
+    proposed_role = candidate.get('proposed_role', '')
+    support_count = _readiness_int(candidate.get('support_count', 0))
+    confidence_label = candidate.get('confidence_label') or repeated.get('confidence_label', '')
+    text = repeated.get('text') or _first_instance_text(repeated) or ''
+    return {
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'proposed_role': proposed_role,
+        'action': action,
+        'region': candidate.get('region', ''),
+        'regions': list(candidate.get('regions', []) or []),
+        'affected_pages': list(candidate.get('affected_pages', []) or []),
+        'affected_page_numbers': [
+            _human_page_number(page_index)
+            for page_index in candidate.get('affected_pages', []) or []
+        ],
+        'support_count': support_count,
+        'page_count': _readiness_int(candidate.get('page_count', 0)),
+        'confidence_label': confidence_label,
+        'semantic_confidence': round(float(candidate.get(
+            'semantic_confidence',
+            repeated.get('semantic_confidence', 0.0)) or 0.0), 3),
+        'would_remove_count': support_count if action == ACTION_WOULD_EXCLUDE else 0,
+        'short_preview': _short_text_preview(text),
+        'positive_signals': list(candidate.get('positive_signals', []) or []),
+        'negative_signals': list(candidate.get('negative_signals', []) or []),
+        'reason': candidate.get('reason', ''),
+        'suggested_review_recommendation': _corpus_manual_review_recommendation(
+            candidate,
+            confidence_label),
+        'manual_decision_fields': {
+            'approve_exclude': False,
+            'reject_exclude': False,
+            'unsure': False,
+            'reviewer_notes': '',
+        },
+        'auto_approved': False,
+    }
+
+
+def _first_instance_text(repeated: dict) -> str:
+    instances = repeated.get('instances', []) or []
+    if not instances:
+        return ''
+    return normalize_text(instances[0].get('text', ''))
+
+
+def _corpus_manual_review_recommendation(candidate: dict, confidence_label: str) -> str:
+    if candidate.get('action') == ACTION_WOULD_EXCLUDE:
+        return 'manual_review_required'
+    if candidate.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER:
+        return 'layout_placeholder_review_only'
+    if confidence_label == 'cautious':
+        return 'cautious_review_only'
+    if candidate.get('action') == ACTION_REVIEW:
+        return 'needs_visual_review'
+    return 'keep_or_skip'
+
+
+def _corpus_manual_review_pack_summary(
+        sample: dict,
+        items: list,
+        missing_inputs: list) -> dict:
+    page_count = _readiness_int(sample.get('page_count', 0))
+    pages_analyzed = _readiness_int(_first_present(
+        sample.get('pages_analyzed'),
+        page_count))
+    bounded = bool(sample.get('partial_or_bounded', False)) or (
+        page_count and pages_analyzed < page_count)
+    warning_types = [
+        warning.get('type')
+        for warning in sample.get('warnings', []) or []
+        if isinstance(warning, dict)
+    ]
+    would_exclude_count = sum(
+        1 for item in items or []
+        if item.get('action') == ACTION_WOULD_EXCLUDE)
+    summary = {
+        'sample_name': sample.get('sample_name') or sample.get('file_name', ''),
+        'file_path': sample.get('file_path', ''),
+        'page_count': page_count,
+        'pages_analyzed': pages_analyzed,
+        'analyzed_pages': list(sample.get('analyzed_pages', []) or []),
+        'analyzed_page_numbers': list(sample.get('analyzed_page_numbers', []) or []),
+        'analysis_mode': sample.get('analysis_mode', ''),
+        'bounded_analysis_only': bounded,
+        'candidate_count': len(items or []),
+        'would_exclude_candidate_count': would_exclude_count,
+        'would_remove_block_count': sum(
+            _readiness_int(item.get('would_remove_count', 0))
+            for item in items or []),
+        'review_only_candidate_count': sum(
+            1 for item in items or []
+            if (
+                item.get('action') == ACTION_REVIEW or
+                item.get('proposed_role') == ROLE_REVIEW_ONLY)),
+        'cautious_candidate_count': sum(
+            1 for item in items or []
+            if item.get('confidence_label') == 'cautious'),
+        'placeholder_candidate_count': sum(
+            1 for item in items or []
+            if (
+                item.get('confidence_label') == 'placeholder' or
+                item.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER)),
+        'auto_approved_decision_count': sum(
+            1 for item in items or []
+            if item.get('auto_approved')),
+        'manual_approval_required': bool(items),
+        'ready_for_human_approval': bool(items) and not missing_inputs,
+        'source_warning_types': warning_types,
+        'missing_inputs': list(missing_inputs or []),
+    }
+    summary['recommended_next_action'] = _corpus_manual_review_next_action(summary)
+    return summary
+
+
+def _corpus_manual_review_next_action(summary: dict) -> str:
+    if summary.get('missing_inputs'):
+        return 'needs_corpus_report'
+    if not summary.get('candidate_count', 0):
+        return 'skip_no_candidates'
+    if summary.get('bounded_analysis_only'):
+        return 'analysis_only_large_sample'
+    if summary.get('would_exclude_candidate_count', 0):
+        return 'manual_approve_then_full_local_pipeline'
+    return 'needs_visual_review'
+
+
+def _corpus_manual_review_pack_warnings(summary: dict, missing_inputs: list) -> list:
+    warnings = []
+    for missing in missing_inputs or []:
+        warnings.append({
+            'type': 'missing_input',
+            'input': missing,
+        })
+    if summary.get('bounded_analysis_only'):
+        warnings.append({
+            'type': 'bounded_large_sample_review',
+            'pages_analyzed': summary.get('pages_analyzed'),
+            'page_count': summary.get('page_count'),
+        })
+    if summary.get('auto_approved_decision_count', 0):
+        warnings.append({
+            'type': 'auto_approval_present',
+            'count': summary.get('auto_approved_decision_count'),
+        })
+    if not summary.get('candidate_count', 0) and not missing_inputs:
+        warnings.append({
+            'type': 'no_candidates',
+        })
+    return warnings
+
+
+def _corpus_manual_review_pack_recommendation(summary: dict, warnings: list) -> str:
+    if summary.get('missing_inputs'):
+        return 'Manual review pack is incomplete; regenerate corpus analysis first.'
+    if summary.get('bounded_analysis_only'):
+        return 'Manual review can proceed on the bounded large-sample subset only.'
+    if summary.get('would_exclude_candidate_count', 0):
+        return 'Ready for human approval review; do not apply filtering until decisions are explicit.'
+    if summary.get('candidate_count', 0):
+        return 'Candidates require visual/manual review, but none should be auto-approved.'
+    return 'No candidates need manual review for this sample.'
+
+
+def _corpus_manual_review_summary_empty() -> dict:
+    return {
+        'selected_sample_count': 0,
+        'review_packs_ready_count': 0,
+        'missing_review_pack_count': 0,
+        'total_candidate_count': 0,
+        'total_would_exclude_candidate_count': 0,
+        'total_would_remove_block_count': 0,
+        'manual_approval_required_count': 0,
+        'auto_approved_decision_count': 0,
+        'recommended_next_actions': {},
+    }
+
+
+def _corpus_manual_review_sample_row(pack: dict) -> dict:
+    if not pack or not isinstance(pack, dict):
+        return {
+            'sample_name': '',
+            'ready_for_human_approval': False,
+            'candidate_count': 0,
+            'would_exclude_candidate_count': 0,
+            'would_remove_block_count': 0,
+            'review_only_candidate_count': 0,
+            'cautious_candidate_count': 0,
+            'placeholder_candidate_count': 0,
+            'bounded_analysis_only': False,
+            'recommended_next_action': 'needs_corpus_report',
+            'warnings': [{'type': 'missing_corpus_manual_review_pack'}],
+        }
+    summary = pack.get('summary') or {}
+    warnings = [dict(warning) for warning in pack.get('warnings', []) or []]
+    if not pack.get('enabled', False):
+        warnings.append({'type': 'manual_review_pack_disabled'})
+    return {
+        'sample_name': summary.get('sample_name', pack.get('sample_name', '')),
+        'ready_for_human_approval': bool(summary.get('ready_for_human_approval', False)),
+        'candidate_count': _readiness_int(summary.get('candidate_count', 0)),
+        'would_exclude_candidate_count': _readiness_int(
+            summary.get('would_exclude_candidate_count', 0)),
+        'would_remove_block_count': _readiness_int(
+            summary.get('would_remove_block_count', 0)),
+        'review_only_candidate_count': _readiness_int(
+            summary.get('review_only_candidate_count', 0)),
+        'cautious_candidate_count': _readiness_int(
+            summary.get('cautious_candidate_count', 0)),
+        'placeholder_candidate_count': _readiness_int(
+            summary.get('placeholder_candidate_count', 0)),
+        'bounded_analysis_only': bool(summary.get('bounded_analysis_only', False)),
+        'manual_approval_required': bool(summary.get('manual_approval_required', False)),
+        'auto_approved_decision_count': _readiness_int(
+            summary.get('auto_approved_decision_count', 0)),
+        'recommended_next_action': summary.get('recommended_next_action', ''),
+        'warnings': warnings,
+    }
+
+
+def _corpus_manual_review_summary(samples: list) -> dict:
+    action_counts = Counter(
+        sample.get('recommended_next_action', '')
+        for sample in samples or [])
+    return {
+        'selected_sample_count': len(samples or []),
+        'review_packs_ready_count': sum(
+            1 for sample in samples or []
+            if sample.get('ready_for_human_approval')),
+        'missing_review_pack_count': sum(
+            1 for sample in samples or []
+            if sample.get('recommended_next_action') == 'needs_corpus_report'),
+        'total_candidate_count': sum(
+            sample.get('candidate_count', 0)
+            for sample in samples or []),
+        'total_would_exclude_candidate_count': sum(
+            sample.get('would_exclude_candidate_count', 0)
+            for sample in samples or []),
+        'total_would_remove_block_count': sum(
+            sample.get('would_remove_block_count', 0)
+            for sample in samples or []),
+        'manual_approval_required_count': sum(
+            1 for sample in samples or []
+            if sample.get('manual_approval_required')),
+        'auto_approved_decision_count': sum(
+            sample.get('auto_approved_decision_count', 0)
+            for sample in samples or []),
+        'recommended_next_actions': dict(sorted(action_counts.items())),
+    }
+
+
+def _corpus_manual_review_summary_warnings(samples: list) -> list:
+    warnings = []
+    for sample in samples or []:
+        for warning in sample.get('warnings', []) or []:
+            item = dict(warning)
+            item['sample_name'] = sample.get('sample_name', '')
+            warnings.append(item)
+    if any(sample.get('auto_approved_decision_count', 0) for sample in samples or []):
+        warnings.append({
+            'type': 'auto_approval_present',
+        })
+    return warnings
+
+
+def _corpus_manual_review_summary_recommendation(summary: dict, warnings: list) -> str:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    if 'missing_corpus_manual_review_pack' in warning_types:
+        return 'Some review packs are missing; regenerate local corpus review packs before Phase 2Y2.'
+    if summary.get('auto_approved_decision_count', 0):
+        return 'Auto-approved decisions are present; discard and regenerate packs without approvals.'
+    if summary.get('review_packs_ready_count', 0):
+        return 'Manual review packs are ready; human approval is required before any Phase 2Y2 filtering experiment.'
+    return 'No selected sample is ready for manual approval.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:

@@ -36,6 +36,8 @@ build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_vi
 build_filtered_docx_generation_comparison_report = LayoutAnalyzer.build_filtered_docx_generation_comparison_report
 build_filtered_docx_residual_structure_report = LayoutAnalyzer.build_filtered_docx_residual_structure_report
 build_local_corpus_validation_summary_report = LayoutAnalyzer.build_local_corpus_validation_summary_report
+build_local_corpus_manual_review_pack = LayoutAnalyzer.build_local_corpus_manual_review_pack
+build_local_corpus_manual_review_summary_report = LayoutAnalyzer.build_local_corpus_manual_review_summary_report
 build_reviewed_filtering_feature_readiness_report = LayoutAnalyzer.build_reviewed_filtering_feature_readiness_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
@@ -4035,6 +4037,100 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(report['enabled'])
         self.assertEqual(report['summary']['sample_count'], 0)
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2y1'])
+
+    def test_corpus_manual_review_summary_handles_multiple_selected_samples(self):
+        packs = [
+            build_local_corpus_manual_review_pack(
+                _corpus_sample_result('input3.pdf', _corpus_layout_report()),
+                enabled=True),
+            build_local_corpus_manual_review_pack(
+                _corpus_sample_result(
+                    'input6_large.pdf',
+                    _corpus_layout_report(),
+                    page_count=756,
+                    pages_analyzed=15,
+                    analysis_mode='analysis_only_bounded_subset'),
+                enabled=True),
+        ]
+
+        report = build_local_corpus_manual_review_summary_report(
+            packs,
+            enabled=True)
+
+        self.assertEqual(report['summary']['selected_sample_count'], 2)
+        self.assertEqual(report['summary']['review_packs_ready_count'], 2)
+        self.assertEqual(report['summary']['total_would_exclude_candidate_count'], 4)
+        self.assertEqual(report['summary']['total_would_remove_block_count'], 12)
+
+    def test_corpus_manual_review_pack_marks_candidates_ready_for_review(self):
+        pack = build_local_corpus_manual_review_pack(
+            _corpus_sample_result('input3.pdf', _corpus_layout_report()),
+            enabled=True)
+
+        self.assertTrue(pack['summary']['ready_for_human_approval'])
+        self.assertEqual(
+            pack['summary']['recommended_next_action'],
+            'manual_approve_then_full_local_pipeline')
+        self.assertTrue(pack['summary']['manual_approval_required'])
+
+    def test_corpus_manual_review_pack_marks_large_sample_bounded_only(self):
+        pack = build_local_corpus_manual_review_pack(
+            _corpus_sample_result(
+                'input6_large.pdf',
+                _corpus_layout_report(),
+                page_count=756,
+                pages_analyzed=15,
+                analysis_mode='analysis_only_bounded_subset'),
+            enabled=True)
+
+        self.assertTrue(pack['summary']['bounded_analysis_only'])
+        self.assertEqual(
+            pack['summary']['recommended_next_action'],
+            'analysis_only_large_sample')
+        self.assertIn(
+            'bounded_large_sample_review',
+            {warning['type'] for warning in pack['warnings']})
+
+    def test_corpus_manual_review_pack_creates_no_auto_approval(self):
+        pack = build_local_corpus_manual_review_pack(
+            _corpus_sample_result('input3.pdf', _corpus_layout_report()),
+            enabled=True)
+
+        self.assertEqual(pack['summary']['auto_approved_decision_count'], 0)
+        self.assertTrue(all(
+            not item['manual_decision_fields']['approve_exclude']
+            for item in pack['review_items']))
+        self.assertTrue(all(
+            item['auto_approved'] is False
+            for item in pack['review_items']))
+
+    def test_corpus_manual_review_summary_reports_missing_pack_clearly(self):
+        report = build_local_corpus_manual_review_summary_report(
+            [None],
+            enabled=True)
+
+        self.assertEqual(report['summary']['missing_review_pack_count'], 1)
+        self.assertIn(
+            'missing_corpus_manual_review_pack',
+            {warning['type'] for warning in report['warnings']})
+
+    def test_corpus_manual_review_pack_generation_does_not_mutate_input(self):
+        sample = _corpus_sample_result('input3.pdf', _corpus_layout_report())
+        before = json.loads(json.dumps(sample))
+
+        build_local_corpus_manual_review_pack(sample, enabled=True)
+
+        self.assertEqual(sample, before)
+
+    def test_corpus_manual_review_disabled_mode_is_clear(self):
+        pack = build_local_corpus_manual_review_pack(
+            _corpus_sample_result('input3.pdf', _corpus_layout_report()))
+        summary = build_local_corpus_manual_review_summary_report([pack])
+
+        self.assertFalse(pack['enabled'])
+        self.assertFalse(summary['enabled'])
+        self.assertEqual(pack['summary']['candidate_count'], 0)
+        self.assertEqual(summary['summary']['selected_sample_count'], 0)
 
 
 def _page(page_index, blocks):

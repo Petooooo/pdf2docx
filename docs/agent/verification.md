@@ -3319,3 +3319,138 @@ Committed synthetic fixture work can proceed after this phase, but it should use
 safe generated content only and should not reuse local sample text. Before any
 production integration attempt, Phase 2Y1 should manually review the local
 corpus candidates from `input3.pdf` and the bounded `input6_large.pdf` analysis.
+
+## Phase 2Y1
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2Y1 added internal/local-only manual review pack helpers for selected
+corpus samples and generated richer review packs for the two samples Phase 2Y0
+recommended for deeper review.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+- No filtered parse or DOCX generation experiment was run for these corpus
+  samples.
+
+### Local artifacts
+
+Generated ignored local-only review files:
+
+```text
+local_reports/corpus_validation/input3-header-footer-review.md
+local_reports/corpus_validation/input6-large-header-footer-review.md
+local_reports/corpus-manual-review-summary.md
+```
+
+The local sample PDFs, Phase 2Y0 corpus reports, Phase 2Y1 review packs, `.venv/`,
+generated caches, and conversion outputs remained ignored and were not staged or
+committed.
+
+### Selected samples
+
+- `input3.pdf`
+- `input6_large.pdf`
+
+`input6_large.pdf` was processed with bounded analysis only. The analyzed page
+numbers were:
+
+- 1-5
+- 377-381
+- 752-756
+
+No subset PDFs were created.
+
+### Manual review pack summary
+
+Overall:
+
+- Selected sample count: 2.
+- Review packs ready for human approval: 2.
+- Total candidate count: 8.
+- Total would-exclude candidate count: 3.
+- Total would-remove block count: 35.
+- Manual approval required count: 2.
+- Auto-approved decision count: 0.
+
+Per selected sample:
+
+- `input3.pdf`: 5 candidates, 1 would-exclude candidate, 5 would-remove blocks,
+  4 review-only candidates, 1 cautious candidate, 1 placeholder candidate,
+  warnings: none, recommended next action:
+  `manual_approve_then_full_local_pipeline`.
+- `input6_large.pdf`: 3 candidates, 2 would-exclude candidates, 30
+  would-remove blocks in the bounded subset, 1 review-only candidate, 0 cautious
+  candidates, 0 placeholder candidates, warnings:
+  `bounded_large_sample_review`, recommended next action:
+  `analysis_only_large_sample`.
+
+Manual approval is required before Phase 2Y2. No candidate was approved or
+applied in Phase 2Y1.
+
+### Tests added
+
+- Manual review summary builder handles multiple selected samples.
+- Selected samples with candidates are marked ready for manual review.
+- Large sample is marked bounded-analysis-only.
+- No auto-approval is created.
+- Missing review pack/report is reported clearly.
+- Local review pack generation does not mutate inputs.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 215 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 215 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local sample PDFs, generated review packs/reports, `.venv/`,
+generated caches, and conversion test outputs remain ignored. No local sample
+PDF, generated report, review pack, image, or DOCX output was staged.
+
+### Phase 2Y2 recommendation
+
+Phase 2Y2 should remain local-only and should consume only explicit human
+decisions from the Phase 2Y1 review packs. `input3.pdf` may proceed to a local
+manual-approval-driven pipeline only after review decisions are filled in.
+`input6_large.pdf` should remain bounded until a later explicit approval allows
+larger or full-document processing.
