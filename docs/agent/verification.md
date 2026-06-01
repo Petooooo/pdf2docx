@@ -2473,3 +2473,114 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2S recommendation
 
 Phase 2S is not safe as production integration. The next phase should remain internal/report-only and inspect the 8 changed body table geometries, especially whether bbox-only changes are harmless stream-table boundary shifts or signs of body table structure instability.
+
+## Phase 2S
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2S added an internal/report-only body table geometry delta safety helper. The helper focuses only on changed common body-region tables from Phase 2R and compares baseline vs filtered table structure using bbox deltas, row/column/cell counts, cell bbox summaries, and cell text signatures.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/body-table-geometry-delta-safety-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, filtered parse report, table delta report, root-cause report, and generated geometry safety report remained ignored.
+
+### Sample summary
+
+- Changed body table geometry count: 8.
+- Harmless bbox-only shift count: 0.
+- Stream-table boundary adjustment count: 8.
+- Possible body table structure change count: 0.
+- Possible cell loss count: 0.
+- Unchanged row/column/cell count: 8.
+- Changed row/column/cell count: 0.
+- Text/cell signature preserved count: 8.
+- Text/cell signature changed count: 0.
+- Unsafe count: 0.
+- Review count: 8.
+- Safe count: 0.
+- Affected pages: 5, 8, and 10.
+- Classification: `review`.
+
+Interpretation:
+
+- The 8 changed body table geometries no longer look like body table loss.
+- Row count, column count, cell count, and cell text signatures were preserved for all 8 changed body tables.
+- The remaining changes are best treated as stream-table boundary adjustments, not as safe production behavior yet.
+- Because severity remains `review`, Phase 2T should stay internal, explicitly opt-in, and guarded.
+
+Safety warnings:
+
+- None from the Phase 2S helper.
+
+### Tests added
+
+- Bbox-only shift with unchanged rows, columns, cells, and text is classified as harmless/review-safe.
+- Row count change triggers unsafe.
+- Column count change triggers unsafe.
+- Cell count change triggers unsafe.
+- Cell text signature change triggers unsafe.
+- Bbox edge shift near an approved removed candidate is detected.
+- Body-intersecting bbox shrink without text/cell loss is classified as review.
+- Insufficient evidence remains review.
+- Input baseline/filtered parse outputs are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 161 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 161 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2T recommendation
+
+Phase 2T is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. It should not be production integration yet; the 8 body table geometry changes are structurally preserved but still review-level stream-table boundary adjustments.

@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
@@ -3166,6 +3167,180 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['classification'], 'disabled')
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2s'])
 
+    def test_body_table_geometry_bbox_only_shift_is_review_safe(self):
+        cell_bboxes = [[50, 400, 285, 430], [285, 400, 520, 430]]
+        baseline = _parse_metrics_with_tables([
+            _table_record(
+                'body-table', 0, REGION_BODY, [50, 400, 520, 460],
+                rows=1, cols=2, cells=2, cell_bboxes=cell_bboxes),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record(
+                'body-table-filtered', 0, REGION_BODY, [50, 400, 520, 450],
+                rows=1, cols=2, cells=2, cell_bboxes=cell_bboxes),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+        finding = report['findings'][0]
+
+        self.assertEqual(finding['likely_cause'], 'harmless_bbox_boundary_shift')
+        self.assertEqual(finding['severity'], 'review')
+        self.assertTrue(finding['text_cell_signature_preserved'])
+
+    def test_body_table_geometry_row_count_change_is_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2, cells=4),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 460], rows=3, cols=2, cells=4),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        self.assertEqual(report['findings'][0]['likely_cause'], 'possible_body_table_structure_change')
+        self.assertEqual(report['findings'][0]['severity'], 'unsafe')
+
+    def test_body_table_geometry_column_count_change_is_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2, cells=4),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=3, cells=4),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        self.assertEqual(report['findings'][0]['likely_cause'], 'possible_body_table_structure_change')
+        self.assertEqual(report['findings'][0]['severity'], 'unsafe')
+
+    def test_body_table_geometry_cell_count_change_is_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2, cells=4),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2, cells=3),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        self.assertEqual(report['findings'][0]['likely_cause'], 'possible_cell_loss')
+        self.assertEqual(report['findings'][0]['severity'], 'unsafe')
+
+    def test_body_table_geometry_cell_text_signature_change_is_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], cell_texts=['A', 'B', 'C', 'D']),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 450], cell_texts=['A', 'B', 'C', 'X']),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        self.assertEqual(report['findings'][0]['likely_cause'], 'possible_body_table_structure_change')
+        self.assertEqual(report['findings'][0]['severity'], 'unsafe')
+
+    def test_body_table_geometry_bbox_edge_shift_near_removed_candidate_is_detected(self):
+        cell_bboxes = [[50, 400, 285, 430], [285, 400, 520, 430]]
+        baseline = _parse_metrics_with_tables([
+            _table_record(
+                'body-table', 0, REGION_BODY, [50, 400, 520, 460],
+                rows=1, cols=2, cells=2, cell_bboxes=cell_bboxes),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record(
+                'body-table-filtered', 0, REGION_BODY, [50, 400, 520, 450],
+                rows=1, cols=2, cells=2, cell_bboxes=cell_bboxes),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 455, 520, 470], ROLE_FOOTER),
+            ])],
+            enabled=True)
+        finding = report['findings'][0]
+
+        self.assertTrue(finding['changed_bbox_edge_near_removed_candidate'])
+        self.assertEqual(finding['likely_cause'], 'header_footer_boundary_cleanup')
+        self.assertEqual(finding['severity'], 'safe')
+
+    def test_body_table_geometry_body_shrink_without_text_loss_is_review(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 470]),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 410, 520, 460]),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+        finding = report['findings'][0]
+
+        self.assertEqual(finding['likely_cause'], 'stream_table_boundary_adjustment')
+        self.assertEqual(finding['severity'], 'review')
+        self.assertTrue(finding['changed_area_intersects_body_text'])
+
+    def test_body_table_geometry_insufficient_evidence_remains_review(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 470], include_cells=False),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 410, 520, 460], include_cells=False),
+        ])
+
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        self.assertEqual(report['findings'][0]['likely_cause'], 'insufficient_evidence')
+        self.assertEqual(report['findings'][0]['severity'], 'review')
+
+    def test_body_table_geometry_report_does_not_mutate_inputs(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 470]),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 410, 520, 460]),
+        ])
+        before = json.dumps({'baseline': baseline, 'filtered': filtered}, sort_keys=True)
+
+        build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        after = json.dumps({'baseline': baseline, 'filtered': filtered}, sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_body_table_geometry_disabled_mode_is_clear(self):
+        report = build_body_table_geometry_delta_safety_report(
+            baseline_parse_metrics=_parse_metrics_with_tables([
+                _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 470]),
+            ]))
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['classification'], 'disabled')
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2t'])
+
 
 def _page(page_index, blocks):
     return {
@@ -3675,9 +3850,20 @@ def _parse_metrics_with_tables(tables):
     }
 
 
-def _table_record(table_id, page_index, region, bbox, rows=2, cols=2, cells=None):
-    cells = cells if cells is not None else rows * cols
-    return {
+def _table_record(
+        table_id,
+        page_index,
+        region,
+        bbox,
+        rows=2,
+        cols=2,
+        cells=None,
+        cell_texts=None,
+        cell_bboxes=None,
+        include_cells=True):
+    cells = cells if cells is not None else (
+        len(cell_texts) if cell_texts is not None else rows * cols)
+    record = {
         'table_id': table_id,
         'page_index': page_index,
         'page_number': page_index + 1,
@@ -3691,6 +3877,45 @@ def _table_record(table_id, page_index, region, bbox, rows=2, cols=2, cells=None
         'table_type': 'stream',
         'text_preview': 'short table preview',
     }
+    if include_cells:
+        texts = list(cell_texts) if cell_texts is not None else [
+            f'cell {index + 1}' for index in range(cells)
+        ]
+        bboxes = list(cell_bboxes) if cell_bboxes is not None else _table_cell_bboxes(
+            bbox, rows, cols, cells)
+        cell_summaries = []
+        for index in range(cells):
+            text = texts[index] if index < len(texts) else ''
+            cell_bbox = bboxes[index] if index < len(bboxes) else bbox
+            cell_summaries.append({
+                'row_index': index // max(cols, 1),
+                'column_index': index % max(cols, 1),
+                'bbox': list(cell_bbox),
+                'text_preview': text,
+            })
+        record['cell_summaries'] = cell_summaries
+        record['cell_text_signature'] = [cell.get('text_preview', '') for cell in cell_summaries]
+        record['cell_bbox_signature'] = [list(cell.get('bbox', [])) for cell in cell_summaries]
+    return record
+
+
+def _table_cell_bboxes(bbox, rows, cols, cells):
+    left, top, right, bottom = [float(value) for value in bbox]
+    rows = max(int(rows or 1), 1)
+    cols = max(int(cols or 1), 1)
+    width = (right - left) / cols
+    height = (bottom - top) / rows
+    bboxes = []
+    for index in range(cells):
+        row = index // cols
+        col = index % cols
+        bboxes.append([
+            round(left + col * width, 2),
+            round(top + row * height, 2),
+            round(left + (col + 1) * width, 2),
+            round(top + (row + 1) * height, 2),
+        ])
+    return bboxes
 
 
 def _removed_objects_page(objects, page_index=0):

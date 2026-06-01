@@ -706,8 +706,51 @@ class Pages(BaseCollection):
                 'stream' if getattr(table, 'is_stream_table_block', False) else
                 'lattice' if getattr(table, 'is_lattice_table_block', False) else
                 ''),
+            'cell_summaries': Pages._table_cell_summaries(rows),
+            'cell_text_signature': Pages._table_cell_text_signature(rows),
+            'cell_bbox_signature': Pages._table_cell_bbox_signature(rows),
             'text_preview': Pages._table_text_preview(table),
         }
+
+
+    @staticmethod
+    def _table_cell_summaries(rows:list):
+        cells = []
+        for row_index, row in enumerate(rows or []):
+            for column_index, cell in enumerate(row):
+                if not cell:
+                    cells.append({
+                        'row_index': row_index,
+                        'column_index': column_index,
+                        'bbox': [0.0, 0.0, 0.0, 0.0],
+                        'text_preview': '',
+                        'empty': True,
+                    })
+                    continue
+                cells.append({
+                    'row_index': row_index,
+                    'column_index': column_index,
+                    'bbox': Pages._json_bbox(getattr(cell, 'bbox', None)),
+                    'text_preview': Pages._normalize_table_text(getattr(cell, 'text', '')),
+                    'empty': False,
+                })
+        return cells
+
+
+    @staticmethod
+    def _table_cell_text_signature(rows:list):
+        return [
+            cell.get('text_preview', '')
+            for cell in Pages._table_cell_summaries(rows)
+        ]
+
+
+    @staticmethod
+    def _table_cell_bbox_signature(rows:list):
+        return [
+            cell.get('bbox', [0.0, 0.0, 0.0, 0.0])
+            for cell in Pages._table_cell_summaries(rows)
+        ]
 
 
     @staticmethod
@@ -725,6 +768,18 @@ class Pages(BaseCollection):
                 parts.append(str(row or ''))
         text = ' '.join(part.strip() for part in parts if part and part.strip())
         text = ' '.join(text.split())
+        if len(text) <= max_length:
+            return text
+        return text[:max_length-3].rstrip() + '...'
+
+
+    @staticmethod
+    def _normalize_table_text(text, max_length:int=80):
+        if text is None:
+            return ''
+        if isinstance(text, list):
+            text = ' '.join(str(item or '') for item in text)
+        text = ' '.join(str(text).split())
         if len(text) <= max_length:
             return text
         return text[:max_length-3].rstrip() + '...'

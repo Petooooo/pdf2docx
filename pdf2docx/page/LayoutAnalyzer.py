@@ -1317,6 +1317,80 @@ def build_body_table_delta_root_cause_report(
     }
 
 
+def build_body_table_geometry_delta_safety_report(
+        filtered_parse_experiment_report: dict = None,
+        table_delta_report: dict = None,
+        body_table_root_cause_report: dict = None,
+        baseline_parse_metrics: dict = None,
+        filtered_parse_metrics: dict = None,
+        removed_objects_by_page: list = None,
+        enabled: bool = False) -> dict:
+    '''Evaluate changed body table geometries without changing table parsing.'''
+    experiment_report = filtered_parse_experiment_report or {}
+    baseline_metrics = _copy_parse_metrics(
+        baseline_parse_metrics or experiment_report.get('baseline_parse_metrics') or {})
+    filtered_metrics = _copy_parse_metrics(
+        filtered_parse_metrics or experiment_report.get('filtered_parse_metrics') or {})
+    removed_by_page = _copy_removed_objects_by_page(
+        removed_objects_by_page or experiment_report.get('removed_objects_by_page') or [])
+    delta_report = table_delta_report or build_table_delta_investigation_report(
+        filtered_parse_experiment_report=experiment_report,
+        baseline_parse_metrics=baseline_metrics,
+        filtered_parse_metrics=filtered_metrics,
+        removed_objects_by_page=removed_by_page,
+        enabled=bool(enabled))
+    root_report = body_table_root_cause_report or build_body_table_delta_root_cause_report(
+        filtered_parse_experiment_report=experiment_report,
+        table_delta_report=delta_report,
+        baseline_parse_metrics=baseline_metrics,
+        filtered_parse_metrics=filtered_metrics,
+        removed_objects_by_page=removed_by_page,
+        enabled=bool(enabled))
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'body_table_geometry_delta_safety_report_only',
+            'insertion_point': 'document_parse',
+            'summary': _body_table_geometry_disabled_summary(root_report),
+            'findings': [],
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2t': False,
+                'reason': 'Body table geometry delta safety investigation is disabled.',
+            },
+        }
+
+    body_changes = [
+        change for change in delta_report.get('changed_common_tables', []) or []
+        if change.get('region') == REGION_BODY
+    ]
+    removed_objects = [
+        raw_object
+        for page in removed_by_page
+        for raw_object in page.get('objects', []) or []
+    ]
+    findings = [
+        _body_table_geometry_finding(change, removed_objects)
+        for change in body_changes
+    ]
+    summary = _body_table_geometry_summary(findings)
+    warnings = _body_table_geometry_warnings(summary, findings)
+
+    return {
+        'enabled': True,
+        'policy': 'body_table_geometry_delta_safety_report_only',
+        'insertion_point': 'document_parse',
+        'summary': summary,
+        'findings': findings,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2t': _body_table_geometry_safe_for_phase_2t(summary, warnings),
+            'reason': _body_table_geometry_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -3438,7 +3512,7 @@ def _copy_parse_metrics(metrics: dict) -> dict:
         return {}
     copied = dict(metrics)
     copied['tables'] = [
-        dict(table) for table in metrics.get('tables', []) or []
+        _copy_table_record(table) for table in metrics.get('tables', []) or []
     ]
     copied['pages'] = [
         _copy_parse_metrics_page(page) for page in metrics.get('pages', []) or []
@@ -3452,10 +3526,22 @@ def _copy_parse_metrics(metrics: dict) -> dict:
 def _copy_parse_metrics_page(page: dict) -> dict:
     copied = dict(page)
     copied['tables'] = [
-        dict(table) for table in page.get('tables', []) or []
+        _copy_table_record(table) for table in page.get('tables', []) or []
     ]
     copied['warnings'] = [
         dict(warning) for warning in page.get('warnings', []) or []
+    ]
+    return copied
+
+
+def _copy_table_record(table: dict) -> dict:
+    copied = dict(table)
+    copied['cell_summaries'] = [
+        dict(cell) for cell in table.get('cell_summaries', []) or []
+    ]
+    copied['cell_text_signature'] = list(table.get('cell_text_signature', []) or [])
+    copied['cell_bbox_signature'] = [
+        list(bbox) for bbox in table.get('cell_bbox_signature', []) or []
     ]
     return copied
 
@@ -4410,6 +4496,325 @@ def _body_table_root_recommendation(summary: dict, warnings: list) -> str:
     if summary.get('possible_real_body_table_loss_count', 0):
         return 'Keep production integration blocked; inspect possible real body table loss before Phase 2S.'
     return 'Continue with report-only inspection before any production filtering integration.'
+
+
+def _body_table_geometry_disabled_summary(root_report: dict) -> dict:
+    root_summary = (root_report or {}).get('summary') or {}
+    return {
+        'changed_body_table_geometry_count': root_summary.get('changed_body_table_geometry_count', 0),
+        'harmless_bbox_only_shift_count': 0,
+        'header_footer_boundary_cleanup_count': 0,
+        'stream_table_boundary_adjustment_count': 0,
+        'possible_body_table_structure_change_count': 0,
+        'possible_cell_loss_count': 0,
+        'unchanged_row_column_cell_count': 0,
+        'changed_row_column_cell_count': 0,
+        'text_cell_signature_preserved_count': 0,
+        'text_cell_signature_changed_count': 0,
+        'affected_pages': [],
+        'unsafe_count': 0,
+        'review_count': 0,
+        'safe_count': 0,
+        'classification': 'disabled',
+    }
+
+
+def _body_table_geometry_finding(change: dict, removed_objects: list) -> dict:
+    baseline = _copy_table_record(change.get('baseline_table') or {})
+    filtered = _copy_table_record(change.get('filtered_table') or {})
+    baseline_bbox = _json_bbox(baseline.get('bbox'))
+    filtered_bbox = _json_bbox(filtered.get('bbox'))
+    bbox_delta = _body_table_bbox_delta(baseline_bbox, filtered_bbox)
+    count_delta = _body_table_count_delta(baseline, filtered)
+    text_signature = _body_table_text_signature_summary(baseline, filtered)
+    cell_bbox_summary = _body_table_cell_bbox_change_summary(baseline, filtered)
+    proximity = _table_removed_proximity(baseline, removed_objects)
+    top_bottom_edge_only = _body_table_top_bottom_edge_only(bbox_delta)
+    changed_area_body_intersection = baseline.get('region') == REGION_BODY and _bbox_area_delta(
+        baseline_bbox,
+        filtered_bbox) > 0.0
+    edge_near_removed = (
+        proximity.get('nearest_distance') is not None and
+        proximity.get('nearest_distance') <= 24.0)
+    structure_counts_preserved = not any(count_delta.values())
+    text_preserved = text_signature.get('preserved')
+    only_outer_bbox_changed = (
+        structure_counts_preserved and
+        text_preserved is True and
+        cell_bbox_summary.get('changed_cell_bbox_count', 0) == 0)
+    likely_cause, severity = _body_table_geometry_classification(
+        count_delta,
+        text_signature,
+        cell_bbox_summary,
+        only_outer_bbox_changed,
+        edge_near_removed,
+        changed_area_body_intersection,
+        top_bottom_edge_only)
+
+    return {
+        'page_index': change.get('page_index'),
+        'page_number': change.get('page_number'),
+        'baseline_table_id': baseline.get('table_id', ''),
+        'filtered_table_id': filtered.get('table_id', ''),
+        'baseline_bbox': baseline_bbox,
+        'filtered_bbox': filtered_bbox,
+        'bbox_delta': bbox_delta,
+        'bbox_overlap_ratio': round(_bbox_overlap_ratio(baseline_bbox, filtered_bbox), 3),
+        'row_count_before': int(baseline.get('row_count') or 0),
+        'row_count_after': int(filtered.get('row_count') or 0),
+        'column_count_before': int(baseline.get('column_count') or 0),
+        'column_count_after': int(filtered.get('column_count') or 0),
+        'cell_count_before': int(baseline.get('cell_count') or 0),
+        'cell_count_after': int(filtered.get('cell_count') or 0),
+        'row_column_cell_count_delta': count_delta,
+        'cell_bbox_change_summary': cell_bbox_summary,
+        'cell_text_signature_before': text_signature.get('before', []),
+        'cell_text_signature_after': text_signature.get('after', []),
+        'text_cell_signature_preserved': text_signature.get('preserved'),
+        'text_cell_signature_changed': text_signature.get('changed'),
+        'text_cell_content_appears_preserved': text_signature.get('preserved') is True,
+        'only_outer_bbox_changed': only_outer_bbox_changed,
+        'changed_bbox_edge_near_removed_candidate': edge_near_removed,
+        'distance_to_nearest_removed_candidate': proximity.get('nearest_distance'),
+        'nearest_removed_candidate': proximity.get('nearest_candidate'),
+        'changed_area_intersects_body_text': changed_area_body_intersection,
+        'changed_area_top_bottom_edge_only': top_bottom_edge_only,
+        'likely_cause': likely_cause,
+        'severity': severity,
+        'reason': _body_table_geometry_reason(likely_cause, severity),
+    }
+
+
+def _body_table_bbox_delta(baseline_bbox: list, filtered_bbox: list) -> dict:
+    width_before = max(float(baseline_bbox[2]) - float(baseline_bbox[0]), 0.0)
+    width_after = max(float(filtered_bbox[2]) - float(filtered_bbox[0]), 0.0)
+    height_before = max(float(baseline_bbox[3]) - float(baseline_bbox[1]), 0.0)
+    height_after = max(float(filtered_bbox[3]) - float(filtered_bbox[1]), 0.0)
+    return {
+        'left': round(float(filtered_bbox[0]) - float(baseline_bbox[0]), 2),
+        'top': round(float(filtered_bbox[1]) - float(baseline_bbox[1]), 2),
+        'right': round(float(filtered_bbox[2]) - float(baseline_bbox[2]), 2),
+        'bottom': round(float(filtered_bbox[3]) - float(baseline_bbox[3]), 2),
+        'width': round(width_after - width_before, 2),
+        'height': round(height_after - height_before, 2),
+    }
+
+
+def _body_table_count_delta(baseline: dict, filtered: dict) -> dict:
+    return {
+        'row_count_changed': int(baseline.get('row_count') or 0) != int(filtered.get('row_count') or 0),
+        'column_count_changed': int(baseline.get('column_count') or 0) != int(filtered.get('column_count') or 0),
+        'cell_count_changed': int(baseline.get('cell_count') or 0) != int(filtered.get('cell_count') or 0),
+    }
+
+
+def _body_table_text_signature_summary(baseline: dict, filtered: dict) -> dict:
+    before = _body_table_text_signature(baseline)
+    after = _body_table_text_signature(filtered)
+    available = bool(before or after)
+    preserved = before == after if available else None
+    return {
+        'before': before,
+        'after': after,
+        'available': available,
+        'preserved': preserved,
+        'changed': bool(available and before != after),
+    }
+
+
+def _body_table_text_signature(table: dict) -> list:
+    signature = table.get('cell_text_signature')
+    if signature:
+        return list(signature)
+    cell_summaries = table.get('cell_summaries', []) or []
+    return [
+        normalize_text(cell.get('text_preview', ''))
+        for cell in cell_summaries
+    ]
+
+
+def _body_table_cell_bbox_change_summary(baseline: dict, filtered: dict) -> dict:
+    before = _body_table_cell_bbox_signature(baseline)
+    after = _body_table_cell_bbox_signature(filtered)
+    available = bool(before or after)
+    pair_count = min(len(before), len(after))
+    changed = []
+    for index in range(pair_count):
+        if _bbox_max_delta(before[index], after[index]) > 1.0:
+            changed.append({
+                'cell_index': index,
+                'bbox_delta': _body_table_bbox_delta(before[index], after[index]),
+            })
+    missing = abs(len(before) - len(after))
+    return {
+        'available': available,
+        'cell_bbox_count_before': len(before),
+        'cell_bbox_count_after': len(after),
+        'changed_cell_bbox_count': len(changed),
+        'missing_or_extra_cell_bbox_count': missing,
+        'changed_cell_bboxes': changed[:5],
+    }
+
+
+def _body_table_cell_bbox_signature(table: dict) -> list:
+    signature = table.get('cell_bbox_signature')
+    if signature:
+        return [_json_bbox(bbox) for bbox in signature]
+    cell_summaries = table.get('cell_summaries', []) or []
+    return [
+        _json_bbox(cell.get('bbox'))
+        for cell in cell_summaries
+    ]
+
+
+def _body_table_top_bottom_edge_only(bbox_delta: dict) -> bool:
+    horizontal_stable = (
+        abs(float(bbox_delta.get('left', 0.0))) <= 1.0 and
+        abs(float(bbox_delta.get('right', 0.0))) <= 1.0 and
+        abs(float(bbox_delta.get('width', 0.0))) <= 1.0)
+    vertical_changed = (
+        abs(float(bbox_delta.get('top', 0.0))) > 1.0 or
+        abs(float(bbox_delta.get('bottom', 0.0))) > 1.0 or
+        abs(float(bbox_delta.get('height', 0.0))) > 1.0)
+    return horizontal_stable and vertical_changed
+
+
+def _bbox_area_delta(first: list, second: list) -> float:
+    first = _json_bbox(first)
+    second = _json_bbox(second)
+    first_area = max((first[2] - first[0]) * (first[3] - first[1]), 0.0)
+    second_area = max((second[2] - second[0]) * (second[3] - second[1]), 0.0)
+    overlap_width = max(min(first[2], second[2]) - max(first[0], second[0]), 0.0)
+    overlap_height = max(min(first[3], second[3]) - max(first[1], second[1]), 0.0)
+    overlap_area = overlap_width * overlap_height
+    return (first_area - overlap_area) + (second_area - overlap_area)
+
+
+def _body_table_geometry_classification(
+        count_delta: dict,
+        text_signature: dict,
+        cell_bbox_summary: dict,
+        only_outer_bbox_changed: bool,
+        edge_near_removed: bool,
+        changed_area_body_intersection: bool,
+        top_bottom_edge_only: bool) -> tuple:
+    if count_delta.get('cell_count_changed'):
+        return 'possible_cell_loss', 'unsafe'
+    if count_delta.get('row_count_changed') or count_delta.get('column_count_changed'):
+        return 'possible_body_table_structure_change', 'unsafe'
+    if text_signature.get('changed'):
+        return 'possible_body_table_structure_change', 'unsafe'
+    if not text_signature.get('available') and not cell_bbox_summary.get('available'):
+        return 'insufficient_evidence', 'review'
+    if only_outer_bbox_changed and edge_near_removed:
+        return 'header_footer_boundary_cleanup', 'safe'
+    if only_outer_bbox_changed:
+        return 'harmless_bbox_boundary_shift', 'review' if changed_area_body_intersection else 'safe'
+    if text_signature.get('preserved') is True and top_bottom_edge_only:
+        return 'stream_table_boundary_adjustment', 'review' if changed_area_body_intersection else 'safe'
+    if text_signature.get('preserved') is True and cell_bbox_summary.get('changed_cell_bbox_count', 0):
+        return 'stream_table_boundary_adjustment', 'review'
+    return 'insufficient_evidence', 'review'
+
+
+def _body_table_geometry_reason(likely_cause: str, severity: str) -> str:
+    if likely_cause == 'harmless_bbox_boundary_shift':
+        return 'Rows, columns, cells, and cell text signatures are preserved; only bbox boundaries moved.'
+    if likely_cause == 'header_footer_boundary_cleanup':
+        return 'Table boundary shift is near approved header/footer/page-number removals with structure preserved.'
+    if likely_cause == 'stream_table_boundary_adjustment':
+        return 'Cell text is preserved but stream-table cell or outer boundaries shifted; keep under review.'
+    if likely_cause == 'possible_body_table_structure_change':
+        return 'Body table row/column or cell text signatures changed; production integration remains blocked.'
+    if likely_cause == 'possible_cell_loss':
+        return 'Body table cell count changed; treat as unsafe unless later evidence proves removed cells were artifacts.'
+    return f'Insufficient table cell evidence; severity is {severity}.'
+
+
+def _body_table_geometry_summary(findings: list) -> dict:
+    cause_counts = Counter(finding.get('likely_cause', '') for finding in findings or [])
+    severity_counts = Counter(finding.get('severity', '') for finding in findings or [])
+    count_changed = [
+        finding for finding in findings or []
+        if any(finding.get('row_column_cell_count_delta', {}).values())
+    ]
+    text_preserved = [
+        finding for finding in findings or []
+        if finding.get('text_cell_signature_preserved') is True
+    ]
+    text_changed = [
+        finding for finding in findings or []
+        if finding.get('text_cell_signature_changed') is True
+    ]
+    return {
+        'changed_body_table_geometry_count': len(findings or []),
+        'harmless_bbox_only_shift_count': cause_counts.get('harmless_bbox_boundary_shift', 0),
+        'header_footer_boundary_cleanup_count': cause_counts.get('header_footer_boundary_cleanup', 0),
+        'stream_table_boundary_adjustment_count': cause_counts.get('stream_table_boundary_adjustment', 0),
+        'possible_body_table_structure_change_count': cause_counts.get('possible_body_table_structure_change', 0),
+        'possible_cell_loss_count': cause_counts.get('possible_cell_loss', 0),
+        'unchanged_row_column_cell_count': len(findings or []) - len(count_changed),
+        'changed_row_column_cell_count': len(count_changed),
+        'text_cell_signature_preserved_count': len(text_preserved),
+        'text_cell_signature_changed_count': len(text_changed),
+        'affected_pages': sorted({
+            finding.get('page_number')
+            for finding in findings or []
+            if finding.get('page_number') is not None
+        }),
+        'unsafe_count': severity_counts.get('unsafe', 0),
+        'review_count': severity_counts.get('review', 0),
+        'safe_count': severity_counts.get('safe', 0),
+        'likely_cause_counts': dict(sorted(cause_counts.items())),
+        'severity_counts': dict(sorted(severity_counts.items())),
+        'classification': 'unsafe' if severity_counts.get('unsafe', 0) else (
+            'review' if severity_counts.get('review', 0) else 'safe'),
+    }
+
+
+def _body_table_geometry_warnings(summary: dict, findings: list) -> list:
+    warnings = []
+    if summary.get('possible_cell_loss_count', 0):
+        warnings.append({
+            'type': 'possible_cell_loss',
+            'count': summary.get('possible_cell_loss_count'),
+        })
+    if summary.get('possible_body_table_structure_change_count', 0):
+        warnings.append({
+            'type': 'possible_body_table_structure_change',
+            'count': summary.get('possible_body_table_structure_change_count'),
+        })
+    if summary.get('unsafe_count', 0):
+        warnings.append({
+            'type': 'unsafe_body_table_geometry_delta',
+            'count': summary.get('unsafe_count'),
+        })
+    insufficient = [
+        finding for finding in findings or []
+        if finding.get('likely_cause') == 'insufficient_evidence'
+    ]
+    if insufficient:
+        warnings.append({
+            'type': 'insufficient_body_table_geometry_evidence',
+            'count': len(insufficient),
+        })
+    return warnings
+
+
+def _body_table_geometry_safe_for_phase_2t(summary: dict, warnings: list) -> bool:
+    return (
+        not summary.get('unsafe_count', 0) and
+        not summary.get('possible_cell_loss_count', 0) and
+        not summary.get('possible_body_table_structure_change_count', 0) and
+        not warnings)
+
+
+def _body_table_geometry_recommendation(summary: dict, warnings: list) -> str:
+    if _body_table_geometry_safe_for_phase_2t(summary, warnings):
+        return 'Body table geometry deltas appear structurally preserved; Phase 2T can remain opt-in and guarded.'
+    if summary.get('unsafe_count', 0):
+        return 'Keep production integration blocked; changed body table geometry still has unsafe structure or text signals.'
+    return 'Continue report-only inspection before any production filtering integration.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
