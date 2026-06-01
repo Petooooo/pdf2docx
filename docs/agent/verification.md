@@ -2120,3 +2120,117 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2P recommendation
 
 Phase 2P is safe to attempt only as an explicitly opt-in, non-default production experiment. The next phase can consider leaving reviewed filtering applied through downstream parsing under a private guard, but it must still avoid public CLI exposure and must compare parse/conversion behavior before any default-path change.
+
+## Phase 2P
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2P added an internal, explicitly opt-in filtered parse experiment at the `document_parse` boundary. The experiment applies reviewed header/footer/page-number filtering to actual `raw_page.blocks` only inside the private experiment window, collects baseline-vs-filtered parse metrics from temporary downstream parse copies, and restores the original raw-page block list before normal parsing continues.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering is not default-on.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+- No production body filtering is connected to the default parse path.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/filtered-parse-experiment-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, mapping report, copied apply report, guarded apply/restore report, and generated filtered parse report remained ignored.
+
+### Sample summary
+
+- Baseline raw block count: 790.
+- Filtered raw block count: 742.
+- Removed raw block count: 48.
+- Removed counts by role: 12 `header`, 24 `footer`, 12 `page_number`.
+- Removed counts by page: 4 per page across 12 pages.
+- Baseline parsed text block count: 523.
+- Filtered parsed text block count: 486.
+- Baseline body `TextBlock` count: 393.
+- Filtered body `TextBlock` count: 393.
+- Baseline paragraph-like `TextBlock` count: 523.
+- Filtered paragraph-like `TextBlock` count: 486.
+- Baseline table count: 139.
+- Filtered table count: 127.
+- Baseline image count: 0.
+- Filtered image count: 0.
+- Baseline section count: 50.
+- Filtered section count: 50.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Raw pages restored or reloaded after experiment: yes.
+- Restore fingerprint match: yes.
+
+Safety warnings:
+
+- `table_count_changed`: baseline 139, filtered 127.
+
+Interpretation:
+
+- Body-region text block count remained unchanged, so the reviewed removals did not drop parsed body text in this sample.
+- Section and image counts remained unchanged.
+- The table-count decrease should be manually reviewed before any production integration. It may indicate reduced header/footer pollution in stream-table detection, but Phase 2P records it as a warning rather than treating it as proof.
+
+### Tests added
+
+- Filtered parse experiment reports baseline and filtered parse metrics.
+- Disabled/default path remains unchanged.
+- Approved raw objects are removed only during the filtered parse experiment.
+- Rejected, unsure, layout-placeholder, and body-region objects remain.
+- Baseline and filtered parse metrics are both reported.
+- Experiment restores raw-page state after completion.
+- Warning logic reports table/body/paragraph-fragmentation risks.
+- Default conversion tests still pass.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 135 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 135 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2Q recommendation
+
+Phase 2Q is safe to attempt only as another explicitly opt-in, non-default experiment. The next phase should investigate the table-count delta and compare parse outputs more deeply before any persistent production filtering path is enabled.

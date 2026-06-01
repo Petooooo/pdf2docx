@@ -29,6 +29,7 @@ build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclu
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
+build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
 build_document_parse_guarded_raw_page_apply_restore_report = LayoutAnalyzer.build_document_parse_guarded_raw_page_apply_restore_report
 build_document_parse_raw_object_mapping_report = LayoutAnalyzer.build_document_parse_raw_object_mapping_report
 build_document_parse_filtering_simulation_report = LayoutAnalyzer.build_document_parse_filtering_simulation_report
@@ -2739,6 +2740,151 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIsNone(report)
         self.assertIsNone(pages._document_parse_guarded_raw_apply_restore_report)
 
+    def test_filtered_parse_experiment_reports_baseline_and_filtered_metrics(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+        report = build_document_parse_filtered_parse_experiment_report(
+            raw_object_pages_before=inputs['raw_object_pages'],
+            raw_object_pages_filtered=[{
+                'page_index': 0,
+                'page_number': 1,
+                'width': 600,
+                'height': 1000,
+                'raw_objects': inputs['raw_object_pages'][0]['raw_objects'][1:5],
+            }],
+            raw_object_pages_after=inputs['raw_object_pages'],
+            removed_objects_by_page=[{
+                'page_index': 0,
+                'page_number': 1,
+                'removed_count': 2,
+                'objects': [
+                    dict(inputs['raw_object_pages'][0]['raw_objects'][0], proposed_role=ROLE_HEADER),
+                    dict(inputs['raw_object_pages'][0]['raw_objects'][2], proposed_role=ROLE_FOOTER),
+                ],
+            }],
+            baseline_parse_metrics=_parse_metrics(raw_count=6, text_blocks=5, body_text_blocks=1),
+            filtered_parse_metrics=_parse_metrics(raw_count=4, text_blocks=3, body_text_blocks=1),
+            raw_object_mapping_report=mapping,
+            enabled=True,
+            restore_completed=True,
+            restore_fingerprint_match=True,
+            expected_mapping_count=2)
+
+        self.assertEqual(report['summary']['baseline_raw_block_count'], 6)
+        self.assertEqual(report['summary']['filtered_raw_block_count'], 4)
+        self.assertEqual(report['summary']['removed_raw_block_count'], 2)
+        self.assertEqual(report['summary']['baseline_parsed_text_block_count'], 5)
+        self.assertEqual(report['summary']['filtered_parsed_text_block_count'], 3)
+        self.assertEqual(report['summary']['baseline_body_text_block_count'], 1)
+        self.assertEqual(report['summary']['filtered_body_text_block_count'], 1)
+        self.assertTrue(report['summary']['raw_pages_restored_or_reloaded'])
+        self.assertTrue(report['summary']['restore_fingerprint_match'])
+        self.assertFalse(report['summary']['production_default_changed'])
+
+    def test_filtered_parse_experiment_keeps_rejected_unsure_placeholder_and_body(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+        report = build_document_parse_filtered_parse_experiment_report(
+            raw_object_pages_before=inputs['raw_object_pages'],
+            raw_object_pages_filtered=inputs['raw_object_pages'],
+            raw_object_pages_after=inputs['raw_object_pages'],
+            removed_objects_by_page=[],
+            baseline_parse_metrics=_parse_metrics(raw_count=6, body_text_blocks=1),
+            filtered_parse_metrics=_parse_metrics(raw_count=6, body_text_blocks=1),
+            raw_object_mapping_report=mapping,
+            enabled=True,
+            restore_completed=True,
+            restore_fingerprint_match=True,
+            expected_mapping_count=2)
+
+        self.assertEqual(report['summary']['body_region_removed_count'], 0)
+        self.assertEqual(
+            report['summary']['rejected_unsure_layout_placeholder_removed_count'],
+            0)
+
+    def test_filtered_parse_experiment_warns_on_body_drop_and_table_changes(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        mapping = build_document_parse_raw_object_mapping_report(
+            **inputs,
+            enabled=True,
+            expected_would_remove_count=2)
+
+        report = build_document_parse_filtered_parse_experiment_report(
+            raw_object_pages_before=inputs['raw_object_pages'],
+            raw_object_pages_filtered=inputs['raw_object_pages'],
+            raw_object_pages_after=inputs['raw_object_pages'],
+            removed_objects_by_page=[],
+            baseline_parse_metrics=_parse_metrics(
+                raw_count=6,
+                body_text_blocks=4,
+                tables=1,
+                paragraph_like=3),
+            filtered_parse_metrics=_parse_metrics(
+                raw_count=6,
+                body_text_blocks=3,
+                tables=0,
+                paragraph_like=5),
+            raw_object_mapping_report=mapping,
+            enabled=True,
+            restore_completed=True,
+            restore_fingerprint_match=True,
+            expected_mapping_count=2)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertIn('body_text_block_count_dropped', warning_types)
+        self.assertIn('table_count_changed', warning_types)
+        self.assertIn('paragraph_fragmentation_increased', warning_types)
+
+    def test_filtered_parse_experiment_disabled_mode_is_clear(self):
+        inputs = _document_parse_raw_mapping_inputs()
+
+        report = build_document_parse_filtered_parse_experiment_report(
+            raw_object_pages_before=inputs['raw_object_pages'])
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['removed_raw_block_count'], 0)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2q'])
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_filtered_parse_experiment_removes_only_during_experiment_and_restores(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        fake_pages = [_FakePage(0)]
+        fake_raw_pages = [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])]
+        before_raw_texts = [block.text for block in fake_raw_pages[0].blocks]
+
+        report = Pages()._run_document_parse_filtered_parse_experiment(
+            _document_parse_hook_layout_report(inputs),
+            fake_pages,
+            fake_raw_pages,
+            _document_parse_filtered_parse_experiment_enabled=True,
+            _document_parse_filtering_review_decisions=inputs['review_decisions'],
+            _document_parse_filtered_parse_expected_mapping_count=2)
+
+        self.assertEqual(report['summary']['removed_raw_block_count'], 2)
+        self.assertEqual(report['summary']['filtered_raw_block_count'], 4)
+        self.assertTrue(report['summary']['raw_pages_restored_or_reloaded'])
+        self.assertTrue(report['summary']['restore_fingerprint_match'])
+        self.assertEqual([block.text for block in fake_raw_pages[0].blocks], before_raw_texts)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_pages_filtered_parse_experiment_disabled_leaves_report_empty(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        pages = Pages()
+
+        report = pages._run_document_parse_filtered_parse_experiment(
+            _document_parse_hook_layout_report(inputs),
+            [_FakePage(0)],
+            [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])])
+
+        self.assertIsNone(report)
+        self.assertIsNone(pages._document_parse_filtered_parse_experiment_report)
+
 
 def _page(page_index, blocks):
     return {
@@ -3201,6 +3347,29 @@ def _document_parse_raw_mapping_inputs():
         }],
         'dry_run_report': dry_run_report,
         'review_decisions': review_decisions,
+    }
+
+
+def _parse_metrics(
+        raw_count=0,
+        text_blocks=0,
+        body_text_blocks=0,
+        paragraph_like=0,
+        tables=0,
+        images=0,
+        sections=1):
+    return {
+        'parse_metrics_available': True,
+        'raw_block_count': raw_count,
+        'body_raw_block_count': body_text_blocks,
+        'parsed_text_block_count': text_blocks,
+        'body_text_block_count': body_text_blocks,
+        'paragraph_like_text_block_count': paragraph_like or text_blocks,
+        'table_count': tables,
+        'image_count': images,
+        'section_count': sections,
+        'pages': [],
+        'warnings': [],
     }
 
 

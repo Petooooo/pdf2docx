@@ -1060,6 +1060,117 @@ def build_document_parse_guarded_raw_page_apply_restore_report(
     }
 
 
+def build_document_parse_filtered_parse_experiment_report(
+        raw_object_pages_before: list = None,
+        raw_object_pages_filtered: list = None,
+        raw_object_pages_after: list = None,
+        removed_objects_by_page: list = None,
+        baseline_parse_metrics: dict = None,
+        filtered_parse_metrics: dict = None,
+        raw_object_mapping_report: dict = None,
+        copied_apply_report: dict = None,
+        guarded_apply_restore_report: dict = None,
+        enabled: bool = False,
+        restore_completed: bool = False,
+        restore_fingerprint_match: bool = False,
+        expected_mapping_count: int = None,
+        apply_skipped_reason: str = '') -> dict:
+    '''Compare baseline parse metrics with an opt-in filtered parse experiment.'''
+    before = _copy_raw_object_pages(raw_object_pages_before)
+    filtered = _copy_raw_object_pages(raw_object_pages_filtered or raw_object_pages_before)
+    after = _copy_raw_object_pages(raw_object_pages_after or raw_object_pages_before)
+    removed_by_page = [
+        {
+            'page_index': page.get('page_index'),
+            'page_number': page.get('page_number'),
+            'removed_count': page.get('removed_count', 0),
+            'objects': [dict(raw_object) for raw_object in page.get('objects', []) or []],
+        }
+        for page in removed_objects_by_page or []
+    ]
+    removed_objects = [
+        raw_object
+        for page in removed_by_page
+        for raw_object in page.get('objects', []) or []
+    ]
+    baseline_metrics = _copy_parse_metrics(baseline_parse_metrics)
+    filtered_metrics = _copy_parse_metrics(filtered_parse_metrics or baseline_metrics)
+
+    if not enabled:
+        original_count = _raw_object_page_count(before)
+        disabled_metrics = _filtered_parse_empty_metrics(original_count)
+        return {
+            'enabled': False,
+            'experiment_mode': 'filtered_parse_experiment',
+            'production_applied': False,
+            'policy': 'filtered_parse_experiment_report_only',
+            'insertion_point': 'document_parse',
+            'baseline_parse_metrics': baseline_metrics or disabled_metrics,
+            'filtered_parse_metrics': baseline_metrics or disabled_metrics,
+            'summary': _filtered_parse_disabled_summary(
+                original_count,
+                baseline_metrics or disabled_metrics),
+            'removed_objects_by_page': [],
+            'removed_counts_by_role': {},
+            'removed_counts_by_page': [],
+            'header_footer_pollution_reduction': {},
+            'consistency': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2q': False,
+                'reason': 'Filtered parse experiment is disabled.',
+            },
+        }
+
+    consistency = _filtered_parse_consistency(
+        raw_object_mapping_report,
+        copied_apply_report,
+        guarded_apply_restore_report,
+        len(removed_objects),
+        expected_mapping_count)
+    summary = _filtered_parse_summary(
+        before,
+        filtered,
+        after,
+        removed_objects,
+        baseline_metrics,
+        filtered_metrics,
+        raw_object_mapping_report,
+        restore_completed,
+        restore_fingerprint_match,
+        consistency)
+    warnings = _filtered_parse_warnings(
+        summary,
+        baseline_metrics,
+        filtered_metrics,
+        raw_object_mapping_report,
+        consistency,
+        apply_skipped_reason)
+    return {
+        'enabled': True,
+        'experiment_mode': 'filtered_parse_experiment',
+        'production_applied': False,
+        'policy': 'filtered_parse_experiment_report_only',
+        'insertion_point': 'document_parse',
+        'baseline_parse_metrics': baseline_metrics,
+        'filtered_parse_metrics': filtered_metrics,
+        'summary': summary,
+        'removed_objects_by_page': removed_by_page,
+        'removed_counts_by_role': _copied_apply_removed_counts_by_role(removed_objects),
+        'removed_counts_by_page': _copied_apply_removed_counts_by_page(removed_by_page),
+        'header_footer_pollution_reduction': _filtered_parse_pollution_reduction(
+            removed_objects,
+            baseline_metrics,
+            filtered_metrics),
+        'consistency': consistency,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2q': _filtered_parse_safe_for_phase_2q(summary, warnings),
+            'reason': _filtered_parse_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -3174,6 +3285,310 @@ def _guarded_apply_recommendation(summary: dict, warnings: list) -> str:
     if _guarded_apply_safe_for_phase_2p(summary, warnings):
         return 'Guarded raw-page apply/restore removed only validated objects and restored the original raw pages; Phase 2P can remain opt-in and guarded.'
     return 'Do not enable persistent production filtering yet; resolve guarded apply/restore warnings first.'
+
+
+def _copy_parse_metrics(metrics: dict) -> dict:
+    if not metrics:
+        return {}
+    copied = dict(metrics)
+    copied['pages'] = [
+        dict(page) for page in metrics.get('pages', []) or []
+    ]
+    copied['warnings'] = [
+        dict(warning) for warning in metrics.get('warnings', []) or []
+    ]
+    return copied
+
+
+def _filtered_parse_empty_metrics(raw_count: int) -> dict:
+    return {
+        'parse_metrics_available': False,
+        'raw_block_count': raw_count,
+        'body_raw_block_count': 0,
+        'parsed_text_block_count': 0,
+        'body_text_block_count': 0,
+        'paragraph_like_text_block_count': 0,
+        'table_count': 0,
+        'image_count': 0,
+        'section_count': 0,
+        'pages': [],
+        'warnings': [],
+    }
+
+
+def _filtered_parse_metric(metrics: dict, key: str, default=0):
+    if not metrics:
+        return default
+    value = metrics.get(key, default)
+    return default if value is None else value
+
+
+def _filtered_parse_disabled_summary(original_count: int, baseline_metrics: dict) -> dict:
+    return {
+        'baseline_raw_block_count': original_count,
+        'filtered_raw_block_count': original_count,
+        'removed_raw_block_count': 0,
+        'baseline_parsed_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'parsed_text_block_count', 0),
+        'filtered_parsed_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'parsed_text_block_count', 0),
+        'baseline_body_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'body_text_block_count', 0),
+        'filtered_body_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'body_text_block_count', 0),
+        'baseline_paragraph_like_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'paragraph_like_text_block_count', 0),
+        'filtered_paragraph_like_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'paragraph_like_text_block_count', 0),
+        'baseline_table_count': _filtered_parse_metric(baseline_metrics, 'table_count', 0),
+        'filtered_table_count': _filtered_parse_metric(baseline_metrics, 'table_count', 0),
+        'baseline_image_count': _filtered_parse_metric(baseline_metrics, 'image_count', 0),
+        'filtered_image_count': _filtered_parse_metric(baseline_metrics, 'image_count', 0),
+        'baseline_section_count': _filtered_parse_metric(baseline_metrics, 'section_count', 0),
+        'filtered_section_count': _filtered_parse_metric(baseline_metrics, 'section_count', 0),
+        'body_region_removed_count': 0,
+        'rejected_unsure_layout_placeholder_removed_count': 0,
+        'raw_pages_restored_or_reloaded': True,
+        'restore_fingerprint_match': True,
+        'production_default_changed': False,
+    }
+
+
+def _filtered_parse_consistency(
+        mapping_report: dict,
+        copied_apply_report: dict,
+        guarded_apply_restore_report: dict,
+        removed_count: int,
+        expected_mapping_count: int = None) -> dict:
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    copied_summary = (copied_apply_report or {}).get('summary') or {}
+    guarded_summary = (guarded_apply_restore_report or {}).get('summary') or {}
+    mapped_count = mapping_summary.get('mapped_raw_object_count', 0)
+    copied_removed_count = copied_summary.get('removed_copied_block_count')
+    guarded_removed_count = guarded_summary.get('removed_during_apply_count')
+    expected_mapping_count = (
+        expected_mapping_count
+        if expected_mapping_count is not None else
+        mapped_count)
+    return {
+        'phase_2m_mapped_raw_object_count': mapped_count,
+        'phase_2n_removed_copied_block_count': copied_removed_count,
+        'phase_2o_removed_during_apply_count': guarded_removed_count,
+        'expected_mapping_count': expected_mapping_count,
+        'removed_raw_block_count': removed_count,
+        'removed_count_matches_phase_2m': removed_count == mapped_count,
+        'removed_count_matches_phase_2n': (
+            copied_removed_count is None or removed_count == copied_removed_count),
+        'removed_count_matches_phase_2o': (
+            guarded_removed_count is None or removed_count == guarded_removed_count),
+        'expected_mapping_count_matches_phase_2m': expected_mapping_count == mapped_count,
+    }
+
+
+def _filtered_parse_summary(
+        before: list,
+        filtered: list,
+        after: list,
+        removed_objects: list,
+        baseline_metrics: dict,
+        filtered_metrics: dict,
+        mapping_report: dict,
+        restore_completed: bool,
+        restore_fingerprint_match: bool,
+        consistency: dict) -> dict:
+    mapping_summary = (mapping_report or {}).get('summary') or {}
+    body_removed = sum(
+        1 for item in removed_objects or []
+        if item.get('region') == REGION_BODY)
+    blocked_removed = sum(
+        1 for item in removed_objects or []
+        if (
+            item.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER or
+            item.get('placeholder_kind') == 'image' or
+            'blocked_review_decision_fingerprint' in item.get('unsafe_signals', [])))
+    return {
+        'baseline_raw_block_count': _raw_object_page_count(before),
+        'filtered_raw_block_count': _raw_object_page_count(filtered),
+        'restored_raw_block_count': _raw_object_page_count(after),
+        'removed_raw_block_count': len(removed_objects),
+        'approved_candidate_count': mapping_summary.get('approved_candidate_count', 0),
+        'blocked_candidate_count': mapping_summary.get('blocked_candidate_count', 0),
+        'baseline_parsed_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'parsed_text_block_count', 0),
+        'filtered_parsed_text_block_count': _filtered_parse_metric(
+            filtered_metrics, 'parsed_text_block_count', 0),
+        'baseline_body_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'body_text_block_count', 0),
+        'filtered_body_text_block_count': _filtered_parse_metric(
+            filtered_metrics, 'body_text_block_count', 0),
+        'baseline_paragraph_like_text_block_count': _filtered_parse_metric(
+            baseline_metrics, 'paragraph_like_text_block_count', 0),
+        'filtered_paragraph_like_text_block_count': _filtered_parse_metric(
+            filtered_metrics, 'paragraph_like_text_block_count', 0),
+        'baseline_table_count': _filtered_parse_metric(baseline_metrics, 'table_count', 0),
+        'filtered_table_count': _filtered_parse_metric(filtered_metrics, 'table_count', 0),
+        'baseline_image_count': _filtered_parse_metric(baseline_metrics, 'image_count', 0),
+        'filtered_image_count': _filtered_parse_metric(filtered_metrics, 'image_count', 0),
+        'baseline_section_count': _filtered_parse_metric(baseline_metrics, 'section_count', 0),
+        'filtered_section_count': _filtered_parse_metric(filtered_metrics, 'section_count', 0),
+        'body_region_removed_count': body_removed,
+        'rejected_unsure_layout_placeholder_removed_count': blocked_removed,
+        'raw_pages_restored_or_reloaded': bool(restore_completed),
+        'restore_fingerprint_match': bool(restore_fingerprint_match),
+        'production_default_changed': False,
+        'removed_count_matches_phase_2m': consistency.get('removed_count_matches_phase_2m', False),
+        'removed_count_matches_phase_2n': consistency.get('removed_count_matches_phase_2n', False),
+        'removed_count_matches_phase_2o': consistency.get('removed_count_matches_phase_2o', False),
+    }
+
+
+def _filtered_parse_warnings(
+        summary: dict,
+        baseline_metrics: dict,
+        filtered_metrics: dict,
+        mapping_report: dict,
+        consistency: dict,
+        apply_skipped_reason: str = '') -> list:
+    warnings = []
+    for warning in (mapping_report or {}).get('safety_warnings', []) or []:
+        warnings.append({
+            'type': f'mapping_{warning.get("type", "warning")}',
+            'message': warning.get('message', ''),
+            'count': warning.get('count'),
+        })
+    for warning in (baseline_metrics or {}).get('warnings', []) or []:
+        warnings.append({
+            'type': f'baseline_{warning.get("type", "parse_warning")}',
+            'message': warning.get('message', ''),
+            'page_number': warning.get('page_number'),
+        })
+    for warning in (filtered_metrics or {}).get('warnings', []) or []:
+        warnings.append({
+            'type': f'filtered_{warning.get("type", "parse_warning")}',
+            'message': warning.get('message', ''),
+            'page_number': warning.get('page_number'),
+        })
+    if apply_skipped_reason:
+        warnings.append({
+            'type': 'filtered_parse_apply_skipped',
+            'reason': apply_skipped_reason,
+        })
+    if not summary.get('raw_pages_restored_or_reloaded'):
+        warnings.append({'type': 'raw_pages_not_restored_or_reloaded'})
+    if not summary.get('restore_fingerprint_match'):
+        warnings.append({'type': 'restore_fingerprint_mismatch'})
+    if summary.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removed_during_filtered_parse',
+            'count': summary.get('body_region_removed_count'),
+        })
+    if summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+        warnings.append({
+            'type': 'blocked_or_placeholder_removed_during_filtered_parse',
+            'count': summary.get('rejected_unsure_layout_placeholder_removed_count'),
+        })
+    for before_key, after_key, warning_type in (
+            ('baseline_table_count', 'filtered_table_count', 'table_count_changed'),
+            ('baseline_image_count', 'filtered_image_count', 'image_count_changed'),
+            ('baseline_section_count', 'filtered_section_count', 'section_count_changed')):
+        if summary.get(before_key, 0) != summary.get(after_key, 0):
+            warnings.append({
+                'type': warning_type,
+                'baseline': summary.get(before_key, 0),
+                'filtered': summary.get(after_key, 0),
+            })
+    if summary.get('filtered_body_text_block_count', 0) < summary.get('baseline_body_text_block_count', 0):
+        warnings.append({
+            'type': 'body_text_block_count_dropped',
+            'baseline': summary.get('baseline_body_text_block_count', 0),
+            'filtered': summary.get('filtered_body_text_block_count', 0),
+        })
+    if summary.get('filtered_paragraph_like_text_block_count', 0) > summary.get('baseline_paragraph_like_text_block_count', 0):
+        warnings.append({
+            'type': 'paragraph_fragmentation_increased',
+            'baseline': summary.get('baseline_paragraph_like_text_block_count', 0),
+            'filtered': summary.get('filtered_paragraph_like_text_block_count', 0),
+        })
+    if not consistency.get('removed_count_matches_phase_2m', False):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2m',
+            'expected': consistency.get('phase_2m_mapped_raw_object_count'),
+            'observed': consistency.get('removed_raw_block_count'),
+        })
+    if not consistency.get('removed_count_matches_phase_2n', True):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2n',
+            'expected': consistency.get('phase_2n_removed_copied_block_count'),
+            'observed': consistency.get('removed_raw_block_count'),
+        })
+    if not consistency.get('removed_count_matches_phase_2o', True):
+        warnings.append({
+            'type': 'removed_count_mismatch_phase_2o',
+            'expected': consistency.get('phase_2o_removed_during_apply_count'),
+            'observed': consistency.get('removed_raw_block_count'),
+        })
+    if not consistency.get('expected_mapping_count_matches_phase_2m', True):
+        warnings.append({
+            'type': 'expected_mapping_count_mismatch_phase_2m',
+            'expected': consistency.get('expected_mapping_count'),
+            'observed': consistency.get('phase_2m_mapped_raw_object_count'),
+        })
+    return warnings
+
+
+def _filtered_parse_pollution_reduction(
+        removed_objects: list,
+        baseline_metrics: dict,
+        filtered_metrics: dict) -> dict:
+    removed_boundary_count = sum(
+        1 for item in removed_objects or []
+        if item.get('region') in {REGION_TOP, REGION_BOTTOM})
+    return {
+        'removed_boundary_raw_block_count': removed_boundary_count,
+        'removed_header_footer_page_number_count': len(removed_objects or []),
+        'parsed_text_block_delta': (
+            _filtered_parse_metric(baseline_metrics, 'parsed_text_block_count', 0) -
+            _filtered_parse_metric(filtered_metrics, 'parsed_text_block_count', 0)),
+        'body_text_block_delta': (
+            _filtered_parse_metric(baseline_metrics, 'body_text_block_count', 0) -
+            _filtered_parse_metric(filtered_metrics, 'body_text_block_count', 0)),
+    }
+
+
+def _filtered_parse_safe_for_phase_2q(summary: dict, warnings: list) -> bool:
+    blocking_types = {
+        'mapping_ambiguous_raw_object_match',
+        'mapping_missing_raw_object_match',
+        'filtered_parse_apply_skipped',
+        'raw_pages_not_restored_or_reloaded',
+        'restore_fingerprint_mismatch',
+        'body_region_removed_during_filtered_parse',
+        'blocked_or_placeholder_removed_during_filtered_parse',
+        'body_text_block_count_dropped',
+        'paragraph_fragmentation_increased',
+        'removed_count_mismatch_phase_2m',
+        'removed_count_mismatch_phase_2n',
+        'removed_count_mismatch_phase_2o',
+    }
+    warning_types = {warning.get('type') for warning in warnings or []}
+    return (
+        bool(summary.get('removed_raw_block_count')) and
+        bool(summary.get('raw_pages_restored_or_reloaded')) and
+        bool(summary.get('restore_fingerprint_match')) and
+        bool(summary.get('removed_count_matches_phase_2m')) and
+        bool(summary.get('removed_count_matches_phase_2n')) and
+        bool(summary.get('removed_count_matches_phase_2o')) and
+        not summary.get('body_region_removed_count', 0) and
+        not summary.get('rejected_unsure_layout_placeholder_removed_count', 0) and
+        not warning_types.intersection(blocking_types))
+
+
+def _filtered_parse_recommendation(summary: dict, warnings: list) -> str:
+    if _filtered_parse_safe_for_phase_2q(summary, warnings):
+        if warnings:
+            return 'Filtered parse experiment preserved reviewed/body safety invariants, but non-blocking parse metric changes still need manual review before Phase 2Q.'
+        return 'Filtered parse experiment preserved reviewed/body safety invariants; Phase 2Q can remain opt-in and guarded.'
+    return 'Do not connect reviewed filtering to default parsing yet; resolve filtered-parse warnings first.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
