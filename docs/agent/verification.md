@@ -3759,3 +3759,130 @@ Production integration should remain blocked. The next phase should add the
 remaining synthetic fixture coverage for callout/text-box content, list/heading
 boundaries, and synthetic table geometry/DOCX residual behavior before any
 default or public opt-in integration is attempted.
+
+## Phase 3A
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 3A added a minimal internal opt-in configuration scaffold for reviewed
+header/footer filtering experiments. The scaffold is report/config only and does
+not enable production filtering.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public CLI flag was added.
+- Reviewed filtering remains disabled by default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Internal config fields
+
+Default internal config values:
+
+- `enabled`: `False`
+- `mode`: `dry_run`
+- `review_decisions_path`: empty
+- `review_decisions`: `None`
+- `require_explicit_approval`: `True`
+- `allow_raw_would_exclude`: `False`
+- `allow_unsure`: `False`
+- `allow_rejected`: `False`
+- `protect_body_region`: `True`
+- `protect_layout_placeholders`: `True`
+- `collect_diagnostics`: `True`
+- `write_local_reports`: `False`
+- `max_pages`: `None`
+- `page_subset`: empty list
+- `fail_closed_on_warning`: `True`
+
+Supported internal modes:
+
+- `dry_run`
+- `simulation`
+- `guarded_apply_restore`
+- `filtered_parse_experiment`
+- `future_apply`
+
+`future_apply` is still blocked because permanent production filtering is not
+implemented.
+
+### Fail-closed behavior
+
+The config report blocks internal experiments when:
+
+- the config is missing or disabled
+- review decisions are missing
+- raw `would_exclude` candidates do not have explicit approval
+- rejected or unsure decisions are present and protected
+- body-region candidates are encountered while body protection is enabled
+- layout placeholders are encountered while placeholder protection is enabled
+- `future_apply` is requested
+
+The scaffold can produce JSON-serializable diagnostics and translate a ready
+internal config into existing private `Pages` diagnostic settings. It does not
+connect to public CLI behavior and does not make filtering default-on.
+
+### Tests added
+
+- Default config disables reviewed filtering.
+- Missing config preserves disabled behavior.
+- `enabled=False` preserves disabled behavior.
+- Enabled config without review decisions is blocked.
+- Raw `would_exclude` without approval is blocked.
+- Rejected and unsure decisions remain blocked.
+- Body-region candidates remain protected.
+- Layout-placeholder candidates remain protected.
+- Config summaries are JSON-serializable.
+- Public/default conversion settings remain unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 238 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 238 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local sample PDFs, generated local reports, `.venv/`,
+generated caches, and conversion test outputs remain ignored.
+
+### Phase 3A recommendation
+
+Phase 3B should remain internal and non-default. The next safe step is to use
+the config scaffold to drive one narrow guarded diagnostic path in tests or local
+experiments, while keeping public CLI/API exposure and production default
+integration blocked.

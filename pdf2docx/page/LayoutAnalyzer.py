@@ -33,6 +33,18 @@ DECISION_REJECT_EXCLUDE = 'reject_exclude'
 DECISION_UNSURE = 'unsure'
 DECISION_NONE = 'none'
 DECISION_CONFLICT = 'conflict'
+REVIEWED_FILTERING_MODE_DRY_RUN = 'dry_run'
+REVIEWED_FILTERING_MODE_SIMULATION = 'simulation'
+REVIEWED_FILTERING_MODE_GUARDED_APPLY_RESTORE = 'guarded_apply_restore'
+REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT = 'filtered_parse_experiment'
+REVIEWED_FILTERING_MODE_FUTURE_APPLY = 'future_apply'
+REVIEWED_FILTERING_MODES = {
+    REVIEWED_FILTERING_MODE_DRY_RUN,
+    REVIEWED_FILTERING_MODE_SIMULATION,
+    REVIEWED_FILTERING_MODE_GUARDED_APPLY_RESTORE,
+    REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT,
+    REVIEWED_FILTERING_MODE_FUTURE_APPLY,
+}
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
@@ -475,6 +487,150 @@ def parse_table_geometry_visual_review_markdown(markdown_text: str) -> dict:
             'decision_counts': dict(sorted(decision_counts.items())),
         },
     }
+
+
+def build_reviewed_filtering_internal_config(config: dict = None, **overrides) -> dict:
+    '''Build a JSON-serializable internal config for reviewed filtering experiments.'''
+    merged = _default_reviewed_filtering_internal_config()
+    if config:
+        merged.update(dict(config))
+    if overrides:
+        merged.update(overrides)
+
+    mode = normalize_text(merged.get('mode') or REVIEWED_FILTERING_MODE_DRY_RUN)
+    if not mode:
+        mode = REVIEWED_FILTERING_MODE_DRY_RUN
+
+    page_subset = merged.get('page_subset', [])
+    if page_subset is None:
+        page_subset = []
+    elif isinstance(page_subset, (tuple, set)):
+        page_subset = list(page_subset)
+    elif not isinstance(page_subset, list):
+        page_subset = [page_subset]
+
+    max_pages = merged.get('max_pages')
+    if max_pages in ('', None):
+        max_pages = None
+    else:
+        max_pages = _reviewed_filtering_config_int_or_none(max_pages)
+
+    normalized = {
+        'enabled': bool(merged.get('enabled', False)),
+        'mode': mode,
+        'review_decisions_path': normalize_text(merged.get('review_decisions_path', '')),
+        'review_decisions': merged.get('review_decisions'),
+        'require_explicit_approval': bool(merged.get('require_explicit_approval', True)),
+        'allow_raw_would_exclude': bool(merged.get('allow_raw_would_exclude', False)),
+        'allow_unsure': bool(merged.get('allow_unsure', False)),
+        'allow_rejected': bool(merged.get('allow_rejected', False)),
+        'protect_body_region': bool(merged.get('protect_body_region', True)),
+        'protect_layout_placeholders': bool(merged.get('protect_layout_placeholders', True)),
+        'collect_diagnostics': bool(merged.get('collect_diagnostics', True)),
+        'write_local_reports': bool(merged.get('write_local_reports', False)),
+        'max_pages': max_pages,
+        'page_subset': page_subset,
+        'fail_closed_on_warning': bool(merged.get('fail_closed_on_warning', True)),
+        'public_cli_exposed': False,
+        'production_default_enabled': False,
+    }
+    return normalized
+
+
+def build_reviewed_filtering_internal_config_report(
+        config: dict = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        enabled: bool = True) -> dict:
+    '''Summarize an internal reviewed-filtering config without applying filtering.'''
+    internal_config = build_reviewed_filtering_internal_config(config)
+    if review_decisions is None:
+        review_decisions = internal_config.get('review_decisions')
+    candidates = _dry_run_candidates(dry_run_report)
+    candidate_rows = _reviewed_filtering_config_candidate_rows(
+        candidates,
+        review_decisions,
+        internal_config)
+    summary = _reviewed_filtering_config_summary(
+        internal_config,
+        candidate_rows,
+        review_decisions,
+        enabled=enabled)
+    warnings = _reviewed_filtering_config_warnings(
+        internal_config,
+        summary,
+        candidate_rows,
+        review_decisions,
+        enabled=enabled)
+    activation_status = _reviewed_filtering_config_activation_status(
+        internal_config,
+        summary,
+        warnings,
+        enabled=enabled)
+    summary['activation_status'] = activation_status
+
+    return {
+        'enabled': bool(enabled and internal_config.get('enabled', False)),
+        'policy': 'internal_reviewed_header_footer_filtering_config_only',
+        'config': internal_config,
+        'summary': summary,
+        'candidates': candidate_rows,
+        'warnings': warnings,
+        'document_parse_settings': reviewed_filtering_config_to_document_parse_settings(
+            internal_config,
+            review_decisions=review_decisions,
+            activation_status=activation_status),
+        'recommendation': {
+            'safe_for_internal_experiment': activation_status == 'ready_for_internal_experiment',
+            'reason': _reviewed_filtering_config_recommendation(
+                activation_status,
+                warnings),
+        },
+    }
+
+
+def reviewed_filtering_config_to_document_parse_settings(
+        config: dict = None,
+        review_decisions=None,
+        activation_status: str = '') -> dict:
+    '''Translate a ready internal config into existing private Pages settings.'''
+    internal_config = build_reviewed_filtering_internal_config(config)
+    if activation_status and activation_status != 'ready_for_internal_experiment':
+        return {}
+    if not internal_config.get('enabled', False):
+        return {}
+    if review_decisions is None:
+        review_decisions = internal_config.get('review_decisions')
+    if not review_decisions:
+        return {}
+
+    mode = internal_config.get('mode')
+    if mode not in REVIEWED_FILTERING_MODES:
+        return {}
+    if mode == REVIEWED_FILTERING_MODE_FUTURE_APPLY:
+        return {}
+
+    settings = {
+        'layout_analysis': True,
+        '_document_parse_filtering_review_decisions': review_decisions,
+    }
+    if mode in {
+            REVIEWED_FILTERING_MODE_DRY_RUN,
+            REVIEWED_FILTERING_MODE_SIMULATION,
+            REVIEWED_FILTERING_MODE_GUARDED_APPLY_RESTORE,
+            REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT}:
+        settings['_document_parse_filtering_hook_enabled'] = bool(
+            internal_config.get('collect_diagnostics', True))
+        settings['_document_parse_filtering_apply'] = False
+    if mode in {
+            REVIEWED_FILTERING_MODE_GUARDED_APPLY_RESTORE,
+            REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT}:
+        settings['_document_parse_raw_object_mapping_enabled'] = True
+        settings['_document_parse_copied_raw_filtering_enabled'] = True
+        settings['_document_parse_guarded_raw_apply_restore_enabled'] = True
+    if mode == REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT:
+        settings['_document_parse_filtered_parse_experiment_enabled'] = True
+    return settings
 
 
 def build_reviewed_header_footer_filter_report(
@@ -2872,6 +3028,254 @@ def _table_visual_counts_preserved(item: dict) -> bool:
         item.get('column_count_before') == item.get('column_count_after') and
         item.get('cell_count_before') is not None and
         item.get('cell_count_before') == item.get('cell_count_after'))
+
+
+def _default_reviewed_filtering_internal_config() -> dict:
+    return {
+        'enabled': False,
+        'mode': REVIEWED_FILTERING_MODE_DRY_RUN,
+        'review_decisions_path': '',
+        'review_decisions': None,
+        'require_explicit_approval': True,
+        'allow_raw_would_exclude': False,
+        'allow_unsure': False,
+        'allow_rejected': False,
+        'protect_body_region': True,
+        'protect_layout_placeholders': True,
+        'collect_diagnostics': True,
+        'write_local_reports': False,
+        'max_pages': None,
+        'page_subset': [],
+        'fail_closed_on_warning': True,
+    }
+
+
+def _reviewed_filtering_config_int_or_none(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _reviewed_filtering_config_candidate_rows(
+        candidates: list,
+        review_decisions,
+        config: dict) -> list:
+    decision_map = _review_decision_map(review_decisions)
+    return [
+        _reviewed_filtering_config_candidate_row(candidate, decision_map, config)
+        for candidate in candidates or []
+    ]
+
+
+def _reviewed_filtering_config_candidate_row(
+        candidate: dict,
+        decision_map: dict,
+        config: dict) -> dict:
+    decision = (
+        decision_map.get(candidate.get('fingerprint')) or
+        decision_map.get(candidate.get('candidate_id')) or
+        DECISION_NONE)
+    eligible, reason = _reviewed_filtering_config_candidate_allowed(
+        candidate,
+        decision,
+        config)
+    return {
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'action': candidate.get('action', ''),
+        'region': candidate.get('region', ''),
+        'regions': list(candidate.get('regions', []) or []),
+        'manual_decision': decision,
+        'eligible_for_reviewed_filtering': bool(eligible),
+        'blocked_reason': '' if eligible else reason,
+        'support_count': _readiness_int(candidate.get('support_count', 0)),
+        'page_count': _readiness_int(candidate.get('page_count', 0)),
+        'affected_pages': list(candidate.get('affected_pages', []) or []),
+    }
+
+
+def _reviewed_filtering_config_candidate_allowed(
+        candidate: dict,
+        decision: str,
+        config: dict) -> tuple:
+    if not config.get('enabled', False):
+        return False, 'config_disabled'
+    if config.get('mode') not in REVIEWED_FILTERING_MODES:
+        return False, 'invalid_mode'
+    if candidate.get('action') != ACTION_WOULD_EXCLUDE:
+        return False, 'dry_run_action_not_would_exclude'
+    if (
+            config.get('protect_body_region', True) and
+            _candidate_regions(candidate).intersection({REGION_BODY})):
+        return False, 'body_region_protected'
+    if (
+            config.get('protect_layout_placeholders', True) and
+            candidate.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER):
+        return False, 'layout_placeholder_protected'
+    if decision == DECISION_REJECT_EXCLUDE and not config.get('allow_rejected', False):
+        return False, 'rejected_candidate_blocked'
+    if decision == DECISION_UNSURE and not config.get('allow_unsure', False):
+        return False, 'unsure_candidate_blocked'
+    if decision in {DECISION_NONE, ''} and not config.get('allow_raw_would_exclude', False):
+        return False, 'explicit_review_decision_required'
+    if (
+            config.get('require_explicit_approval', True) and
+            decision != DECISION_APPROVE_EXCLUDE):
+        return False, 'manual_decision_not_approved'
+
+    role = candidate.get('proposed_role')
+    if role not in {ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER}:
+        return False, 'role_not_filterable'
+    return True, 'approved_review_decision'
+
+
+def _candidate_regions(candidate: dict) -> set:
+    regions = set(candidate.get('regions', []) or [])
+    if candidate.get('region'):
+        regions.add(candidate.get('region'))
+    return regions
+
+
+def _reviewed_filtering_config_summary(
+        config: dict,
+        candidate_rows: list,
+        review_decisions,
+        enabled: bool) -> dict:
+    decision_counts = _decision_counts(review_decisions)
+    row_decision_counts = Counter(
+        row.get('manual_decision', DECISION_NONE)
+        for row in candidate_rows or [])
+    return {
+        'enabled': bool(enabled and config.get('enabled', False)),
+        'mode': config.get('mode'),
+        'default_enabled': False,
+        'public_cli_exposed': False,
+        'production_default_enabled': False,
+        'require_explicit_approval': bool(config.get('require_explicit_approval', True)),
+        'allow_raw_would_exclude': bool(config.get('allow_raw_would_exclude', False)),
+        'allow_unsure': bool(config.get('allow_unsure', False)),
+        'allow_rejected': bool(config.get('allow_rejected', False)),
+        'protect_body_region': bool(config.get('protect_body_region', True)),
+        'protect_layout_placeholders': bool(config.get('protect_layout_placeholders', True)),
+        'collect_diagnostics': bool(config.get('collect_diagnostics', True)),
+        'write_local_reports': bool(config.get('write_local_reports', False)),
+        'fail_closed_on_warning': bool(config.get('fail_closed_on_warning', True)),
+        'review_decision_count': sum(decision_counts.values()),
+        'approve_count': row_decision_counts.get(DECISION_APPROVE_EXCLUDE, 0),
+        'reject_count': row_decision_counts.get(DECISION_REJECT_EXCLUDE, 0),
+        'unsure_count': row_decision_counts.get(DECISION_UNSURE, 0),
+        'none_count': row_decision_counts.get(DECISION_NONE, 0),
+        'candidate_count': len(candidate_rows or []),
+        'eligible_candidate_count': sum(
+            1 for row in candidate_rows or []
+            if row.get('eligible_for_reviewed_filtering')),
+        'blocked_candidate_count': sum(
+            1 for row in candidate_rows or []
+            if not row.get('eligible_for_reviewed_filtering')),
+        'body_region_candidate_count': sum(
+            1 for row in candidate_rows or []
+            if REGION_BODY in _candidate_regions(row)),
+        'layout_placeholder_candidate_count': sum(
+            1 for row in candidate_rows or []
+            if row.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER),
+        'max_pages': config.get('max_pages'),
+        'page_subset': list(config.get('page_subset', []) or []),
+    }
+
+
+def _reviewed_filtering_config_warnings(
+        config: dict,
+        summary: dict,
+        candidate_rows: list,
+        review_decisions,
+        enabled: bool) -> list:
+    warnings = []
+    if not enabled or not config.get('enabled', False):
+        warnings.append({'type': 'reviewed_filtering_config_disabled'})
+        return warnings
+    if config.get('mode') not in REVIEWED_FILTERING_MODES:
+        warnings.append({
+            'type': 'invalid_reviewed_filtering_mode',
+            'mode': config.get('mode'),
+        })
+    if not review_decisions:
+        warnings.append({'type': 'missing_review_decisions'})
+    if summary.get('none_count', 0) and not config.get('allow_raw_would_exclude', False):
+        warnings.append({
+            'type': 'raw_would_exclude_without_approval_blocked',
+            'count': summary.get('none_count'),
+        })
+    if summary.get('reject_count', 0) and not config.get('allow_rejected', False):
+        warnings.append({
+            'type': 'rejected_candidates_blocked',
+            'count': summary.get('reject_count'),
+        })
+    if summary.get('unsure_count', 0) and not config.get('allow_unsure', False):
+        warnings.append({
+            'type': 'unsure_candidates_blocked',
+            'count': summary.get('unsure_count'),
+        })
+    if (
+            summary.get('body_region_candidate_count', 0) and
+            config.get('protect_body_region', True)):
+        warnings.append({
+            'type': 'body_region_candidates_protected',
+            'count': summary.get('body_region_candidate_count'),
+        })
+    if (
+            summary.get('layout_placeholder_candidate_count', 0) and
+            config.get('protect_layout_placeholders', True)):
+        warnings.append({
+            'type': 'layout_placeholder_candidates_protected',
+            'count': summary.get('layout_placeholder_candidate_count'),
+        })
+    if (
+            summary.get('eligible_candidate_count', 0) == 0 and
+            candidate_rows):
+        warnings.append({'type': 'no_eligible_reviewed_filtering_candidates'})
+    if config.get('mode') == REVIEWED_FILTERING_MODE_FUTURE_APPLY:
+        warnings.append({
+            'type': 'future_apply_not_implemented',
+            'message': 'Permanent production filtering is intentionally unavailable.',
+        })
+    return warnings
+
+
+def _reviewed_filtering_config_activation_status(
+        config: dict,
+        summary: dict,
+        warnings: list,
+        enabled: bool) -> str:
+    if not enabled or not config.get('enabled', False):
+        return 'disabled'
+    warning_types = {warning.get('type') for warning in warnings or []}
+    blocking = {
+        'invalid_reviewed_filtering_mode',
+        'missing_review_decisions',
+        'raw_would_exclude_without_approval_blocked',
+        'future_apply_not_implemented',
+    }
+    if config.get('fail_closed_on_warning', True) and warning_types:
+        return 'blocked'
+    if warning_types.intersection(blocking):
+        return 'blocked'
+    if summary.get('eligible_candidate_count', 0) <= 0:
+        return 'blocked'
+    return 'ready_for_internal_experiment'
+
+
+def _reviewed_filtering_config_recommendation(
+        activation_status: str,
+        warnings: list) -> str:
+    if activation_status == 'disabled':
+        return 'Reviewed filtering remains disabled by default.'
+    if activation_status == 'ready_for_internal_experiment':
+        return 'Internal config is ready for a guarded, non-default experiment only.'
+    warning_types = sorted({warning.get('type') for warning in warnings or []})
+    return f'Reviewed filtering config is fail-closed; resolve warnings first: {warning_types}.'
 
 
 def _dry_run_candidates(dry_run_report: dict) -> list:

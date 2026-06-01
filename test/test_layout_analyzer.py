@@ -30,6 +30,8 @@ ROLE_REVIEW_ONLY = LayoutAnalyzer.ROLE_REVIEW_ONLY
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
+build_reviewed_filtering_internal_config = LayoutAnalyzer.build_reviewed_filtering_internal_config
+build_reviewed_filtering_internal_config_report = LayoutAnalyzer.build_reviewed_filtering_internal_config_report
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
@@ -58,6 +60,7 @@ build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragrap
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 build_table_delta_investigation_report = LayoutAnalyzer.build_table_delta_investigation_report
+reviewed_filtering_config_to_document_parse_settings = LayoutAnalyzer.reviewed_filtering_config_to_document_parse_settings
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
@@ -4273,6 +4276,160 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['candidate_count'], 0)
         self.assertEqual(summary['summary']['sample_count'], 0)
 
+    def test_reviewed_filtering_internal_config_default_is_disabled(self):
+        config = build_reviewed_filtering_internal_config()
+        report = build_reviewed_filtering_internal_config_report(
+            config,
+            _internal_config_dry_run_report(),
+            _internal_config_decisions(
+                ('header-1', 'synthetic header||top', 'approve_exclude')))
+
+        self.assertFalse(config['enabled'])
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['activation_status'], 'disabled')
+        self.assertEqual(report['document_parse_settings'], {})
+
+    def test_reviewed_filtering_missing_config_preserves_disabled_behavior(self):
+        report = build_reviewed_filtering_internal_config_report(
+            dry_run_report=_internal_config_dry_run_report(),
+            review_decisions=_internal_config_decisions(
+                ('header-1', 'synthetic header||top', 'approve_exclude')))
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['activation_status'], 'disabled')
+        self.assertIn(
+            'reviewed_filtering_config_disabled',
+            _config_warning_types(report))
+
+    def test_reviewed_filtering_enabled_false_preserves_disabled_behavior(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': False, 'mode': 'guarded_apply_restore'},
+            _internal_config_dry_run_report(),
+            _internal_config_decisions(
+                ('header-1', 'synthetic header||top', 'approve_exclude')))
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['activation_status'], 'disabled')
+        self.assertEqual(report['document_parse_settings'], {})
+
+    def test_reviewed_filtering_enabled_without_review_decisions_is_blocked(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': True, 'mode': 'dry_run'},
+            _internal_config_dry_run_report())
+
+        self.assertEqual(report['summary']['activation_status'], 'blocked')
+        self.assertIn('missing_review_decisions', _config_warning_types(report))
+        self.assertFalse(report['recommendation']['safe_for_internal_experiment'])
+
+    def test_reviewed_filtering_raw_would_exclude_without_approval_is_blocked(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': True, 'mode': 'dry_run'},
+            _internal_config_dry_run_report(),
+            {'decisions': [], 'summary': {'candidate_count': 0}})
+
+        self.assertEqual(report['summary']['eligible_candidate_count'], 0)
+        self.assertIn(
+            'raw_would_exclude_without_approval_blocked',
+            _config_warning_types(report))
+        self.assertEqual(report['summary']['activation_status'], 'blocked')
+
+    def test_reviewed_filtering_rejected_and_unsure_decisions_remain_blocked(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': True, 'mode': 'dry_run'},
+            _internal_config_dry_run_report(),
+            _internal_config_decisions(
+                ('header-1', 'synthetic header||top', 'reject_exclude'),
+                ('footer-1', 'synthetic footer||bottom', 'unsure')))
+
+        blocked = {
+            item['candidate_id']: item['blocked_reason']
+            for item in report['candidates']
+        }
+
+        self.assertEqual(blocked['header-1'], 'rejected_candidate_blocked')
+        self.assertEqual(blocked['footer-1'], 'unsure_candidate_blocked')
+        self.assertEqual(report['summary']['eligible_candidate_count'], 0)
+
+    def test_reviewed_filtering_body_region_candidates_remain_protected(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': True, 'mode': 'dry_run'},
+            _internal_config_dry_run_report(),
+            _internal_config_decisions(
+                ('body-1', 'body repeat||body', 'approve_exclude')))
+
+        body_row = [
+            row for row in report['candidates']
+            if row['candidate_id'] == 'body-1'
+        ][0]
+
+        self.assertFalse(body_row['eligible_for_reviewed_filtering'])
+        self.assertEqual(body_row['blocked_reason'], 'body_region_protected')
+        self.assertIn('body_region_candidates_protected', _config_warning_types(report))
+
+    def test_reviewed_filtering_layout_placeholder_candidates_remain_protected(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {'enabled': True, 'mode': 'dry_run'},
+            _internal_config_dry_run_report(),
+            _internal_config_decisions(
+                ('placeholder-1', '<image>||top', 'approve_exclude')))
+
+        placeholder_row = [
+            row for row in report['candidates']
+            if row['candidate_id'] == 'placeholder-1'
+        ][0]
+
+        self.assertFalse(placeholder_row['eligible_for_reviewed_filtering'])
+        self.assertEqual(placeholder_row['blocked_reason'], 'layout_placeholder_protected')
+        self.assertIn(
+            'layout_placeholder_candidates_protected',
+            _config_warning_types(report))
+
+    def test_reviewed_filtering_config_summary_is_json_serializable(self):
+        report = build_reviewed_filtering_internal_config_report(
+            {
+                'enabled': True,
+                'mode': 'guarded_apply_restore',
+                'page_subset': (0, 2, 4),
+                'max_pages': '5',
+            },
+            _internal_config_safe_dry_run_report(),
+            _internal_config_decisions(
+                ('header-1', 'synthetic header||top', 'approve_exclude'),
+                ('footer-1', 'synthetic footer||bottom', 'approve_exclude')))
+
+        encoded = json.dumps(report)
+        decoded = json.loads(encoded)
+
+        self.assertEqual(decoded['config']['page_subset'], [0, 2, 4])
+        self.assertEqual(decoded['config']['max_pages'], 5)
+        self.assertEqual(
+            decoded['summary']['activation_status'],
+            'ready_for_internal_experiment')
+        self.assertTrue(decoded['document_parse_settings']['layout_analysis'])
+        self.assertTrue(
+            decoded['document_parse_settings']['_document_parse_guarded_raw_apply_restore_enabled'])
+
+    def test_reviewed_filtering_internal_config_does_not_change_public_defaults(self):
+        _require_synthetic_pdf_support(self)
+        doc = fitz.open()
+        try:
+            doc.new_page(width=72, height=72)
+            stream = doc.tobytes()
+        finally:
+            doc.close()
+        converter = Converter(stream=stream)
+        try:
+            settings = converter.default_settings
+        finally:
+            converter.close()
+
+        self.assertNotIn('reviewed_header_footer_filtering', settings)
+        self.assertNotIn('_document_parse_filtering_review_decisions', settings)
+        self.assertEqual(
+            reviewed_filtering_config_to_document_parse_settings(
+                build_reviewed_filtering_internal_config()),
+            {})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -5314,6 +5471,91 @@ def _corpus_review_decisions(*items):
                 decision['manual_decision'] for decision in decisions)),
         },
     }
+
+
+def _internal_config_dry_run_report():
+    return {
+        'candidates': [
+            {
+                'candidate_id': 'header-1',
+                'fingerprint': 'synthetic header||top',
+                'proposed_role': ROLE_HEADER,
+                'action': ACTION_WOULD_EXCLUDE,
+                'region': REGION_TOP,
+                'regions': [REGION_TOP],
+                'support_count': 3,
+                'page_count': 3,
+                'affected_pages': [0, 1, 2],
+            },
+            {
+                'candidate_id': 'footer-1',
+                'fingerprint': 'synthetic footer||bottom',
+                'proposed_role': ROLE_FOOTER,
+                'action': ACTION_WOULD_EXCLUDE,
+                'region': REGION_BOTTOM,
+                'regions': [REGION_BOTTOM],
+                'support_count': 3,
+                'page_count': 3,
+                'affected_pages': [0, 1, 2],
+            },
+            {
+                'candidate_id': 'body-1',
+                'fingerprint': 'body repeat||body',
+                'proposed_role': ROLE_HEADER,
+                'action': ACTION_WOULD_EXCLUDE,
+                'region': REGION_BODY,
+                'regions': [REGION_BODY],
+                'support_count': 3,
+                'page_count': 3,
+                'affected_pages': [0, 1, 2],
+            },
+            {
+                'candidate_id': 'placeholder-1',
+                'fingerprint': '<image>||top',
+                'proposed_role': ROLE_LAYOUT_PLACEHOLDER,
+                'action': ACTION_WOULD_EXCLUDE,
+                'region': REGION_TOP,
+                'regions': [REGION_TOP],
+                'support_count': 3,
+                'page_count': 3,
+                'affected_pages': [0, 1, 2],
+            },
+        ],
+    }
+
+
+def _internal_config_safe_dry_run_report():
+    report = _internal_config_dry_run_report()
+    return {
+        'candidates': [
+            candidate for candidate in report['candidates']
+            if candidate['candidate_id'] in {'header-1', 'footer-1'}
+        ],
+    }
+
+
+def _internal_config_decisions(*items):
+    decisions = [
+        {
+            'candidate_id': candidate_id,
+            'fingerprint': fingerprint,
+            'manual_decision': decision,
+            'checked_decisions': [decision],
+        }
+        for candidate_id, fingerprint, decision in items
+    ]
+    return {
+        'decisions': decisions,
+        'summary': {
+            'candidate_count': len(decisions),
+            'decision_counts': dict(Counter(
+                decision['manual_decision'] for decision in decisions)),
+        },
+    }
+
+
+def _config_warning_types(report):
+    return {warning['type'] for warning in report.get('warnings', [])}
 
 
 def _require_synthetic_pdf_support(testcase):

@@ -121,3 +121,55 @@ Production default integration remains blocked. The new synthetic coverage
 reduces reliance on ignored local PDFs, but future phases should add the
 remaining synthetic scenarios before any public or default filtering behavior is
 considered.
+
+## Internal Opt-In Config Surface
+
+Phase 3A added a minimal internal configuration scaffold for reviewed
+header/footer filtering experiments. The scaffold lives in the internal layout
+analysis helpers and is not exposed through the public CLI or public
+`Converter.convert()` defaults.
+
+Default state:
+
+- `enabled`: `False`
+- `mode`: `dry_run`
+- `require_explicit_approval`: `True`
+- `allow_raw_would_exclude`: `False`
+- `allow_unsure`: `False`
+- `allow_rejected`: `False`
+- `protect_body_region`: `True`
+- `protect_layout_placeholders`: `True`
+- `collect_diagnostics`: `True`
+- `write_local_reports`: `False`
+- `fail_closed_on_warning`: `True`
+
+Supported internal modes:
+
+- `dry_run`
+- `simulation`
+- `guarded_apply_restore`
+- `filtered_parse_experiment`
+- `future_apply`
+
+`future_apply` is intentionally blocked by the scaffold because permanent
+production filtering has not been implemented or approved.
+
+Safety rules:
+
+- No config means reviewed filtering is disabled.
+- `enabled=False` means reviewed filtering is disabled.
+- Enabled config without explicit review decisions is blocked.
+- Raw `would_exclude` labels are never sufficient approval.
+- `reject_exclude` and `unsure` candidates remain blocked.
+- Body-region candidates remain protected.
+- Layout-placeholder candidates remain protected.
+- Warnings fail closed by default.
+
+The scaffold can summarize itself as JSON-serializable diagnostics and can map a
+ready internal config into the existing private `Pages` diagnostic settings, but
+it does not apply production filtering and does not change default conversion
+behavior.
+
+Public CLI/API exposure remains intentionally blocked. Any future public-facing
+option needs a separate design review after the internal experiments and
+synthetic regressions are stronger.
