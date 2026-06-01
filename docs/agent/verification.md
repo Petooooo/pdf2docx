@@ -4006,3 +4006,133 @@ Phase 3C should remain internal and non-default. The next direction should be
 additional synthetic coverage for callout/text-box, list/heading, and synthetic
 table-geometry cases before any public opt-in or production-default integration
 is considered.
+
+## Phase 3C
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 3C added internal test-only filtered DOCX generation comparison support
+for synthetic fixtures. It validates that the Phase 3B private filtered parse
+integration can flow through existing DOCX generation without changing default
+conversion behavior.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- No Word section header/footer parts were generated.
+- No content was moved into DOCX headers/footers.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Synthetic fixtures used
+
+- `repeated_header_footer`
+- `body_table_near_footer`
+- `no_header_footer`
+
+The DOCX comparison helper writes baseline, filtered, and post-experiment
+default DOCX files only under temporary test directories.
+
+Repeated header/footer/page-number fixture:
+
+- Baseline vs filtered DOCX paragraphs: 27 / 15
+- Baseline vs filtered DOCX tables: 0 / 0
+- Removed approved header/footer/page-number count: 12
+- True residual header/footer pollution count: 0
+- Body text signature preserved: yes
+- Body text loss warnings: 0
+- Table text loss warnings: 0
+
+Body table-like content near footer fixture:
+
+- Baseline vs filtered DOCX paragraphs: 14 / 11
+- Baseline vs filtered DOCX tables: 3 / 3
+- Removed approved header/footer/page-number count: 6
+- True residual header/footer pollution count: 0
+- Body text signature preserved: yes
+- Body table-like text preserved: yes
+- Body text loss warnings: 0
+- Table text loss warnings: 0
+
+Negative/control behavior:
+
+- No-header/no-footer content remained preserved.
+- Raw `would_exclude` without approval removed nothing.
+- Rejected/unsure decisions stayed blocked by fail-closed behavior.
+- Body TextBlock count deltas are surfaced as diagnostics and are acceptable
+  only when body text signature is preserved.
+- Synthetic unsafe body text loss triggers fail-closed warnings.
+
+No local Phase 3C report was generated. Generated DOCX files were temporary
+test artifacts only and were not committed.
+
+### Tests added
+
+- Baseline and filtered DOCX generation comparison for repeated header/footer.
+- Internal filtered DOCX generation requires explicit ready private config.
+- Approved residual header/footer/page-number text is removed from body output.
+- Body-region text signature remains preserved.
+- Body table-like text near a footer remains preserved.
+- No-header/no-footer negative control preserves body content.
+- Raw `would_exclude` without approval removes nothing.
+- Rejected/unsure decisions remain blocked.
+- Unsafe body text loss fails closed.
+- Generated DOCX paths are temp-only.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "filtered_docx"
+```
+
+Result: passed. 21 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 251 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 251 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: only Phase 3C test/docs files were modified. Local sample PDFs,
+generated local reports, `.venv/`, caches, and test outputs remained ignored.
+Synthetic DOCX outputs were generated only under temporary test directories.
+
+### Phase 3C recommendation
+
+Phase 3D should remain internal and non-default. The next useful direction is
+to add synthetic coverage for callout/text-box, list/heading, and synthetic
+table-geometry delta scenarios before any public opt-in or production-default
+integration is considered.

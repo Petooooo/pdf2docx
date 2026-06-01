@@ -77,9 +77,11 @@ except Exception:
 try:
     import fitz
     from pdf2docx import Converter
+    from docx import Document as DocxDocument
 except Exception:
     fitz = None
     Converter = None
+    DocxDocument = None
 
 
 class TestLayoutAnalyzer(unittest.TestCase):
@@ -4613,6 +4615,162 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('parse_metric_body_text_block_count_dropped', warning_types)
         self.assertTrue(report['summary']['body_text_signature_preserved'])
 
+    def test_internal_filtered_docx_generation_removes_approved_synthetic_residuals(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-repeated.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            summary = report['summary']
+
+            self.assertTrue(summary['baseline_docx_exists'])
+            self.assertTrue(summary['filtered_docx_exists'])
+            self.assertGreater(summary['baseline_docx_size'], 0)
+            self.assertGreater(summary['filtered_docx_size'], 0)
+            self.assertTrue(summary['internal_filtered_parse_applied'])
+            self.assertGreater(summary['removed_approved_header_footer_page_number_count'], 0)
+            self.assertEqual(summary['true_residual_header_footer_pollution_count'], 0)
+            self.assertEqual(summary['body_text_loss_warning_count'], 0)
+            self.assertEqual(summary['table_text_loss_warning_count'], 0)
+            self.assertTrue(summary['body_text_signature_preserved'])
+            self.assertLessEqual(
+                summary['filtered_docx_paragraph_count'],
+                summary['baseline_docx_paragraph_count'])
+            self.assertTrue(summary['generated_docx_artifacts_temp_only'])
+            self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
+    def test_internal_filtered_docx_generation_preserves_body_table_like_text(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-body-table.pdf'
+            _write_synthetic_pdf(pdf_path, 'body_table_near_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            filtered_text = report['filtered_docx_metrics']['all_text']
+
+            self.assertIn('body table header', filtered_text)
+            self.assertIn('body table cell alpha', filtered_text)
+            self.assertIn('body table cell beta', filtered_text)
+            self.assertEqual(report['summary']['body_text_loss_warning_count'], 0)
+            self.assertEqual(report['summary']['table_text_loss_warning_count'], 0)
+            self.assertTrue(report['summary']['body_text_signature_preserved'])
+            self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
+    def test_internal_filtered_docx_negative_control_preserves_body_content(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-negative.pdf'
+            _write_synthetic_pdf(pdf_path, 'no_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = {'decisions': [], 'summary': {'candidate_count': 0}}
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+
+            self.assertFalse(report['summary']['internal_filtered_parse_applied'])
+            self.assertEqual(report['summary']['removed_approved_header_footer_page_number_count'], 0)
+            self.assertEqual(report['summary']['body_text_loss_warning_count'], 0)
+            self.assertTrue(report['summary']['body_text_signature_preserved'])
+
+    def test_internal_filtered_docx_raw_would_exclude_without_approval_removes_nothing(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-no-approval.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                {'decisions': [], 'summary': {'candidate_count': 0}},
+                layout,
+                Path(tmp))
+            filtered_text = report['filtered_docx_metrics']['all_text']
+
+            self.assertFalse(report['summary']['internal_filtered_parse_applied'])
+            self.assertEqual(report['summary']['removed_approved_header_footer_page_number_count'], 0)
+            self.assertIn('synthetic report header', filtered_text)
+            self.assertIn('synthetic report footer', filtered_text)
+
+    def test_internal_filtered_docx_rejected_unsure_decisions_remain_blocked(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-rejected.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            warning_types = {
+                warning['type']
+                for warning in report['internal_filtered_parse_report']['safety_warnings']
+            }
+
+            self.assertFalse(report['summary']['internal_filtered_parse_applied'])
+            self.assertIn('config_rejected_candidates_blocked', warning_types)
+            self.assertEqual(report['summary']['removed_approved_header_footer_page_number_count'], 0)
+
+    def test_synthetic_docx_comparison_fail_closes_on_body_text_loss(self):
+        baseline = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 2,
+            'table_count': 0,
+            'all_text': 'body text remains synthetic report header',
+        }
+        filtered = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 1,
+            'table_count': 0,
+            'all_text': '',
+        }
+        report = _synthetic_docx_comparison_report_from_metrics(
+            baseline,
+            filtered,
+            expected_body_texts=['body text remains'],
+            removed_texts=['synthetic report header'],
+            baseline_path='/tmp/baseline.docx',
+            filtered_path='/tmp/filtered.docx',
+            temp_root='/tmp',
+            internal_filtered_parse_report={
+                'applied_to_parse': True,
+                'summary': {'body_text_block_delta': -1},
+                'safety_warnings': [],
+            },
+            default_after_metrics=baseline)
+
+        self.assertFalse(report['recommendation']['safe_for_internal_filtered_docx'])
+        self.assertEqual(report['summary']['body_text_loss_warning_count'], 1)
+        self.assertIn(
+            'body_text_loss',
+            {warning['type'] for warning in report['safety_warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -5746,6 +5904,12 @@ def _require_synthetic_pdf_support(testcase):
         testcase.skipTest('Synthetic PDF regression tests require PyMuPDF and pdf2docx.')
 
 
+def _require_synthetic_docx_support(testcase):
+    _require_synthetic_pdf_support(testcase)
+    if DocxDocument is None:
+        testcase.skipTest('Synthetic DOCX comparison tests require python-docx.')
+
+
 def _write_synthetic_pdf(path, scenario):
     doc = fitz.open()
     try:
@@ -5957,6 +6121,279 @@ def _run_synthetic_internal_filtered_parse_integration(
         }
     finally:
         converter.close()
+
+
+def _run_synthetic_filtered_docx_comparison(
+        pdf_path,
+        review_decisions,
+        layout,
+        temp_root):
+    baseline_path = Path(temp_root) / 'baseline.docx'
+    filtered_path = Path(temp_root) / 'filtered.docx'
+    default_after_path = Path(temp_root) / 'default-after.docx'
+
+    baseline = _convert_synthetic_pdf_to_docx(pdf_path, baseline_path)
+    filtered = _convert_synthetic_pdf_to_docx(
+        pdf_path,
+        filtered_path,
+        review_decisions=review_decisions)
+    default_after = _convert_synthetic_pdf_to_docx(pdf_path, default_after_path)
+    filtering_report = _synthetic_filtering_report(layout, review_decisions)
+
+    return _synthetic_docx_comparison_report_from_metrics(
+        baseline['metrics'],
+        filtered['metrics'],
+        expected_body_texts=_body_text_fragments(layout),
+        removed_texts=_removed_text_fragments(filtering_report),
+        baseline_path=str(baseline_path),
+        filtered_path=str(filtered_path),
+        temp_root=str(temp_root),
+        internal_filtered_parse_report=filtered['internal_filtered_parse_report'],
+        default_after_metrics=default_after['metrics'])
+
+
+def _convert_synthetic_pdf_to_docx(
+        pdf_path,
+        docx_path,
+        review_decisions=None,
+        enabled=True):
+    converter = Converter(str(pdf_path))
+    settings = converter.default_settings.copy()
+    if review_decisions is not None:
+        settings['_reviewed_header_footer_filtering_config'] = build_reviewed_filtering_internal_config({
+            'enabled': enabled,
+            'mode': 'filtered_parse_experiment',
+            'review_decisions': review_decisions,
+        })
+    try:
+        converter.convert(str(docx_path), **settings)
+        return {
+            'metrics': _read_docx_file_metrics(docx_path),
+            'internal_config_report': converter.pages._reviewed_filtering_internal_config_report,
+            'internal_filtered_parse_report': (
+                converter.pages._reviewed_filtering_internal_filtered_parse_report or {}),
+        }
+    finally:
+        converter.close()
+
+
+def _read_docx_file_metrics(docx_path):
+    path = Path(docx_path)
+    exists = path.exists()
+    size = path.stat().st_size if exists else 0
+    metrics = {
+        'path': str(path),
+        'exists': exists,
+        'is_zipfile': zipfile.is_zipfile(str(path)) if exists else False,
+        'size': size,
+        'paragraph_count': 0,
+        'non_empty_paragraph_count': 0,
+        'table_count': 0,
+        'paragraph_texts': [],
+        'table_texts': [],
+        'all_text': '',
+    }
+    if not exists or not size or DocxDocument is None:
+        return metrics
+
+    doc = DocxDocument(str(path))
+    paragraph_texts = [
+        normalize_text(paragraph.text)
+        for paragraph in doc.paragraphs
+        if normalize_text(paragraph.text)
+    ]
+    table_texts = []
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    text = normalize_text(paragraph.text)
+                    if text:
+                        table_texts.append(text)
+
+    metrics.update({
+        'paragraph_count': len(doc.paragraphs),
+        'non_empty_paragraph_count': len(paragraph_texts),
+        'table_count': len(doc.tables),
+        'paragraph_texts': paragraph_texts,
+        'table_texts': table_texts,
+        'all_text': normalize_text(' '.join(paragraph_texts + table_texts)).lower(),
+    })
+    return metrics
+
+
+def _synthetic_docx_comparison_report_from_metrics(
+        baseline_metrics,
+        filtered_metrics,
+        expected_body_texts,
+        removed_texts,
+        baseline_path,
+        filtered_path,
+        temp_root,
+        internal_filtered_parse_report=None,
+        default_after_metrics=None):
+    baseline_metrics = baseline_metrics or {}
+    filtered_metrics = filtered_metrics or {}
+    internal_report = internal_filtered_parse_report or {}
+    internal_summary = internal_report.get('summary') or {}
+    default_after_metrics = default_after_metrics or baseline_metrics
+    filtered_text = filtered_metrics.get('all_text', '')
+    baseline_text = baseline_metrics.get('all_text', '')
+    body_fragments = [text for text in expected_body_texts or [] if text]
+    body_fragment_set = set(body_fragments)
+    missing_body = [
+        text for text in body_fragments
+        if text not in filtered_text
+    ]
+    removed_fragments = [text for text in removed_texts or [] if text]
+    residual_removed = [
+        text for text in removed_fragments
+        if text in filtered_text
+    ]
+    true_residual = [
+        text for text in residual_removed
+        if text not in body_fragment_set
+    ]
+    missing_table_text = [
+        text for text in missing_body
+        if 'body table' in text
+    ]
+    docx_artifacts_temp_only = (
+        _path_inside_root(baseline_path, temp_root) and
+        _path_inside_root(filtered_path, temp_root))
+    default_unchanged = (
+        baseline_text == default_after_metrics.get('all_text', '') and
+        baseline_metrics.get('paragraph_count', 0) == default_after_metrics.get('paragraph_count', 0) and
+        baseline_metrics.get('table_count', 0) == default_after_metrics.get('table_count', 0))
+
+    safety_warnings = []
+    if not baseline_metrics.get('exists') or not baseline_metrics.get('size'):
+        safety_warnings.append({'type': 'baseline_docx_missing_or_empty'})
+    if not filtered_metrics.get('exists') or not filtered_metrics.get('size'):
+        safety_warnings.append({'type': 'filtered_docx_missing_or_empty'})
+    if not docx_artifacts_temp_only:
+        safety_warnings.append({'type': 'docx_artifact_not_temp_only'})
+    if true_residual:
+        safety_warnings.append({
+            'type': 'true_residual_header_footer_pollution',
+            'count': len(true_residual),
+        })
+    if missing_body:
+        safety_warnings.append({
+            'type': 'body_text_loss',
+            'count': len(missing_body),
+        })
+    if missing_table_text:
+        safety_warnings.append({
+            'type': 'table_text_loss',
+            'count': len(missing_table_text),
+        })
+    if not default_unchanged:
+        safety_warnings.append({'type': 'default_conversion_changed_after_experiment'})
+
+    for warning in internal_report.get('safety_warnings', []) or []:
+        if warning.get('type') in {
+                'body_text_signature_changed',
+                'body_region_removed_during_internal_filtered_parse',
+                'blocked_or_placeholder_removed_during_internal_filtered_parse',
+                'mapping_count_mismatch',
+                'copied_apply_count_mismatch'}:
+            safety_warnings.append({
+                'type': f'internal_{warning.get("type")}',
+            })
+
+    body_text_block_delta = internal_summary.get('body_text_block_delta')
+    table_count_delta = (
+        int(filtered_metrics.get('table_count', 0)) -
+        int(baseline_metrics.get('table_count', 0)))
+    summary = {
+        'baseline_docx_path': baseline_path,
+        'filtered_docx_path': filtered_path,
+        'baseline_docx_exists': bool(baseline_metrics.get('exists')),
+        'filtered_docx_exists': bool(filtered_metrics.get('exists')),
+        'baseline_docx_size': int(baseline_metrics.get('size', 0)),
+        'filtered_docx_size': int(filtered_metrics.get('size', 0)),
+        'baseline_docx_paragraph_count': int(baseline_metrics.get('paragraph_count', 0)),
+        'filtered_docx_paragraph_count': int(filtered_metrics.get('paragraph_count', 0)),
+        'baseline_docx_table_count': int(baseline_metrics.get('table_count', 0)),
+        'filtered_docx_table_count': int(filtered_metrics.get('table_count', 0)),
+        'docx_table_count_delta': table_count_delta,
+        'internal_filtered_parse_applied': bool(internal_report.get('applied_to_parse')),
+        'removed_approved_header_footer_page_number_count': (
+            int(internal_summary.get('removed_raw_block_count', 0))
+            if internal_report.get('applied_to_parse') else 0),
+        'removed_header_footer_page_number_residual_count': len(residual_removed),
+        'true_residual_header_footer_pollution_count': len(true_residual),
+        'body_text_signature_preserved': not missing_body,
+        'body_text_loss_warning_count': len(missing_body),
+        'table_text_loss_warning_count': len(missing_table_text),
+        'body_text_block_delta': body_text_block_delta,
+        'body_text_block_delta_classification': (
+            'acceptable_boundary_or_grouping_shift'
+            if body_text_block_delta and not missing_body else
+            'unsafe_body_text_loss'
+            if body_text_block_delta and missing_body else
+            'unchanged_or_unavailable'),
+        'table_count_delta_classification': (
+            'reported_no_table_text_loss'
+            if table_count_delta and not missing_table_text else
+            'unsafe_table_text_loss'
+            if table_count_delta and missing_table_text else
+            'unchanged'),
+        'generated_docx_artifacts_temp_only': docx_artifacts_temp_only,
+        'default_conversion_unchanged_after_experiment': default_unchanged,
+    }
+    return {
+        'summary': summary,
+        'baseline_docx_metrics': baseline_metrics,
+        'filtered_docx_metrics': filtered_metrics,
+        'expected_body_texts': body_fragments,
+        'removed_texts': removed_fragments,
+        'residual_removed_texts': residual_removed,
+        'missing_body_texts': missing_body,
+        'safety_warnings': safety_warnings,
+        'internal_filtered_parse_report': internal_report,
+        'recommendation': {
+            'safe_for_internal_filtered_docx': not safety_warnings,
+            'reason': (
+                'Synthetic filtered DOCX comparison preserved body/table text and removed approved residuals.'
+                if not safety_warnings else
+                'Synthetic filtered DOCX comparison produced fail-closed warnings.'),
+        },
+    }
+
+
+def _body_text_fragments(layout):
+    fragments = []
+    for page in (layout or {}).get('pages', []) or []:
+        for block in page.get('text_blocks', []) or []:
+            if block.get('region') != REGION_BODY:
+                continue
+            text = normalize_text(block.get('text', '')).lower()
+            if text:
+                fragments.append(text)
+    return fragments
+
+
+def _removed_text_fragments(filtering_report):
+    fragments = []
+    for page in (filtering_report or {}).get('pages', []) or []:
+        for block in page.get('removed_blocks', []) or []:
+            text = normalize_text(
+                block.get('short_preview') or
+                block.get('text') or '')
+            text = text.lower()
+            if text and text not in fragments:
+                fragments.append(text)
+    return fragments
+
+
+def _path_inside_root(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _synthetic_body_text_validation(

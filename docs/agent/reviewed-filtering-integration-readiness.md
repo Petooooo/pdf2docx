@@ -210,3 +210,47 @@ Public exposure remains blocked:
 Phase 3C should stay internal and should focus on broadening synthetic
 coverage, especially callout/text-box and table geometry cases, before any
 public opt-in design is considered.
+
+## Phase 3C Internal Filtered DOCX Comparison
+
+Phase 3C validates that the Phase 3B private filtered parse integration can
+flow through existing DOCX generation in controlled internal tests. The tests
+generate synthetic PDFs and temporary baseline/filtered DOCX files at runtime;
+no generated DOCX files are committed.
+
+Validated by committed synthetic tests:
+
+- Baseline DOCX generation works for synthetic repeated header/footer/page
+  number content.
+- Filtered DOCX generation works only through the private internal config path.
+- Approved repeated header/footer/page-number residuals are removed from DOCX
+  body output in the repeated-header fixture.
+- Body-region text signatures are preserved after filtered DOCX generation.
+- Body table-like text near a footer remains preserved.
+- No-header/no-footer negative-control content is preserved.
+- Raw `would_exclude` without manual approval removes nothing.
+- Rejected or unsure decisions remain blocked by fail-closed behavior.
+- Generated DOCX files are created only in temporary test directories.
+
+Safety interpretation:
+
+- Body text signature preservation is the primary safety criterion.
+- Body TextBlock count changes are warnings, not automatic failures, when the
+  body text signature is preserved.
+- Body text loss remains fail-closed.
+- Table text loss remains fail-closed.
+- True residual header/footer pollution remains fail-closed.
+- Table count deltas must be reported and interpreted with text-preservation
+  evidence.
+
+Still intentionally not implemented:
+
+- No Word section header/footer parts are generated.
+- No content is migrated into DOCX headers or footers.
+- No cross-page paragraph merge is added.
+- No public CLI flag or public API option is exposed.
+- Default `Converter.convert()` behavior remains unchanged.
+
+Phase 3D should remain internal. The next useful work is to add the remaining
+synthetic scenarios that are still thin: callout/text-box content, list/heading
+boundaries, and synthetic table-geometry deltas under filtered parsing.
