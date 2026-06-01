@@ -35,6 +35,7 @@ build_table_geometry_visual_approval_gate_report = LayoutAnalyzer.build_table_ge
 build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
 build_filtered_docx_generation_comparison_report = LayoutAnalyzer.build_filtered_docx_generation_comparison_report
 build_filtered_docx_residual_structure_report = LayoutAnalyzer.build_filtered_docx_residual_structure_report
+build_local_corpus_validation_summary_report = LayoutAnalyzer.build_local_corpus_validation_summary_report
 build_reviewed_filtering_feature_readiness_report = LayoutAnalyzer.build_reviewed_filtering_feature_readiness_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
@@ -3973,6 +3974,68 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['readiness_status'], 'blocked')
         self.assertIn('readiness_gate_disabled', _readiness_reason_types(report))
 
+    def test_corpus_summary_builder_handles_multiple_sample_results(self):
+        report = build_local_corpus_validation_summary_report(
+            [
+                _corpus_sample_result('input2.pdf', _corpus_layout_report()),
+                _corpus_sample_result('input3.pdf', _corpus_layout_report()),
+            ],
+            enabled=True)
+
+        self.assertEqual(report['summary']['sample_count'], 2)
+        self.assertEqual(report['summary']['samples_analyzed_successfully'], 2)
+        self.assertEqual(
+            report['summary']['samples_with_likely_valid_header_footer_candidates'],
+            2)
+        self.assertEqual(report['summary']['samples_needing_manual_review'], 2)
+
+    def test_corpus_summary_reports_failed_sample_analysis_clearly(self):
+        report = build_local_corpus_validation_summary_report(
+            [_corpus_sample_result(
+                'broken.pdf',
+                {},
+                parsing_succeeded=False,
+                analysis_succeeded=False,
+                error='cannot open')],
+            enabled=True)
+
+        self.assertEqual(report['summary']['samples_failed_analysis'], 1)
+        self.assertIn('parsing_failed', _corpus_warning_types(report))
+        self.assertEqual(report['samples'][0]['recommendation']['label'], 'analysis_failed')
+
+    def test_corpus_summary_marks_large_sample_analysis_only(self):
+        report = build_local_corpus_validation_summary_report(
+            [_corpus_sample_result(
+                'input6_large.pdf',
+                _corpus_layout_report(),
+                page_count=756,
+                pages_analyzed=15,
+                analysis_mode='analysis_only_bounded_subset')],
+            enabled=True,
+            large_page_threshold=100)
+
+        sample = report['samples'][0]
+        self.assertTrue(sample['basic_file_summary']['large_sample'])
+        self.assertTrue(sample['basic_file_summary']['partial_or_bounded'])
+        self.assertIn('large_sample_analysis_only', _corpus_warning_types(report))
+        self.assertEqual(report['summary']['samples_too_large_for_full_pipeline'], 1)
+
+    def test_corpus_summary_does_not_mutate_input_reports(self):
+        sample_results = [_corpus_sample_result('input2.pdf', _corpus_layout_report())]
+        before = json.loads(json.dumps(sample_results))
+
+        build_local_corpus_validation_summary_report(sample_results, enabled=True)
+
+        self.assertEqual(sample_results, before)
+
+    def test_corpus_summary_disabled_mode_is_clear(self):
+        report = build_local_corpus_validation_summary_report(
+            [_corpus_sample_result('input2.pdf', _corpus_layout_report())])
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['sample_count'], 0)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2y1'])
+
 
 def _page(page_index, blocks):
     return {
@@ -4676,6 +4739,114 @@ def _safe_readiness_inputs():
 
 def _readiness_reason_types(report):
     return {reason['type'] for reason in report['blocking_reasons']}
+
+
+def _corpus_layout_report():
+    return {
+        'page_count': 3,
+        'pages': [
+            {
+                'page_index': 0,
+                'text_block_count': 3,
+                'region_counts': {
+                    REGION_TOP: 1,
+                    REGION_BODY: 1,
+                    REGION_BOTTOM: 1,
+                },
+            },
+            {
+                'page_index': 1,
+                'text_block_count': 3,
+                'region_counts': {
+                    REGION_TOP: 1,
+                    REGION_BODY: 1,
+                    REGION_BOTTOM: 1,
+                },
+            },
+            {
+                'page_index': 2,
+                'text_block_count': 3,
+                'region_counts': {
+                    REGION_TOP: 1,
+                    REGION_BODY: 1,
+                    REGION_BOTTOM: 1,
+                },
+            },
+        ],
+        'repeated_text_candidates': [
+            {
+                'fingerprint': 'annual report||top',
+                'confidence_label': 'strong',
+            },
+            {
+                'fingerprint': 'page-number||bottom',
+                'confidence_label': 'placeholder',
+            },
+        ],
+        'header_footer_exclusion_dry_run': {
+            'summary': {
+                'candidate_count': 2,
+                'action_counts': {
+                    ACTION_WOULD_EXCLUDE: 2,
+                },
+                'role_counts': {
+                    ROLE_HEADER: 1,
+                    ROLE_PAGE_NUMBER: 1,
+                },
+            },
+            'candidates': [
+                {
+                    'candidate_id': 'repeated-1',
+                    'proposed_role': ROLE_HEADER,
+                    'action': ACTION_WOULD_EXCLUDE,
+                    'region': REGION_TOP,
+                    'regions': [REGION_TOP],
+                    'support_count': 3,
+                    'page_count': 3,
+                },
+                {
+                    'candidate_id': 'repeated-2',
+                    'proposed_role': ROLE_PAGE_NUMBER,
+                    'action': ACTION_WOULD_EXCLUDE,
+                    'region': REGION_BOTTOM,
+                    'regions': [REGION_BOTTOM],
+                    'support_count': 3,
+                    'page_count': 3,
+                },
+            ],
+        },
+    }
+
+
+def _corpus_sample_result(
+        file_name,
+        layout_report,
+        parsing_succeeded=True,
+        analysis_succeeded=True,
+        page_count=3,
+        pages_analyzed=3,
+        analysis_mode='analysis_only',
+        error=''):
+    return {
+        'sample_name': file_name,
+        'file_name': file_name,
+        'file_path': f'local_samples/{file_name}',
+        'file_size_bytes': 1234,
+        'page_count': page_count,
+        'pages_analyzed': pages_analyzed,
+        'parsing_succeeded': parsing_succeeded,
+        'analysis_succeeded': analysis_succeeded,
+        'runtime_seconds': 0.12,
+        'analysis_mode': analysis_mode,
+        'layout_analysis_report': layout_report,
+        'review_pack_generated': analysis_succeeded,
+        'review_pack_path': f'local_reports/corpus_validation/{file_name}-review-pack.md',
+        'error': error,
+    }
+
+
+def _corpus_warning_types(report):
+    return {warning['type'] for warning in report['warnings']}
 
 
 def _filtered_docx_experiment_report():

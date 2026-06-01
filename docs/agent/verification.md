@@ -3186,3 +3186,136 @@ Phase 2Y is safe to attempt only as another internal, explicitly opt-in,
 non-default phase. The recommended direction is to create committed synthetic
 fixture coverage or fixture-generation scaffolding first, then run the readiness
 gate against safe fixtures before any production integration attempt.
+
+## Phase 2Y0
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2Y0 added an internal/local-only corpus validation summary helper and ran
+analysis-only diagnostics on five additional ignored local sample PDFs. This
+phase did not consume raw `would_exclude` labels as approval and did not run the
+full Phase 2V/2W DOCX generation comparison for the new samples.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local artifacts
+
+Generated ignored local-only reports:
+
+```text
+local_reports/corpus_validation/input2-corpus-summary.md
+local_reports/corpus_validation/input3-corpus-summary.md
+local_reports/corpus_validation/input4-corpus-summary.md
+local_reports/corpus_validation/input5-corpus-summary.md
+local_reports/corpus_validation/input6-large-corpus-summary.md
+local_reports/corpus-validation-summary.md
+```
+
+Local-only review packs were also generated under
+`local_reports/corpus_validation/`. They contain no approvals; every candidate
+remains for possible manual review only.
+
+The local sample PDFs and generated reports/review packs remained ignored and
+were not staged or committed.
+
+### Corpus summary
+
+- Sample count: 5.
+- Samples analyzed successfully: 5.
+- Samples failed analysis: 0.
+- Samples skipped or partially analyzed: 1.
+- Samples with likely valid header/footer candidates: 2.
+- Samples with suspicious body-region candidates: 0.
+- Samples needing manual review: 2.
+- Samples too large for full pipeline: 1.
+
+Per-sample analysis:
+
+- `input2.pdf`: 18/18 pages analyzed, 371 blocks, 3 repeated candidates, 0
+  would-exclude candidates, warnings: none.
+- `input3.pdf`: 5/5 pages analyzed, 150 blocks, 5 repeated candidates, 1
+  would-exclude candidate, estimated 5 would-remove blocks, warnings: none.
+- `input4.pdf`: 4/4 pages analyzed, 68 blocks, 1 repeated placeholder
+  candidate, 0 would-exclude candidates, warnings: none.
+- `input5.pdf`: 21/21 pages analyzed, 593 blocks, 2 repeated candidates, 0
+  would-exclude candidates, warnings: none.
+- `input6_large.pdf`: 15/756 pages analyzed with bounded analysis, 678 blocks,
+  3 repeated candidates, 2 would-exclude candidates, estimated 30 would-remove
+  blocks, warnings: `large_sample_analysis_only`,
+  `partial_or_bounded_analysis`.
+
+Recommended for deeper local Phase 2Y1 manual review:
+
+- `input3.pdf`
+- `input6_large.pdf` using bounded review strategy first
+
+Not recommended for deeper manual review yet:
+
+- `input2.pdf`, `input4.pdf`, and `input5.pdf` did not produce would-exclude
+  candidates in this analysis pass.
+
+### Tests added
+
+- Corpus summary builder handles multiple sample results.
+- Failed sample analysis is reported clearly.
+- Large sample is marked analysis-only/bounded unless explicitly allowed.
+- Corpus report generation does not mutate input reports.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 208 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 208 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local sample PDFs, local corpus reports/review packs,
+`.venv/`, generated caches, and conversion test outputs remain ignored. No
+local sample PDF, generated report, review pack, image, or DOCX output was
+staged.
+
+### Phase 2Y0 recommendation
+
+Committed synthetic fixture work can proceed after this phase, but it should use
+safe generated content only and should not reuse local sample text. Before any
+production integration attempt, Phase 2Y1 should manually review the local
+corpus candidates from `input3.pdf` and the bounded `input6_large.pdf` analysis.

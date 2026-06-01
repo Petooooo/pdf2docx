@@ -1791,6 +1791,43 @@ def build_reviewed_filtering_feature_readiness_report(
     }
 
 
+def build_local_corpus_validation_summary_report(
+        sample_results: list = None,
+        enabled: bool = False,
+        large_page_threshold: int = 100) -> dict:
+    '''Summarize local-only corpus diagnostics without approving removals.'''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_validation_report_only',
+            'summary': _corpus_validation_empty_summary(),
+            'samples': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2y1': False,
+                'reason': 'Local corpus validation is disabled.',
+            },
+        }
+
+    samples = [
+        _corpus_sample_summary(sample, large_page_threshold)
+        for sample in sample_results or []
+    ]
+    summary = _corpus_validation_summary(samples)
+    warnings = _corpus_validation_warnings(samples)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_validation_report_only',
+        'summary': summary,
+        'samples': samples,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2y1': summary['samples_analyzed_successfully'] > 0,
+            'reason': _corpus_validation_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -6669,6 +6706,303 @@ def _docx_residual_safe_for_readiness(summary: dict, warnings: list) -> bool:
         not _readiness_int(summary.get('body_text_loss_warning_count', 0)) and
         not _readiness_int(summary.get('table_text_loss_warning_count', 0)) and
         _filtered_docx_residual_safe_for_phase_2x(summary, warnings))
+
+
+def _corpus_validation_empty_summary() -> dict:
+    return {
+        'sample_count': 0,
+        'samples_analyzed_successfully': 0,
+        'samples_failed_analysis': 0,
+        'samples_skipped_or_partially_analyzed': 0,
+        'samples_with_likely_valid_header_footer_candidates': 0,
+        'samples_with_suspicious_candidates': 0,
+        'samples_needing_manual_review': 0,
+        'samples_too_large_for_full_pipeline': 0,
+        'recommended_for_phase_2y1_manual_review': [],
+    }
+
+
+def _corpus_sample_summary(sample: dict, large_page_threshold: int) -> dict:
+    sample = sample or {}
+    layout_report = sample.get('layout_analysis_report') or {}
+    page_count = _readiness_int(_first_present(
+        sample.get('page_count'),
+        layout_report.get('page_count'),
+        0))
+    pages_analyzed = _readiness_int(_first_present(
+        sample.get('pages_analyzed'),
+        layout_report.get('page_count'),
+        0))
+    parsing_succeeded = bool(sample.get('parsing_succeeded', False))
+    analysis_succeeded = bool(sample.get('analysis_succeeded', False))
+    is_large = page_count > int(large_page_threshold or 0)
+    analysis_mode = sample.get('analysis_mode') or (
+        'analysis_only_bounded_subset' if is_large else 'analysis_only')
+
+    layout_summary = _corpus_layout_analysis_summary(layout_report)
+    dry_run_summary = _corpus_dry_run_filtering_summary(layout_report)
+    review_pack_summary = {
+        'review_pack_generated': bool(sample.get('review_pack_generated', False)),
+        'review_pack_path': sample.get('review_pack_path', ''),
+        'auto_approved_decisions': False,
+        'manual_decisions_consumed': False,
+    }
+    warnings = _corpus_sample_warnings(
+        sample,
+        parsing_succeeded,
+        analysis_succeeded,
+        is_large,
+        pages_analyzed,
+        page_count,
+        layout_summary,
+        dry_run_summary)
+
+    recommendation = _corpus_sample_recommendation(
+        parsing_succeeded,
+        analysis_succeeded,
+        is_large,
+        dry_run_summary,
+        warnings)
+    return {
+        'sample_name': sample.get('sample_name') or os.path.basename(sample.get('file_path', '')),
+        'file_path': sample.get('file_path', ''),
+        'basic_file_summary': {
+            'file_name': sample.get('file_name') or os.path.basename(sample.get('file_path', '')),
+            'file_size_bytes': _readiness_int(sample.get('file_size_bytes', 0)),
+            'page_count': page_count,
+            'pages_analyzed': pages_analyzed,
+            'parsing_succeeded': parsing_succeeded,
+            'analysis_succeeded': analysis_succeeded,
+            'runtime_seconds': round(float(sample.get('runtime_seconds') or 0.0), 3),
+            'analysis_mode': analysis_mode,
+            'large_sample': is_large,
+            'partial_or_bounded': bool(sample.get('partial_or_bounded', False)) or pages_analyzed < page_count,
+        },
+        'layout_analysis_summary': layout_summary,
+        'dry_run_filtering_summary': dry_run_summary,
+        'review_pack_summary': review_pack_summary,
+        'warnings': warnings,
+        'recommendation': recommendation,
+    }
+
+
+def _corpus_layout_analysis_summary(layout_report: dict) -> dict:
+    layout_report = layout_report or {}
+    pages = layout_report.get('pages', []) or []
+    repeated = layout_report.get('repeated_text_candidates', []) or []
+    region_counts = Counter()
+    for page in pages:
+        region_counts.update(page.get('region_counts') or {})
+    confidence_counts = Counter(
+        candidate.get('confidence_label', '') or 'unlabeled'
+        for candidate in repeated)
+    return {
+        'total_block_count': sum(page.get('text_block_count', 0) for page in pages),
+        'top_block_count': region_counts.get(REGION_TOP, 0),
+        'body_block_count': region_counts.get(REGION_BODY, 0),
+        'bottom_block_count': region_counts.get(REGION_BOTTOM, 0),
+        'repeated_candidate_count': len(repeated),
+        'strong_candidate_count': confidence_counts.get('strong', 0),
+        'cautious_candidate_count': confidence_counts.get('cautious', 0),
+        'placeholder_candidate_count': confidence_counts.get('placeholder', 0),
+        'confidence_label_counts': dict(sorted(confidence_counts.items())),
+    }
+
+
+def _corpus_dry_run_filtering_summary(layout_report: dict) -> dict:
+    dry_run = (layout_report or {}).get('header_footer_exclusion_dry_run') or {}
+    summary = dry_run.get('summary') or {}
+    candidates = dry_run.get('candidates', []) or []
+    action_counts = Counter(summary.get('action_counts') or {})
+    role_counts = Counter(summary.get('role_counts') or {})
+    would_exclude = [
+        candidate for candidate in candidates
+        if candidate.get('action') == ACTION_WOULD_EXCLUDE
+    ]
+    suspicious_body = [
+        candidate for candidate in candidates
+        if (
+            candidate.get('region') == REGION_BODY or
+            REGION_BODY in (candidate.get('regions') or []) or
+            'body_region_repetition' in (candidate.get('negative_signals') or []))
+    ]
+    support_counts = [
+        {
+            'candidate_id': candidate.get('candidate_id', ''),
+            'proposed_role': candidate.get('proposed_role', ''),
+            'action': candidate.get('action', ''),
+            'support_count': _readiness_int(candidate.get('support_count', 0)),
+            'page_count': _readiness_int(candidate.get('page_count', 0)),
+        }
+        for candidate in candidates
+    ]
+    return {
+        'candidate_count': len(candidates),
+        'would_exclude_candidate_count': action_counts.get(
+            ACTION_WOULD_EXCLUDE,
+            len(would_exclude)),
+        'review_candidate_count': action_counts.get(ACTION_REVIEW, 0),
+        'keep_candidate_count': action_counts.get(ACTION_KEEP, 0),
+        'would_remove_block_count': sum(
+            _readiness_int(candidate.get('support_count', 0))
+            for candidate in would_exclude),
+        'candidate_support_counts': support_counts,
+        'role_counts': dict(sorted(role_counts.items())),
+        'header_candidate_count': role_counts.get(ROLE_HEADER, 0),
+        'footer_candidate_count': role_counts.get(ROLE_FOOTER, 0),
+        'page_number_candidate_count': role_counts.get(ROLE_PAGE_NUMBER, 0),
+        'layout_placeholder_candidate_count': role_counts.get(ROLE_LAYOUT_PLACEHOLDER, 0),
+        'review_only_candidate_count': role_counts.get(ROLE_REVIEW_ONLY, 0),
+        'body_region_removed_count': 0,
+        'suspicious_body_region_candidate_count': len(suspicious_body),
+        'warnings': _corpus_dry_run_warnings(candidates, suspicious_body),
+    }
+
+
+def _corpus_dry_run_warnings(candidates: list, suspicious_body: list) -> list:
+    warnings = []
+    if not candidates:
+        warnings.append({
+            'type': 'no_repeated_candidates',
+            'message': 'No repeated header/footer candidates were detected.',
+        })
+    if suspicious_body:
+        warnings.append({
+            'type': 'suspicious_body_region_candidates',
+            'count': len(suspicious_body),
+        })
+    return warnings
+
+
+def _corpus_sample_warnings(
+        sample: dict,
+        parsing_succeeded: bool,
+        analysis_succeeded: bool,
+        is_large: bool,
+        pages_analyzed: int,
+        page_count: int,
+        layout_summary: dict,
+        dry_run_summary: dict) -> list:
+    warnings = []
+    if not parsing_succeeded:
+        warnings.append({
+            'type': 'parsing_failed',
+            'message': sample.get('error', ''),
+        })
+    if parsing_succeeded and not analysis_succeeded:
+        warnings.append({
+            'type': 'analysis_failed',
+            'message': sample.get('error', ''),
+        })
+    if is_large and not sample.get('full_pipeline_allowed', False):
+        warnings.append({
+            'type': 'large_sample_analysis_only',
+            'page_count': page_count,
+        })
+    if pages_analyzed and page_count and pages_analyzed < page_count:
+        warnings.append({
+            'type': 'partial_or_bounded_analysis',
+            'pages_analyzed': pages_analyzed,
+            'page_count': page_count,
+        })
+    if analysis_succeeded and not layout_summary.get('repeated_candidate_count', 0):
+        warnings.append({
+            'type': 'no_repeated_candidates',
+        })
+    if dry_run_summary.get('suspicious_body_region_candidate_count', 0):
+        warnings.append({
+            'type': 'suspicious_body_region_candidates',
+            'count': dry_run_summary.get('suspicious_body_region_candidate_count'),
+        })
+    return warnings
+
+
+def _corpus_sample_recommendation(
+        parsing_succeeded: bool,
+        analysis_succeeded: bool,
+        is_large: bool,
+        dry_run_summary: dict,
+        warnings: list) -> dict:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    if not parsing_succeeded or not analysis_succeeded:
+        return {
+            'label': 'analysis_failed',
+            'reason': 'Parsing or layout analysis failed; inspect the sample before deeper review.',
+        }
+    if dry_run_summary.get('would_exclude_candidate_count', 0):
+        label = 'manual_review_recommended'
+        if is_large:
+            label = 'manual_review_recommended_bounded_large_sample'
+        return {
+            'label': label,
+            'reason': 'Dry-run candidates exist, but no exclusion is approved without manual review.',
+        }
+    if 'suspicious_body_region_candidates' in warning_types:
+        return {
+            'label': 'needs_manual_review',
+            'reason': 'Body-region repeated candidates need review before any filtering experiment.',
+        }
+    return {
+        'label': 'analysis_only_no_deeper_review_yet',
+        'reason': 'No would-exclude candidates were found in this analysis pass.',
+    }
+
+
+def _corpus_validation_summary(samples: list) -> dict:
+    recommendations = {
+        sample.get('sample_name')
+        for sample in samples or []
+        if (sample.get('recommendation') or {}).get('label') in {
+            'manual_review_recommended',
+            'manual_review_recommended_bounded_large_sample',
+            'needs_manual_review',
+        }
+    }
+    return {
+        'sample_count': len(samples or []),
+        'samples_analyzed_successfully': sum(
+            1 for sample in samples or []
+            if sample.get('basic_file_summary', {}).get('analysis_succeeded')),
+        'samples_failed_analysis': sum(
+            1 for sample in samples or []
+            if not sample.get('basic_file_summary', {}).get('analysis_succeeded')),
+        'samples_skipped_or_partially_analyzed': sum(
+            1 for sample in samples or []
+            if sample.get('basic_file_summary', {}).get('partial_or_bounded')),
+        'samples_with_likely_valid_header_footer_candidates': sum(
+            1 for sample in samples or []
+            if sample.get('dry_run_filtering_summary', {}).get(
+                'would_exclude_candidate_count', 0)),
+        'samples_with_suspicious_candidates': sum(
+            1 for sample in samples or []
+            if sample.get('dry_run_filtering_summary', {}).get(
+                'suspicious_body_region_candidate_count', 0)),
+        'samples_needing_manual_review': len(recommendations),
+        'samples_too_large_for_full_pipeline': sum(
+            1 for sample in samples or []
+            if sample.get('basic_file_summary', {}).get('large_sample')),
+        'recommended_for_phase_2y1_manual_review': sorted(recommendations),
+    }
+
+
+def _corpus_validation_warnings(samples: list) -> list:
+    warnings = []
+    for sample in samples or []:
+        for warning in sample.get('warnings', []) or []:
+            item = dict(warning)
+            item['sample_name'] = sample.get('sample_name')
+            warnings.append(item)
+    return warnings
+
+
+def _corpus_validation_recommendation(summary: dict, warnings: list) -> str:
+    if not summary.get('samples_analyzed_successfully', 0):
+        return 'No sample was analyzed successfully; do not proceed to deeper review.'
+    if summary.get('samples_failed_analysis', 0):
+        return 'Some samples failed analysis; inspect failures before selecting Phase 2Y1 manual review targets.'
+    if summary.get('recommended_for_phase_2y1_manual_review'):
+        return 'Proceed only to local Phase 2Y1 manual review for the recommended samples; do not enable production integration.'
+    return 'Corpus analysis completed, but no sample has clear reviewed-filtering candidates yet.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
