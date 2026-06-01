@@ -9,6 +9,8 @@ header/footer analysis incrementally without changing conversion output.
 
 import re
 import os
+import zipfile
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 
 
@@ -52,6 +54,7 @@ _TABLE_VISUAL_DECISION_RE = re.compile(
     r'(approve_safe_boundary_shift|reject_unsafe_table_change|unsure):\s*\[([^\]]*)\]',
     re.IGNORECASE)
 _COUNT_PAIR_RE = re.compile(r'(-?\d+)\s*->\s*(-?\d+)')
+_WORD_XML_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 _PAGE_NUMBER_RE_LIST = (
     re.compile(r'^(?:page|p\.?)\s*\d+$', re.IGNORECASE),
     re.compile(r'^(?:page|p\.?)\s*\d+\s*(?:/|of)\s*\d+$', re.IGNORECASE),
@@ -1671,6 +1674,53 @@ def build_filtered_docx_generation_comparison_report(
         'recommendation': {
             'safe_to_attempt_phase_2w': _filtered_docx_safe_for_phase_2w(summary, warnings),
             'reason': _filtered_docx_recommendation(summary, warnings),
+        },
+    }
+
+
+def build_filtered_docx_residual_structure_report(
+        baseline_docx_path: str = '',
+        filtered_docx_path: str = '',
+        removed_strings: list = None,
+        enabled: bool = False) -> dict:
+    '''Inspect filtered DOCX residual removed text and OpenXML structure.'''
+    removed = _normalize_removed_strings(removed_strings or [])
+    baseline = _inspect_docx_openxml(baseline_docx_path, removed)
+    filtered = _inspect_docx_openxml(filtered_docx_path, removed)
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'filtered_docx_residual_structure_report_only',
+            'summary': _filtered_docx_residual_disabled_summary(
+                baseline,
+                filtered,
+                removed),
+            'baseline_docx': baseline,
+            'filtered_docx': filtered,
+            'residuals': [],
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2x': False,
+                'reason': 'Filtered DOCX residual structure inspection is disabled.',
+            },
+        }
+
+    residuals = _filtered_docx_residual_items(baseline, filtered, removed)
+    summary = _filtered_docx_residual_summary(baseline, filtered, removed, residuals)
+    warnings = _filtered_docx_residual_warnings(baseline, filtered, summary, residuals)
+
+    return {
+        'enabled': True,
+        'policy': 'filtered_docx_residual_structure_report_only',
+        'summary': summary,
+        'baseline_docx': baseline,
+        'filtered_docx': filtered,
+        'residuals': residuals,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2x': _filtered_docx_residual_safe_for_phase_2x(summary, warnings),
+            'reason': _filtered_docx_residual_recommendation(summary, warnings),
         },
     }
 
@@ -5674,6 +5724,364 @@ def _filtered_docx_recommendation(summary: dict, warnings: list) -> str:
             return 'Filtered DOCX generation completed with non-blocking warnings; Phase 2W can remain internal and guarded.'
         return 'Filtered DOCX generation comparison passed guarded checks; Phase 2W can remain internal and guarded.'
     return 'Keep production integration blocked; resolve filtered DOCX generation warnings first.'
+
+
+def _normalize_removed_strings(removed_strings: list) -> list:
+    seen = set()
+    removed = []
+    for item in removed_strings or []:
+        text = normalize_text(item.get('text', '') if isinstance(item, dict) else item)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        removed.append(text)
+    return removed
+
+
+def _inspect_docx_openxml(path: str, removed_strings: list) -> dict:
+    status = _docx_path_status(path)
+    result = {
+        'path': path or '',
+        'exists': status['exists'],
+        'size_bytes': status['size_bytes'],
+        'empty': status['empty'],
+        'readable': False,
+        'body_paragraph_count': 0,
+        'table_count': 0,
+        'section_count': 0,
+        'header_part_count': 0,
+        'footer_part_count': 0,
+        'body_paragraphs': [],
+        'table_cells': [],
+        'header_footer_parts': [],
+        'residual_locations_by_text': {},
+        'warnings': [],
+    }
+    if not status['exists']:
+        result['warnings'].append({'type': 'docx_missing', 'path': path or ''})
+        return result
+    if status['empty']:
+        result['warnings'].append({'type': 'docx_empty', 'path': path or ''})
+        return result
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            if 'word/document.xml' not in names:
+                result['warnings'].append({'type': 'document_xml_missing'})
+                return result
+            document_root = ET.fromstring(archive.read('word/document.xml'))
+            document_summary = _docx_document_xml_summary(document_root)
+            result.update(document_summary)
+            result['header_footer_parts'] = _docx_header_footer_part_summaries(archive)
+            result['header_part_count'] = sum(
+                1 for part in result['header_footer_parts']
+                if part.get('location_type') == 'header_part')
+            result['footer_part_count'] = sum(
+                1 for part in result['header_footer_parts']
+                if part.get('location_type') == 'footer_part')
+            result['residual_locations_by_text'] = _docx_residual_locations(result, removed_strings)
+            result['readable'] = True
+    except Exception as exc:
+        result['warnings'].append({
+            'type': 'docx_read_failed',
+            'message': f'{exc.__class__.__name__}: {exc}',
+        })
+    return result
+
+
+def _docx_path_status(path: str) -> dict:
+    exists = bool(path and os.path.exists(path))
+    size = os.path.getsize(path) if exists else 0
+    return {
+        'exists': exists,
+        'size_bytes': size,
+        'empty': size <= 0,
+    }
+
+
+def _docx_document_xml_summary(root) -> dict:
+    body = root.find(f'.//{_WORD_XML_NS}body')
+    direct_paragraphs = []
+    table_cells = []
+    table_count = 0
+    section_count = 0
+    if body is not None:
+        direct_paragraphs = [
+            _docx_location_record('body_paragraph', 'word/document.xml', index, _docx_element_text(child))
+            for index, child in enumerate(list(body))
+            if child.tag == f'{_WORD_XML_NS}p'
+        ]
+        tables = body.findall(f'.//{_WORD_XML_NS}tbl')
+        table_count = len(tables)
+        table_cells = [
+            _docx_location_record('table_cell', 'word/document.xml', index, _docx_element_text(cell))
+            for index, cell in enumerate(body.findall(f'.//{_WORD_XML_NS}tc'))
+        ]
+        section_count = len(body.findall(f'.//{_WORD_XML_NS}sectPr')) or 1
+
+    return {
+        'body_paragraph_count': len(direct_paragraphs),
+        'table_count': table_count,
+        'section_count': section_count,
+        'body_paragraphs': direct_paragraphs,
+        'table_cells': table_cells,
+    }
+
+
+def _docx_header_footer_part_summaries(archive) -> list:
+    parts = []
+    for name in sorted(archive.namelist()):
+        if not (
+                name.startswith('word/header') and name.endswith('.xml') or
+                name.startswith('word/footer') and name.endswith('.xml')):
+            continue
+        try:
+            root = ET.fromstring(archive.read(name))
+            text = _docx_element_text(root)
+        except Exception:
+            text = ''
+        location_type = 'header_part' if name.startswith('word/header') else 'footer_part'
+        parts.append(_docx_location_record(location_type, name, len(parts), text))
+    return parts
+
+
+def _docx_location_record(location_type: str, part: str, index: int, text: str) -> dict:
+    text = normalize_text(text)
+    return {
+        'location_type': location_type,
+        'part': part,
+        'index': index,
+        'text_preview': _short_text_preview(text),
+        'text': text,
+    }
+
+
+def _docx_element_text(element) -> str:
+    return normalize_text(''.join(
+        node.text or ''
+        for node in element.iter(f'{_WORD_XML_NS}t')
+    ))
+
+
+def _short_text_preview(text: str, max_length: int = 80) -> str:
+    text = normalize_text(text)
+    if len(text) <= max_length:
+        return text
+    return text[:max_length-3].rstrip() + '...'
+
+
+def _docx_residual_locations(docx_summary: dict, removed_strings: list) -> dict:
+    locations_by_text = {}
+    searchable = (
+        docx_summary.get('body_paragraphs', []) +
+        docx_summary.get('table_cells', []) +
+        docx_summary.get('header_footer_parts', []))
+    for removed in removed_strings or []:
+        locations = []
+        for location in searchable:
+            if removed and removed in location.get('text', ''):
+                public_location = dict(location)
+                public_location.pop('text', None)
+                locations.append(public_location)
+        if locations:
+            locations_by_text[removed] = locations
+    return locations_by_text
+
+
+def _filtered_docx_residual_disabled_summary(
+        baseline: dict,
+        filtered: dict,
+        removed_strings: list) -> dict:
+    return {
+        'removed_string_count': len(removed_strings or []),
+        'baseline_body_paragraph_count': baseline.get('body_paragraph_count', 0),
+        'filtered_body_paragraph_count': filtered.get('body_paragraph_count', 0),
+        'baseline_table_count': baseline.get('table_count', 0),
+        'filtered_table_count': filtered.get('table_count', 0),
+        'residual_removed_string_count': 0,
+        'true_residual_header_footer_pollution_count': 0,
+        'legitimate_body_table_duplicate_count': 0,
+        'body_text_loss_warning_count': 0,
+        'table_text_loss_warning_count': 0,
+        'classification': 'disabled',
+    }
+
+
+def _filtered_docx_residual_items(baseline: dict, filtered: dict, removed_strings: list) -> list:
+    residuals = []
+    baseline_locations = baseline.get('residual_locations_by_text', {}) or {}
+    filtered_locations = filtered.get('residual_locations_by_text', {}) or {}
+    for removed in removed_strings or []:
+        locations = filtered_locations.get(removed, [])
+        if not locations:
+            continue
+        baseline_item_locations = baseline_locations.get(removed, [])
+        classification = _classify_filtered_docx_residual(locations, baseline_item_locations)
+        residuals.append({
+            'text_preview': _short_text_preview(removed),
+            'text_length': len(removed),
+            'baseline_location_count': len(baseline_item_locations),
+            'filtered_location_count': len(locations),
+            'locations': locations,
+            'location_counts': dict(sorted(Counter(
+                item.get('location_type', '') for item in locations).items())),
+            'classification': classification,
+            'reason': _filtered_docx_residual_reason(classification),
+        })
+    return residuals
+
+
+def _classify_filtered_docx_residual(locations: list, baseline_locations: list) -> str:
+    location_types = Counter(item.get('location_type', '') for item in locations or [])
+    if location_types.get('header_part') or location_types.get('footer_part'):
+        return 'docx_header_footer_part_content'
+    if location_types.get('body_paragraph', 0) > 1:
+        return 'true_residual_header_footer_pollution'
+    if location_types.get('table_cell') and not location_types.get('body_paragraph'):
+        return 'legitimate_body_or_table_content'
+    if location_types.get('body_paragraph'):
+        baseline_body_count = sum(
+            1 for item in baseline_locations or []
+            if item.get('location_type') == 'body_paragraph')
+        if baseline_body_count > location_types.get('body_paragraph', 0):
+            return 'legitimate_body_duplicate'
+        return 'needs_human_review'
+    return 'insufficient_evidence'
+
+
+def _filtered_docx_residual_reason(classification: str) -> str:
+    if classification == 'docx_header_footer_part_content':
+        return 'Residual appears in DOCX header/footer XML parts rather than body content.'
+    if classification == 'true_residual_header_footer_pollution':
+        return 'Residual appears repeatedly in filtered DOCX body paragraphs.'
+    if classification == 'legitimate_body_or_table_content':
+        return 'Residual appears only in table/cell content that remains in the filtered DOCX.'
+    if classification == 'legitimate_body_duplicate':
+        return 'Residual still appears once in body while baseline had more body occurrences.'
+    if classification == 'needs_human_review':
+        return 'Residual appears in body content, but location evidence is not enough to mark it safe.'
+    return 'Residual location evidence is insufficient.'
+
+
+def _filtered_docx_residual_summary(
+        baseline: dict,
+        filtered: dict,
+        removed_strings: list,
+        residuals: list) -> dict:
+    classification_counts = Counter(item.get('classification', '') for item in residuals or [])
+    location_counts = Counter()
+    for item in residuals or []:
+        location_counts.update(item.get('location_counts') or {})
+    body_loss_warning = int(
+        baseline.get('body_paragraph_count', 0) > 0 and
+        filtered.get('body_paragraph_count', 0) == 0)
+    table_loss_warning = int(
+        baseline.get('table_count', 0) > 0 and
+        filtered.get('table_count', 0) == 0)
+    legitimate_body_table = (
+        classification_counts.get('legitimate_body_duplicate', 0) +
+        classification_counts.get('legitimate_body_or_table_content', 0))
+    return {
+        'removed_string_count': len(removed_strings or []),
+        'baseline_body_paragraph_count': baseline.get('body_paragraph_count', 0),
+        'filtered_body_paragraph_count': filtered.get('body_paragraph_count', 0),
+        'paragraph_delta': filtered.get('body_paragraph_count', 0) - baseline.get('body_paragraph_count', 0),
+        'baseline_table_count': baseline.get('table_count', 0),
+        'filtered_table_count': filtered.get('table_count', 0),
+        'table_delta': filtered.get('table_count', 0) - baseline.get('table_count', 0),
+        'baseline_section_count': baseline.get('section_count', 0),
+        'filtered_section_count': filtered.get('section_count', 0),
+        'header_part_count': filtered.get('header_part_count', 0),
+        'footer_part_count': filtered.get('footer_part_count', 0),
+        'residual_removed_string_count': len(residuals or []),
+        'residual_locations_by_part': dict(sorted(location_counts.items())),
+        'true_residual_header_footer_pollution_count': classification_counts.get(
+            'true_residual_header_footer_pollution', 0),
+        'legitimate_body_table_duplicate_count': legitimate_body_table,
+        'legitimate_body_duplicate_count': classification_counts.get('legitimate_body_duplicate', 0),
+        'legitimate_body_or_table_content_count': classification_counts.get(
+            'legitimate_body_or_table_content', 0),
+        'docx_header_footer_part_content_count': classification_counts.get(
+            'docx_header_footer_part_content', 0),
+        'needs_human_review_count': classification_counts.get('needs_human_review', 0),
+        'insufficient_evidence_count': classification_counts.get('insufficient_evidence', 0),
+        'body_text_loss_warning_count': body_loss_warning,
+        'table_text_loss_warning_count': table_loss_warning,
+        'expected_header_footer_removal_confirmed': not classification_counts.get(
+            'true_residual_header_footer_pollution', 0),
+        'suspicious_residual_count': (
+            classification_counts.get('true_residual_header_footer_pollution', 0) +
+            classification_counts.get('needs_human_review', 0) +
+            classification_counts.get('insufficient_evidence', 0)),
+        'classification_counts': dict(sorted(classification_counts.items())),
+        'classification': 'unsafe' if classification_counts.get(
+            'true_residual_header_footer_pollution', 0) else (
+                'review' if (
+                    classification_counts.get('needs_human_review', 0) or
+                    classification_counts.get('insufficient_evidence', 0)) else 'safe'),
+    }
+
+
+def _filtered_docx_residual_warnings(
+        baseline: dict,
+        filtered: dict,
+        summary: dict,
+        residuals: list) -> list:
+    warnings = []
+    for label, docx in (('baseline', baseline), ('filtered', filtered)):
+        for warning in docx.get('warnings', []) or []:
+            item = dict(warning)
+            item['scope'] = label
+            warnings.append(item)
+    if summary.get('true_residual_header_footer_pollution_count', 0):
+        warnings.append({
+            'type': 'true_residual_header_footer_pollution',
+            'count': summary.get('true_residual_header_footer_pollution_count'),
+        })
+    if summary.get('needs_human_review_count', 0):
+        warnings.append({
+            'type': 'residual_needs_human_review',
+            'count': summary.get('needs_human_review_count'),
+        })
+    if summary.get('insufficient_evidence_count', 0):
+        warnings.append({
+            'type': 'residual_insufficient_evidence',
+            'count': summary.get('insufficient_evidence_count'),
+        })
+    if summary.get('body_text_loss_warning_count', 0):
+        warnings.append({
+            'type': 'body_text_loss_warning',
+            'count': summary.get('body_text_loss_warning_count'),
+        })
+    if summary.get('table_text_loss_warning_count', 0):
+        warnings.append({
+            'type': 'table_text_loss_warning',
+            'count': summary.get('table_text_loss_warning_count'),
+        })
+    return warnings
+
+
+def _filtered_docx_residual_safe_for_phase_2x(summary: dict, warnings: list) -> bool:
+    blocking_types = {
+        'docx_missing',
+        'docx_empty',
+        'docx_read_failed',
+        'document_xml_missing',
+        'true_residual_header_footer_pollution',
+        'residual_needs_human_review',
+        'residual_insufficient_evidence',
+        'body_text_loss_warning',
+        'table_text_loss_warning',
+    }
+    warning_types = {warning.get('type') for warning in warnings or []}
+    return not warning_types.intersection(blocking_types)
+
+
+def _filtered_docx_residual_recommendation(summary: dict, warnings: list) -> str:
+    if _filtered_docx_residual_safe_for_phase_2x(summary, warnings):
+        return 'DOCX residual structure inspection found no blocking residual pollution; Phase 2X can remain internal and guarded.'
+    return 'Keep production integration blocked until DOCX residual structure warnings are resolved.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:

@@ -2928,3 +2928,120 @@ Result: confirmed local PDF/report/review image/generated DOCX files, `.venv/`, 
 ### Phase 2W recommendation
 
 Phase 2W is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. The local filtered DOCX experiment produced non-empty baseline and filtered DOCX outputs, preserved body TextBlock, image, and section counts, and produced no blocking warnings; it still must not become default production behavior.
+
+## Phase 2W
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2W added an internal/report-only DOCX residual and OpenXML structure validation helper. The helper inspects baseline and filtered DOCX files as ZIP/OpenXML packages, checks `word/document.xml`, table cells, and optional header/footer XML parts, then classifies any removed-text residuals by location.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/filtered-docx-residual-structure-report.md
+```
+
+The local sample PDF, source reports, visual review files/images, generated DOCX files, and generated residual/structure report remained ignored and were not staged or committed.
+
+### Sample summary
+
+- Baseline DOCX body paragraph count: 364.
+- Filtered DOCX body paragraph count: 351.
+- Paragraph delta: -13.
+- Baseline DOCX table count: 139.
+- Filtered DOCX table count: 127.
+- Table delta: -12.
+- Baseline OpenXML section count: 69.
+- Filtered OpenXML section count: 69.
+- Header XML part count: 0.
+- Footer XML part count: 0.
+- Removed-string count inspected: 15.
+- Residual removed-string count: 1.
+- Residual locations: `table_cell`: 1.
+- Residual classification: `legitimate_body_or_table_content`.
+- True residual header/footer pollution count: 0.
+- Legitimate body/table duplicate count: 1.
+- Body text loss warning count: 0.
+- Table text loss warning count: 0.
+- Suspicious residual count: 0.
+- Overall classification: `safe`.
+
+Interpretation:
+
+- The single residual removed string is present only in filtered DOCX table-cell content.
+- It is not present in DOCX header/footer XML parts.
+- It is not classified as repeated header/footer pollution in the filtered DOCX body.
+- The residual is classified as legitimate body/table content and does not block the next internal diagnostic phase.
+
+Safety warnings:
+
+- None from the Phase 2W helper.
+
+### Tests added
+
+- Residual string in body paragraph is reported with body location.
+- Residual string in table cell is reported with table-cell location.
+- Residual string in header/footer XML is reported separately.
+- Legitimate body duplicate is classified separately from true residual pollution.
+- True repeated header/footer residual triggers a warning.
+- Paragraph/table count deltas are reported.
+- Missing DOCX file is reported clearly.
+- Empty DOCX file is reported clearly.
+- Generated report does not mutate DOCX files.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 193 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 193 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review image/generated DOCX files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample, generated report, review JSON, review image, or DOCX output was staged.
+
+### Phase 2X recommendation
+
+Phase 2X is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. Phase 2W found no true residual header/footer pollution in the filtered DOCX and no blocking OpenXML structure warnings; production integration must still remain disabled by default.

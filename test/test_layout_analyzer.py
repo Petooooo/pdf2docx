@@ -1,4 +1,6 @@
 import json
+import tempfile
+import zipfile
 import unittest
 from importlib import util
 from pathlib import Path
@@ -32,6 +34,7 @@ build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta
 build_table_geometry_visual_approval_gate_report = LayoutAnalyzer.build_table_geometry_visual_approval_gate_report
 build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
 build_filtered_docx_generation_comparison_report = LayoutAnalyzer.build_filtered_docx_generation_comparison_report
+build_filtered_docx_residual_structure_report = LayoutAnalyzer.build_filtered_docx_residual_structure_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
@@ -3682,6 +3685,164 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'state_restore_or_reload_not_confirmed',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_filtered_docx_residual_body_paragraph_location_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, body_paragraphs=['Residual text', 'Residual text'])
+            _write_docx_fixture(filtered, body_paragraphs=['Residual text'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertEqual(report['summary']['residual_removed_string_count'], 1)
+        self.assertEqual(report['residuals'][0]['locations'][0]['location_type'], 'body_paragraph')
+        self.assertEqual(report['residuals'][0]['classification'], 'legitimate_body_duplicate')
+
+    def test_filtered_docx_residual_table_cell_location_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, table_cells=['Residual text'])
+            _write_docx_fixture(filtered, table_cells=['Residual text'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertEqual(report['residuals'][0]['locations'][0]['location_type'], 'table_cell')
+        self.assertEqual(report['residuals'][0]['classification'], 'legitimate_body_or_table_content')
+
+    def test_filtered_docx_residual_header_footer_parts_are_reported_separately(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, body_paragraphs=['Body'])
+            _write_docx_fixture(
+                filtered,
+                body_paragraphs=['Body'],
+                header_texts=['Residual text'],
+                footer_texts=['Residual text'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        location_types = {
+            location['location_type']
+            for location in report['residuals'][0]['locations']
+        }
+        self.assertIn('header_part', location_types)
+        self.assertIn('footer_part', location_types)
+        self.assertEqual(report['residuals'][0]['classification'], 'docx_header_footer_part_content')
+
+    def test_filtered_docx_true_repeated_header_footer_residual_warns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, body_paragraphs=['Residual text', 'Residual text'])
+            _write_docx_fixture(filtered, body_paragraphs=['Residual text', 'Residual text'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertEqual(report['residuals'][0]['classification'], 'true_residual_header_footer_pollution')
+        self.assertIn(
+            'true_residual_header_footer_pollution',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_filtered_docx_residual_reports_paragraph_and_table_deltas(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, body_paragraphs=['A', 'B'], table_cells=['C'])
+            _write_docx_fixture(filtered, body_paragraphs=['A'], table_cells=[])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertEqual(report['summary']['baseline_body_paragraph_count'], 2)
+        self.assertEqual(report['summary']['filtered_body_paragraph_count'], 1)
+        self.assertEqual(report['summary']['paragraph_delta'], -1)
+        self.assertEqual(report['summary']['baseline_table_count'], 1)
+        self.assertEqual(report['summary']['filtered_table_count'], 0)
+        self.assertEqual(report['summary']['table_delta'], -1)
+
+    def test_filtered_docx_residual_missing_docx_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / 'missing.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(filtered, body_paragraphs=['Body'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(missing),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertIn('docx_missing', {warning['type'] for warning in report['safety_warnings']})
+
+    def test_filtered_docx_residual_empty_docx_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            baseline.write_bytes(b'')
+            _write_docx_fixture(filtered, body_paragraphs=['Body'])
+
+            report = build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+        self.assertIn('docx_empty', {warning['type'] for warning in report['safety_warnings']})
+
+    def test_filtered_docx_residual_report_does_not_mutate_docx_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / 'baseline.docx'
+            filtered = Path(tmpdir) / 'filtered.docx'
+            _write_docx_fixture(baseline, body_paragraphs=['Residual text'])
+            _write_docx_fixture(filtered, body_paragraphs=['Residual text'])
+            before = {
+                'baseline': baseline.read_bytes(),
+                'filtered': filtered.read_bytes(),
+            }
+
+            build_filtered_docx_residual_structure_report(
+                str(baseline),
+                str(filtered),
+                removed_strings=['Residual text'],
+                enabled=True)
+
+            after = {
+                'baseline': baseline.read_bytes(),
+                'filtered': filtered.read_bytes(),
+            }
+
+        self.assertEqual(before, after)
+
+    def test_filtered_docx_residual_disabled_mode_is_clear(self):
+        report = build_filtered_docx_residual_structure_report(
+            baseline_docx_path='missing-baseline.docx',
+            filtered_docx_path='missing-filtered.docx',
+            removed_strings=['Residual text'])
+
+        self.assertFalse(report['enabled'])
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2x'])
+
 
 def _page(page_index, blocks):
     return {
@@ -4333,6 +4494,46 @@ def _normal_conversion_check(passed=True):
         'state_restored_or_reloaded': passed,
         'message': '' if passed else 'conversion failed',
     }
+
+
+def _write_docx_fixture(path, body_paragraphs=None, table_cells=None, header_texts=None, footer_texts=None):
+    body_paragraphs = body_paragraphs or []
+    table_cells = table_cells or []
+    header_texts = header_texts or []
+    footer_texts = footer_texts or []
+    document_xml = _docx_document_xml(body_paragraphs, table_cells)
+    with zipfile.ZipFile(path, 'w') as archive:
+        archive.writestr('word/document.xml', document_xml)
+        for index, text in enumerate(header_texts, start=1):
+            archive.writestr(f'word/header{index}.xml', _docx_part_xml([text]))
+        for index, text in enumerate(footer_texts, start=1):
+            archive.writestr(f'word/footer{index}.xml', _docx_part_xml([text]))
+
+
+def _docx_document_xml(paragraphs, table_cells):
+    body = ''.join(_docx_paragraph_xml(text) for text in paragraphs)
+    if table_cells:
+        cells = ''.join(
+            f'<w:tc>{_docx_paragraph_xml(text)}</w:tc>'
+            for text in table_cells)
+        body += f'<w:tbl><w:tr>{cells}</w:tr></w:tbl>'
+    body += '<w:sectPr/>'
+    return _docx_part_xml([], body_xml=body)
+
+
+def _docx_part_xml(paragraphs, body_xml=None):
+    content = body_xml if body_xml is not None else ''.join(
+        _docx_paragraph_xml(text) for text in paragraphs)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:body>{content}</w:body>'
+        '</w:document>'
+    )
+
+
+def _docx_paragraph_xml(text):
+    return f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>'
 
 
 def _table_record(
