@@ -1907,6 +1907,105 @@ def build_local_corpus_manual_review_summary_report(
     }
 
 
+def build_local_corpus_approval_validation_report(
+        layout_analysis_report: dict = None,
+        review_decisions=None,
+        sample_name: str = '',
+        bounded_analysis_only: bool = False,
+        full_docx_validation_allowed: bool = False,
+        enabled: bool = False) -> dict:
+    '''Validate local corpus review approvals without enabling production filtering.'''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_approval_validation_report_only',
+            'sample_name': sample_name,
+            'summary': _corpus_approval_disabled_summary(
+                sample_name,
+                bounded_analysis_only,
+                full_docx_validation_allowed),
+            'candidates': [],
+            'filtering_report': {},
+            'warnings': [],
+            'recommendation': {
+                'safe_to_run_approved_only_validation': False,
+                'reason': 'Local corpus approval validation is disabled.',
+            },
+        }
+
+    layout_report = layout_analysis_report or {}
+    dry_run = layout_report.get('header_footer_exclusion_dry_run') or {}
+    page_summaries = layout_report.get('pages') or []
+    decisions = review_decisions or {}
+    filtering_report = build_reviewed_header_footer_filter_report(
+        page_summaries,
+        dry_run,
+        decisions,
+        enabled=True,
+        apply=True)
+    candidates = _corpus_approval_candidate_rows(dry_run, decisions, filtering_report)
+    summary = _corpus_approval_summary(
+        sample_name,
+        bounded_analysis_only,
+        full_docx_validation_allowed,
+        candidates,
+        filtering_report)
+    warnings = _corpus_approval_warnings(summary)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_approval_validation_report_only',
+        'sample_name': sample_name,
+        'summary': summary,
+        'candidates': candidates,
+        'filtering_report': filtering_report,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_run_approved_only_validation': bool(
+                summary.get('explicit_decisions_complete') and
+                summary.get('eligible_approved_candidate_count', 0) > 0 and
+                summary.get('unsafe_removed_count', 0) == 0),
+            'reason': _corpus_approval_recommendation(summary, warnings),
+        },
+    }
+
+
+def build_local_corpus_approval_validation_summary_report(
+        validation_reports: list = None,
+        enabled: bool = False) -> dict:
+    '''Summarize local corpus approval validation reports.'''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_approval_validation_summary_only',
+            'summary': _corpus_approval_summary_empty(),
+            'samples': [],
+            'warnings': [],
+            'recommendation': {
+                'safe_to_attempt_committed_synthetic_fixtures': False,
+                'reason': 'Local corpus approval validation summary is disabled.',
+            },
+        }
+
+    samples = [
+        _corpus_approval_summary_row(report)
+        for report in validation_reports or []
+    ]
+    summary = _corpus_approval_validation_summary(samples)
+    warnings = _corpus_approval_summary_warnings(samples)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_approval_validation_summary_only',
+        'summary': summary,
+        'samples': samples,
+        'warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_committed_synthetic_fixtures': bool(
+                summary.get('samples_validated_count', 0)),
+            'reason': _corpus_approval_summary_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -7389,6 +7488,415 @@ def _corpus_manual_review_summary_recommendation(summary: dict, warnings: list) 
     if summary.get('review_packs_ready_count', 0):
         return 'Manual review packs are ready; human approval is required before any Phase 2Y2 filtering experiment.'
     return 'No selected sample is ready for manual approval.'
+
+
+def _corpus_approval_disabled_summary(
+        sample_name: str,
+        bounded_analysis_only: bool,
+        full_docx_validation_allowed: bool) -> dict:
+    return {
+        'sample_name': sample_name,
+        'candidate_count': 0,
+        'explicit_decision_count': 0,
+        'approve_count': 0,
+        'reject_count': 0,
+        'unsure_count': 0,
+        'missing_decision_count': 0,
+        'conflict_decision_count': 0,
+        'explicit_decisions_complete': False,
+        'eligible_approved_candidate_count': 0,
+        'blocked_candidate_count': 0,
+        'reviewed_removed_block_count': 0,
+        'body_region_removed_count': 0,
+        'rejected_removed_count': 0,
+        'unsure_removed_count': 0,
+        'layout_placeholder_removed_count': 0,
+        'raw_would_exclude_without_approval_removed_count': 0,
+        'unsafe_removed_count': 0,
+        'bounded_analysis_only': bool(bounded_analysis_only),
+        'full_docx_validation_allowed': bool(full_docx_validation_allowed),
+        'full_docx_validation_blocked': bool(
+            bounded_analysis_only and not full_docx_validation_allowed),
+    }
+
+
+def _corpus_approval_candidate_rows(
+        dry_run_report: dict,
+        review_decisions,
+        filtering_report: dict) -> list:
+    candidates = _dry_run_candidates(dry_run_report)
+    decision_map = _review_decision_map(review_decisions)
+    approved_fingerprints = set(filtering_report.get('approved_fingerprints', []) or [])
+    blocked_by_fingerprint = {
+        item.get('fingerprint'): item
+        for item in filtering_report.get('blocked_candidates', []) or []
+        if item.get('fingerprint')
+    }
+    return [
+        _corpus_approval_candidate_row(
+            candidate,
+            decision_map,
+            approved_fingerprints,
+            blocked_by_fingerprint)
+        for candidate in candidates or []
+    ]
+
+
+def _corpus_approval_candidate_row(
+        candidate: dict,
+        decision_map: dict,
+        approved_fingerprints: set,
+        blocked_by_fingerprint: dict) -> dict:
+    decision = (
+        decision_map.get(candidate.get('fingerprint')) or
+        decision_map.get(candidate.get('candidate_id')) or
+        DECISION_NONE)
+    blocked = blocked_by_fingerprint.get(candidate.get('fingerprint'), {})
+    eligible = candidate.get('fingerprint') in approved_fingerprints
+    return {
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'action': candidate.get('action', ''),
+        'region': candidate.get('region', ''),
+        'regions': list(candidate.get('regions', []) or []),
+        'manual_decision': decision,
+        'eligible_for_reviewed_filtering': bool(eligible),
+        'blocked_reason': '' if eligible else blocked.get('reason', 'missing_review_decision'),
+        'would_remove_count': (
+            _readiness_int(candidate.get('support_count', 0))
+            if candidate.get('action') == ACTION_WOULD_EXCLUDE else 0),
+        'affected_pages': list(candidate.get('affected_pages', []) or []),
+        'support_count': _readiness_int(candidate.get('support_count', 0)),
+    }
+
+
+def _corpus_approval_summary(
+        sample_name: str,
+        bounded_analysis_only: bool,
+        full_docx_validation_allowed: bool,
+        candidates: list,
+        filtering_report: dict) -> dict:
+    decision_counts = Counter(
+        candidate.get('manual_decision', DECISION_NONE)
+        for candidate in candidates or [])
+    removed_blocks = _corpus_removed_blocks(filtering_report)
+    missing_count = decision_counts.get(DECISION_NONE, 0)
+    conflict_count = decision_counts.get(DECISION_CONFLICT, 0)
+    rejected_removed_count = _corpus_removed_decision_count(
+        removed_blocks,
+        DECISION_REJECT_EXCLUDE)
+    unsure_removed_count = _corpus_removed_decision_count(
+        removed_blocks,
+        DECISION_UNSURE)
+    body_removed_count = _corpus_removed_region_count(removed_blocks, REGION_BODY)
+    layout_removed_count = _corpus_removed_layout_placeholder_count(removed_blocks)
+    raw_without_approval_count = _corpus_unapproved_raw_would_exclude_removed_count(
+        removed_blocks,
+        candidates)
+    unsafe_removed_count = (
+        body_removed_count +
+        rejected_removed_count +
+        unsure_removed_count +
+        layout_removed_count +
+        raw_without_approval_count)
+    filtering_summary = filtering_report.get('summary', {}) or {}
+    return {
+        'sample_name': sample_name,
+        'candidate_count': len(candidates or []),
+        'explicit_decision_count': sum(
+            1 for candidate in candidates or []
+            if candidate.get('manual_decision') not in {DECISION_NONE, ''}),
+        'approve_count': decision_counts.get(DECISION_APPROVE_EXCLUDE, 0),
+        'reject_count': decision_counts.get(DECISION_REJECT_EXCLUDE, 0),
+        'unsure_count': decision_counts.get(DECISION_UNSURE, 0),
+        'missing_decision_count': missing_count,
+        'conflict_decision_count': conflict_count,
+        'explicit_decisions_complete': missing_count == 0 and conflict_count == 0,
+        'eligible_approved_candidate_count': _readiness_int(
+            filtering_report.get('approved_candidate_count', 0)),
+        'blocked_candidate_count': _readiness_int(
+            filtering_report.get('blocked_candidate_count', 0)),
+        'reviewed_would_remove_block_count': _readiness_int(
+            filtering_summary.get('would_remove_block_count', 0)),
+        'reviewed_removed_block_count': _readiness_int(
+            filtering_summary.get('removed_block_count', 0)),
+        'reviewed_kept_block_count': _readiness_int(
+            filtering_summary.get('kept_block_count', 0)),
+        'body_region_removed_count': body_removed_count,
+        'rejected_removed_count': rejected_removed_count,
+        'unsure_removed_count': unsure_removed_count,
+        'layout_placeholder_removed_count': layout_removed_count,
+        'raw_would_exclude_without_approval_removed_count': raw_without_approval_count,
+        'unsafe_removed_count': unsafe_removed_count,
+        'bounded_analysis_only': bool(bounded_analysis_only),
+        'full_docx_validation_allowed': bool(full_docx_validation_allowed),
+        'full_docx_validation_blocked': bool(
+            bounded_analysis_only and not full_docx_validation_allowed),
+    }
+
+
+def _corpus_removed_blocks(filtering_report: dict) -> list:
+    return [
+        dict(block)
+        for page in (filtering_report or {}).get('pages', []) or []
+        for block in page.get('removed_blocks', []) or []
+    ]
+
+
+def _corpus_removed_region_count(removed_blocks: list, region: str) -> int:
+    return sum(1 for block in removed_blocks or [] if block.get('region') == region)
+
+
+def _corpus_removed_decision_count(removed_blocks: list, decision: str) -> int:
+    return sum(
+        1 for block in removed_blocks or []
+        if block.get('manual_decision') == decision)
+
+
+def _corpus_removed_layout_placeholder_count(removed_blocks: list) -> int:
+    return sum(
+        1 for block in removed_blocks or []
+        if block.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER)
+
+
+def _corpus_unapproved_raw_would_exclude_removed_count(
+        removed_blocks: list,
+        candidates: list) -> int:
+    candidate_by_fingerprint = {
+        candidate.get('fingerprint'): candidate
+        for candidate in candidates or []
+        if candidate.get('fingerprint')
+    }
+    count = 0
+    for block in removed_blocks or []:
+        candidate = candidate_by_fingerprint.get(block.get('fingerprint'), {})
+        if (
+                candidate.get('action') == ACTION_WOULD_EXCLUDE and
+                candidate.get('manual_decision') != DECISION_APPROVE_EXCLUDE):
+            count += 1
+    return count
+
+
+def _corpus_approval_warnings(summary: dict) -> list:
+    warnings = []
+    if summary.get('missing_decision_count', 0):
+        warnings.append({
+            'type': 'missing_review_decisions',
+            'count': summary.get('missing_decision_count'),
+        })
+    if summary.get('conflict_decision_count', 0):
+        warnings.append({
+            'type': 'conflicting_review_decisions',
+            'count': summary.get('conflict_decision_count'),
+        })
+    if summary.get('unsure_count', 0):
+        warnings.append({
+            'type': 'unsure_candidates_present',
+            'count': summary.get('unsure_count'),
+            'message': 'Unsure candidates are blocked and need visual review.',
+        })
+    if summary.get('body_region_removed_count', 0):
+        warnings.append({
+            'type': 'body_region_removed',
+            'count': summary.get('body_region_removed_count'),
+        })
+    if summary.get('rejected_removed_count', 0):
+        warnings.append({
+            'type': 'rejected_candidate_removed',
+            'count': summary.get('rejected_removed_count'),
+        })
+    if summary.get('unsure_removed_count', 0):
+        warnings.append({
+            'type': 'unsure_candidate_removed',
+            'count': summary.get('unsure_removed_count'),
+        })
+    if summary.get('layout_placeholder_removed_count', 0):
+        warnings.append({
+            'type': 'layout_placeholder_removed',
+            'count': summary.get('layout_placeholder_removed_count'),
+        })
+    if summary.get('raw_would_exclude_without_approval_removed_count', 0):
+        warnings.append({
+            'type': 'raw_would_exclude_without_approval_removed',
+            'count': summary.get('raw_would_exclude_without_approval_removed_count'),
+        })
+    if summary.get('full_docx_validation_blocked', False):
+        warnings.append({
+            'type': 'bounded_large_sample_full_docx_blocked',
+            'message': 'Large sample remains bounded-subset only.',
+        })
+    if not summary.get('eligible_approved_candidate_count', 0):
+        warnings.append({
+            'type': 'no_eligible_approved_candidates',
+        })
+    return warnings
+
+
+def _corpus_approval_recommendation(summary: dict, warnings: list) -> str:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    if 'missing_review_decisions' in warning_types:
+        return 'Phase 2Y2 is blocked until every candidate has exactly one manual decision.'
+    if 'conflicting_review_decisions' in warning_types:
+        return 'Phase 2Y2 is blocked until conflicting manual decisions are resolved.'
+    unsafe_types = {
+        'body_region_removed',
+        'rejected_candidate_removed',
+        'unsure_candidate_removed',
+        'layout_placeholder_removed',
+        'raw_would_exclude_without_approval_removed',
+    }
+    if warning_types.intersection(unsafe_types):
+        return 'Approved-only validation is unsafe; do not continue deeper validation for this sample.'
+    if summary.get('full_docx_validation_blocked', False):
+        return 'Approved-only bounded validation may proceed; full large-document DOCX validation remains blocked.'
+    if summary.get('eligible_approved_candidate_count', 0):
+        if summary.get('unsure_count', 0):
+            return 'Approved candidates may be validated locally; unsure candidates remain blocked for visual review.'
+        return 'Approved candidates may proceed through local-only validation.'
+    return 'No eligible approved candidates are available for local validation.'
+
+
+def _corpus_approval_summary_empty() -> dict:
+    return {
+        'sample_count': 0,
+        'samples_validated_count': 0,
+        'samples_with_missing_decisions': 0,
+        'samples_with_unsure_decisions': 0,
+        'samples_bounded_only': 0,
+        'total_candidate_count': 0,
+        'total_approve_count': 0,
+        'total_reject_count': 0,
+        'total_unsure_count': 0,
+        'total_missing_decision_count': 0,
+        'total_eligible_approved_candidate_count': 0,
+        'total_removed_block_count': 0,
+        'total_body_region_removed_count': 0,
+        'full_large_document_validation_skipped_count': 0,
+    }
+
+
+def _corpus_approval_summary_row(report: dict) -> dict:
+    if not report or not isinstance(report, dict):
+        return {
+            'sample_name': '',
+            'enabled': False,
+            'candidate_count': 0,
+            'approve_count': 0,
+            'reject_count': 0,
+            'unsure_count': 0,
+            'missing_decision_count': 0,
+            'eligible_approved_candidate_count': 0,
+            'reviewed_removed_block_count': 0,
+            'body_region_removed_count': 0,
+            'bounded_analysis_only': False,
+            'full_docx_validation_blocked': False,
+            'warnings': [{'type': 'missing_corpus_approval_validation_report'}],
+            'safe_to_run_approved_only_validation': False,
+        }
+
+    summary = report.get('summary') or {}
+    return {
+        'sample_name': summary.get('sample_name', report.get('sample_name', '')),
+        'enabled': bool(report.get('enabled', False)),
+        'candidate_count': _readiness_int(summary.get('candidate_count', 0)),
+        'approve_count': _readiness_int(summary.get('approve_count', 0)),
+        'reject_count': _readiness_int(summary.get('reject_count', 0)),
+        'unsure_count': _readiness_int(summary.get('unsure_count', 0)),
+        'missing_decision_count': _readiness_int(
+            summary.get('missing_decision_count', 0)),
+        'eligible_approved_candidate_count': _readiness_int(
+            summary.get('eligible_approved_candidate_count', 0)),
+        'reviewed_removed_block_count': _readiness_int(
+            summary.get('reviewed_removed_block_count', 0)),
+        'body_region_removed_count': _readiness_int(
+            summary.get('body_region_removed_count', 0)),
+        'bounded_analysis_only': bool(summary.get('bounded_analysis_only', False)),
+        'full_docx_validation_blocked': bool(
+            summary.get('full_docx_validation_blocked', False)),
+        'warnings': [dict(warning) for warning in report.get('warnings', []) or []],
+        'safe_to_run_approved_only_validation': bool(
+            (report.get('recommendation') or {}).get(
+                'safe_to_run_approved_only_validation', False)),
+    }
+
+
+def _corpus_approval_validation_summary(samples: list) -> dict:
+    return {
+        'sample_count': len(samples or []),
+        'samples_validated_count': sum(
+            1 for sample in samples or []
+            if sample.get('safe_to_run_approved_only_validation')),
+        'samples_with_missing_decisions': sum(
+            1 for sample in samples or []
+            if sample.get('missing_decision_count', 0)),
+        'samples_with_unsure_decisions': sum(
+            1 for sample in samples or []
+            if sample.get('unsure_count', 0)),
+        'samples_bounded_only': sum(
+            1 for sample in samples or []
+            if sample.get('bounded_analysis_only')),
+        'total_candidate_count': sum(
+            sample.get('candidate_count', 0)
+            for sample in samples or []),
+        'total_approve_count': sum(
+            sample.get('approve_count', 0)
+            for sample in samples or []),
+        'total_reject_count': sum(
+            sample.get('reject_count', 0)
+            for sample in samples or []),
+        'total_unsure_count': sum(
+            sample.get('unsure_count', 0)
+            for sample in samples or []),
+        'total_missing_decision_count': sum(
+            sample.get('missing_decision_count', 0)
+            for sample in samples or []),
+        'total_eligible_approved_candidate_count': sum(
+            sample.get('eligible_approved_candidate_count', 0)
+            for sample in samples or []),
+        'total_removed_block_count': sum(
+            sample.get('reviewed_removed_block_count', 0)
+            for sample in samples or []),
+        'total_body_region_removed_count': sum(
+            sample.get('body_region_removed_count', 0)
+            for sample in samples or []),
+        'full_large_document_validation_skipped_count': sum(
+            1 for sample in samples or []
+            if sample.get('full_docx_validation_blocked')),
+    }
+
+
+def _corpus_approval_summary_warnings(samples: list) -> list:
+    warnings = []
+    for sample in samples or []:
+        if not sample.get('enabled', False):
+            warnings.append({
+                'type': 'approval_validation_report_disabled',
+                'sample_name': sample.get('sample_name', ''),
+            })
+        for warning in sample.get('warnings', []) or []:
+            item = dict(warning)
+            item['sample_name'] = sample.get('sample_name', '')
+            warnings.append(item)
+    return warnings
+
+
+def _corpus_approval_summary_recommendation(summary: dict, warnings: list) -> str:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    if 'missing_review_decisions' in warning_types:
+        return 'Some samples still have missing review decisions; keep Phase 2Y2 blocked for those samples.'
+    unsafe_types = {
+        'body_region_removed',
+        'rejected_candidate_removed',
+        'unsure_candidate_removed',
+        'layout_placeholder_removed',
+        'raw_would_exclude_without_approval_removed',
+    }
+    if warning_types.intersection(unsafe_types):
+        return 'At least one sample has unsafe approved-filtering behavior; do not proceed to integration.'
+    if summary.get('samples_validated_count', 0):
+        return 'Local approved-only validation completed; next work should use committed synthetic fixtures before integration.'
+    return 'No sample has eligible approved candidates for deeper validation.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:

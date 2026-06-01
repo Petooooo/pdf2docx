@@ -3454,3 +3454,167 @@ decisions from the Phase 2Y1 review packs. `input3.pdf` may proceed to a local
 manual-approval-driven pipeline only after review decisions are filled in.
 `input6_large.pdf` should remain bounded until a later explicit approval allows
 larger or full-document processing.
+
+## Phase 2Y2
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2Y2 consumed explicit human decisions from the local-only corpus review
+packs and ran approved-only local validation for the selected corpus samples.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local artifacts
+
+Generated ignored local-only reports:
+
+```text
+local_reports/corpus_validation/input3-approved-filtering-validation-report.md
+local_reports/corpus_validation/input3-filtered-docx-validation-report.md
+local_reports/corpus_validation/input6-large-bounded-approved-validation-report.md
+local_reports/corpus-approval-validation-summary.md
+```
+
+Generated ignored local-only DOCX comparison files for `input3.pdf`:
+
+```text
+local_reports/corpus_validation/input3_docx_compare/baseline.docx
+local_reports/corpus_validation/input3_docx_compare/filtered.docx
+local_reports/corpus_validation/input3_docx_compare/normal-check.docx
+```
+
+The local sample PDFs, subset paths, generated reports, generated DOCX files,
+`.venv/`, generated caches, and conversion test outputs remained ignored and
+were not staged or committed.
+
+### Approval counts
+
+`input3.pdf`:
+
+- Candidate count: 5.
+- Explicit decisions: 5.
+- `approve_exclude`: 3.
+- `reject_exclude`: 0.
+- `unsure`: 2.
+- Missing/conflicting decisions: 0.
+- Eligible approved filtering candidates: 1.
+- Blocked candidates: 4.
+- Approved removed blocks: 5.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+
+`input6_large.pdf` bounded subset:
+
+- Candidate count: 3.
+- Explicit decisions: 3.
+- `approve_exclude`: 3.
+- `reject_exclude`: 0.
+- `unsure`: 0.
+- Missing/conflicting decisions: 0.
+- Eligible approved filtering candidates: 2.
+- Blocked candidates: 1.
+- Approved removed blocks: 30.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+
+### Input3 deeper validation
+
+`input3.pdf` ran the full local-only manual-approval-driven validation path:
+
+- Document-parse simulation/mapping/copy/guarded/filtered-parse checks ran.
+- Raw-object mapping exact matches: 5.
+- Ambiguous/missing mapping matches: 0 / 0.
+- Copied apply removed blocks: 5.
+- Guarded apply/restore removed blocks: 5.
+- Filtered parse removed blocks: 5.
+- Body-region removed count: 0.
+- Generated baseline and filtered DOCX files in ignored local paths.
+- Residual removed string count in filtered DOCX: 0.
+- True residual header/footer pollution count: 0.
+- Body text loss warnings from residual inspection: 0.
+- Table text loss warnings from residual inspection: 0.
+- Safety warning: `body_text_block_count_changed`.
+
+Because the filtered DOCX comparison showed a body TextBlock count delta, this
+sample is useful evidence but not production-integration approval.
+
+### Input6 large bounded validation
+
+`input6_large.pdf` remained bounded-subset only:
+
+- Pages analyzed: 15 of 756.
+- Full-document filtered parse was skipped.
+- Full-document DOCX generation was skipped.
+- Raw-object mapping exact matches on the bounded subset: 30.
+- Ambiguous/missing mapping matches: 0 / 0.
+- Copied apply removed blocks on the bounded subset: 30.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Warning: full large-document DOCX validation remains blocked.
+
+### Tests added
+
+- Approval validation passes when all candidates have explicit decisions.
+- Approval validation blocks missing decisions.
+- Approval validation reports `unsure` candidates without applying them.
+- Only approved eligible candidates are removed.
+- Rejected candidates remain blocked.
+- Bounded large samples cannot run full DOCX validation by default.
+- Local corpus validation reports do not mutate inputs.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 223 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 223 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local sample PDFs, generated reports, generated DOCX files,
+`.venv/`, generated caches, and conversion test outputs remain ignored.
+
+### Phase 2Y2 recommendation
+
+Committed synthetic fixture work should proceed next, using only safe generated
+documents. Production integration should remain blocked until the synthetic
+fixtures cover the approval flow and the `input3.pdf` body TextBlock delta has a
+committed regression analogue or a follow-up explanation.

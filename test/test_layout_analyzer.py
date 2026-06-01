@@ -2,6 +2,7 @@ import json
 import tempfile
 import zipfile
 import unittest
+from collections import Counter
 from importlib import util
 from pathlib import Path
 
@@ -25,6 +26,7 @@ ROLE_HEADER = LayoutAnalyzer.ROLE_HEADER
 ROLE_KEEP_BODY = LayoutAnalyzer.ROLE_KEEP_BODY
 ROLE_LAYOUT_PLACEHOLDER = LayoutAnalyzer.ROLE_LAYOUT_PLACEHOLDER
 ROLE_PAGE_NUMBER = LayoutAnalyzer.ROLE_PAGE_NUMBER
+ROLE_REVIEW_ONLY = LayoutAnalyzer.ROLE_REVIEW_ONLY
 classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
@@ -38,6 +40,8 @@ build_filtered_docx_residual_structure_report = LayoutAnalyzer.build_filtered_do
 build_local_corpus_validation_summary_report = LayoutAnalyzer.build_local_corpus_validation_summary_report
 build_local_corpus_manual_review_pack = LayoutAnalyzer.build_local_corpus_manual_review_pack
 build_local_corpus_manual_review_summary_report = LayoutAnalyzer.build_local_corpus_manual_review_summary_report
+build_local_corpus_approval_validation_report = LayoutAnalyzer.build_local_corpus_approval_validation_report
+build_local_corpus_approval_validation_summary_report = LayoutAnalyzer.build_local_corpus_approval_validation_summary_report
 build_reviewed_filtering_feature_readiness_report = LayoutAnalyzer.build_reviewed_filtering_feature_readiness_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
@@ -4132,6 +4136,136 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(pack['summary']['candidate_count'], 0)
         self.assertEqual(summary['summary']['selected_sample_count'], 0)
 
+    def test_corpus_approval_validation_passes_with_explicit_decisions(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'reject_exclude'),
+                ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'unsure'),
+            ),
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertTrue(report['summary']['explicit_decisions_complete'])
+        self.assertEqual(report['summary']['approve_count'], 1)
+        self.assertEqual(report['summary']['reject_count'], 1)
+        self.assertEqual(report['summary']['unsure_count'], 1)
+        self.assertEqual(report['summary']['eligible_approved_candidate_count'], 1)
+        self.assertEqual(report['summary']['reviewed_removed_block_count'], 2)
+        self.assertEqual(report['summary']['unsafe_removed_count'], 0)
+
+    def test_corpus_approval_validation_blocks_missing_decisions(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude')),
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertFalse(report['summary']['explicit_decisions_complete'])
+        self.assertEqual(report['summary']['missing_decision_count'], 2)
+        self.assertIn('missing_review_decisions', _corpus_warning_types(report))
+        self.assertFalse(
+            report['recommendation']['safe_to_run_approved_only_validation'])
+
+    def test_corpus_approval_validation_reports_unsure_candidates(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'unsure'),
+            ),
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertEqual(report['summary']['unsure_count'], 1)
+        self.assertEqual(report['summary']['unsure_removed_count'], 0)
+        self.assertIn('unsure_candidates_present', _corpus_warning_types(report))
+
+    def test_corpus_approval_validation_removes_only_approved_candidates(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'reject_exclude'),
+                ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'reject_exclude'),
+            ),
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertEqual(report['summary']['reviewed_removed_block_count'], 2)
+        self.assertEqual(report['summary']['rejected_removed_count'], 0)
+        self.assertEqual(
+            report['summary']['raw_would_exclude_without_approval_removed_count'],
+            0)
+
+    def test_corpus_approval_validation_keeps_rejected_candidates_blocked(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'reject_exclude'),
+                ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'reject_exclude'),
+                ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'reject_exclude'),
+            ),
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertEqual(report['summary']['eligible_approved_candidate_count'], 0)
+        self.assertEqual(report['summary']['reviewed_removed_block_count'], 0)
+        self.assertEqual(report['summary']['blocked_candidate_count'], 3)
+
+    def test_corpus_approval_validation_keeps_bounded_large_sample_from_full_docx(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+                ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'reject_exclude'),
+            ),
+            sample_name='input6_large.pdf',
+            bounded_analysis_only=True,
+            full_docx_validation_allowed=False,
+            enabled=True)
+
+        self.assertTrue(report['summary']['full_docx_validation_blocked'])
+        self.assertIn(
+            'bounded_large_sample_full_docx_blocked',
+            _corpus_warning_types(report))
+
+    def test_corpus_approval_validation_does_not_mutate_inputs(self):
+        layout_report = _corpus_approval_layout_report()
+        decisions = _corpus_review_decisions(
+            ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude'),
+            ('repeated-2', 'page-number||bottom', 'page_number', ACTION_WOULD_EXCLUDE, 'reject_exclude'),
+            ('repeated-3', 'body repeat||body', 'review_only', ACTION_REVIEW, 'unsure'),
+        )
+        before = json.loads(json.dumps({
+            'layout_report': layout_report,
+            'decisions': decisions,
+        }))
+
+        build_local_corpus_approval_validation_report(
+            layout_report,
+            decisions,
+            sample_name='input3.pdf',
+            enabled=True)
+
+        self.assertEqual({'layout_report': layout_report, 'decisions': decisions}, before)
+
+    def test_corpus_approval_validation_disabled_mode_is_clear(self):
+        report = build_local_corpus_approval_validation_report(
+            _corpus_approval_layout_report(),
+            _corpus_review_decisions(
+                ('repeated-1', 'annual report||top', 'header', ACTION_WOULD_EXCLUDE, 'approve_exclude')))
+        summary = build_local_corpus_approval_validation_summary_report([report])
+
+        self.assertFalse(report['enabled'])
+        self.assertFalse(summary['enabled'])
+        self.assertEqual(report['summary']['candidate_count'], 0)
+        self.assertEqual(summary['summary']['sample_count'], 0)
+
 
 def _page(page_index, blocks):
     return {
@@ -4938,6 +5072,106 @@ def _corpus_sample_result(
         'review_pack_generated': analysis_succeeded,
         'review_pack_path': f'local_reports/corpus_validation/{file_name}-review-pack.md',
         'error': error,
+    }
+
+
+def _corpus_approval_layout_report():
+    pages = []
+    for page_index in range(2):
+        pages.append({
+            'page_index': page_index,
+            'text_blocks': [
+                {
+                    'block_index': 0,
+                    'text': 'Annual Report',
+                    'fingerprint': 'annual report||top',
+                    'region': REGION_TOP,
+                },
+                {
+                    'block_index': 1,
+                    'text': 'Body paragraph line',
+                    'fingerprint': f'body paragraph {page_index}||body',
+                    'region': REGION_BODY,
+                },
+                {
+                    'block_index': 2,
+                    'text': 'Page 1',
+                    'fingerprint': 'page-number||bottom',
+                    'region': REGION_BOTTOM,
+                },
+                {
+                    'block_index': 3,
+                    'text': 'Body Repeat',
+                    'fingerprint': 'body repeat||body',
+                    'region': REGION_BODY,
+                },
+            ],
+        })
+    return {
+        'page_count': 2,
+        'pages': pages,
+        'header_footer_exclusion_dry_run': {
+            'summary': {
+                'candidate_count': 3,
+            },
+            'candidates': [
+                {
+                    'candidate_id': 'repeated-1',
+                    'fingerprint': 'annual report||top',
+                    'proposed_role': ROLE_HEADER,
+                    'action': ACTION_WOULD_EXCLUDE,
+                    'region': REGION_TOP,
+                    'regions': [REGION_TOP],
+                    'support_count': 2,
+                    'page_count': 2,
+                    'affected_pages': [0, 1],
+                },
+                {
+                    'candidate_id': 'repeated-2',
+                    'fingerprint': 'page-number||bottom',
+                    'proposed_role': ROLE_PAGE_NUMBER,
+                    'action': ACTION_WOULD_EXCLUDE,
+                    'region': REGION_BOTTOM,
+                    'regions': [REGION_BOTTOM],
+                    'support_count': 2,
+                    'page_count': 2,
+                    'affected_pages': [0, 1],
+                },
+                {
+                    'candidate_id': 'repeated-3',
+                    'fingerprint': 'body repeat||body',
+                    'proposed_role': ROLE_REVIEW_ONLY,
+                    'action': ACTION_REVIEW,
+                    'region': REGION_BODY,
+                    'regions': [REGION_BODY],
+                    'support_count': 2,
+                    'page_count': 2,
+                    'affected_pages': [0, 1],
+                },
+            ],
+        },
+    }
+
+
+def _corpus_review_decisions(*items):
+    decisions = [
+        {
+            'candidate_id': candidate_id,
+            'fingerprint': fingerprint,
+            'proposed_role': role,
+            'action': action,
+            'manual_decision': decision,
+            'checked_decisions': [decision],
+        }
+        for candidate_id, fingerprint, role, action, decision in items
+    ]
+    return {
+        'decisions': decisions,
+        'summary': {
+            'candidate_count': len(decisions),
+            'decision_counts': dict(Counter(
+                decision['manual_decision'] for decision in decisions)),
+        },
     }
 
 
