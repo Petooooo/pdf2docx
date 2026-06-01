@@ -1244,6 +1244,79 @@ def build_table_delta_investigation_report(
     }
 
 
+def build_body_table_delta_root_cause_report(
+        filtered_parse_experiment_report: dict = None,
+        table_delta_report: dict = None,
+        baseline_parse_metrics: dict = None,
+        filtered_parse_metrics: dict = None,
+        removed_objects_by_page: list = None,
+        enabled: bool = False) -> dict:
+    '''Investigate body/table root causes for unsafe table deltas.'''
+    experiment_report = filtered_parse_experiment_report or {}
+    baseline_metrics = _copy_parse_metrics(
+        baseline_parse_metrics or experiment_report.get('baseline_parse_metrics') or {})
+    filtered_metrics = _copy_parse_metrics(
+        filtered_parse_metrics or experiment_report.get('filtered_parse_metrics') or {})
+    removed_by_page = _copy_removed_objects_by_page(
+        removed_objects_by_page or experiment_report.get('removed_objects_by_page') or [])
+    removed_objects = [
+        raw_object
+        for page in removed_by_page
+        for raw_object in page.get('objects', []) or []
+    ]
+    delta_report = table_delta_report or build_table_delta_investigation_report(
+        filtered_parse_experiment_report=experiment_report,
+        baseline_parse_metrics=baseline_metrics,
+        filtered_parse_metrics=filtered_metrics,
+        removed_objects_by_page=removed_by_page,
+        enabled=bool(enabled))
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'body_table_delta_root_cause_report_only',
+            'insertion_point': 'document_parse',
+            'summary': _body_table_root_disabled_summary(delta_report),
+            'baseline_only_findings': [],
+            'changed_common_findings': [],
+            'overlap_proximity_summary': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2s': False,
+                'reason': 'Body table delta root-cause investigation is disabled.',
+            },
+        }
+
+    baseline_only_findings = [
+        _body_table_root_baseline_only_finding(table, removed_objects)
+        for table in delta_report.get('baseline_only_tables', []) or []
+    ]
+    changed_common_findings = [
+        _body_table_root_changed_common_finding(change, removed_objects)
+        for change in delta_report.get('changed_common_tables', []) or []
+    ]
+    findings = baseline_only_findings + changed_common_findings
+    summary = _body_table_root_summary(
+        baseline_only_findings,
+        changed_common_findings)
+    warnings = _body_table_root_warnings(summary, findings)
+
+    return {
+        'enabled': True,
+        'policy': 'body_table_delta_root_cause_report_only',
+        'insertion_point': 'document_parse',
+        'summary': summary,
+        'baseline_only_findings': baseline_only_findings,
+        'changed_common_findings': changed_common_findings,
+        'overlap_proximity_summary': _body_table_root_overlap_summary(findings),
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2s': _body_table_root_safe_for_phase_2s(summary, warnings),
+            'reason': _body_table_root_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -4040,6 +4113,303 @@ def _table_delta_recommendation(summary: dict, warnings: list) -> str:
     if summary.get('table_changes_affect_body_region'):
         return 'Do not integrate production filtering yet; body-region table changes require inspection.'
     return 'Keep Phase 2R blocked or investigative until ambiguous/changed table deltas are reviewed.'
+
+
+def _body_table_root_disabled_summary(table_delta_report: dict) -> dict:
+    delta_summary = (table_delta_report or {}).get('summary') or {}
+    return {
+        'body_region_baseline_only_table_count': delta_summary.get('body_region_baseline_only_table_count', 0),
+        'changed_common_table_count': delta_summary.get('changed_common_table_count', 0),
+        'pages_affected': [],
+        'likely_false_positive_table_count': 0,
+        'likely_header_footer_pollution_table_count': 0,
+        'possible_real_body_table_loss_count': 0,
+        'unsafe_table_delta_count': 0,
+        'changed_body_table_geometry_count': 0,
+        'top_bottom_only_table_delta_count': 0,
+        'classification': 'disabled',
+    }
+
+
+def _body_table_root_baseline_only_finding(table: dict, removed_objects: list) -> dict:
+    table = dict(table)
+    proximity = _table_removed_proximity(table, removed_objects)
+    region = table.get('region', '')
+    body_intersection = region == REGION_BODY
+    boundary_intersection = region in {REGION_TOP, REGION_BOTTOM}
+    small_artifact_shape = _small_artifact_like_table(table)
+    roles = set((proximity.get('overlap', {}) or {}).get('roles', {}).keys())
+
+    if boundary_intersection and proximity.get('overlap_count'):
+        likely_cause = (
+            'page_number_pollution_removed'
+            if roles == {ROLE_PAGE_NUMBER} else
+            'header_footer_pollution_removed')
+        severity = 'safe'
+    elif body_intersection and proximity.get('overlap_count') and small_artifact_shape:
+        likely_cause = 'baseline_false_positive_table'
+        severity = 'review'
+    elif body_intersection:
+        likely_cause = 'possible_real_body_table_loss'
+        severity = 'unsafe'
+    elif proximity.get('nearest_distance') is not None and proximity.get('nearest_distance') <= 24.0:
+        likely_cause = 'table_geometry_changed_near_removed_artifact'
+        severity = 'review'
+    else:
+        likely_cause = 'insufficient_evidence'
+        severity = 'review'
+
+    return {
+        'finding_type': 'baseline_only_table',
+        'page_index': table.get('page_index'),
+        'page_number': table.get('page_number'),
+        'baseline_table_id': table.get('table_id', ''),
+        'matched_filtered_table_id': '',
+        'region': region,
+        'bbox': _json_bbox(table.get('bbox')),
+        'row_count': int(table.get('row_count') or 0),
+        'column_count': int(table.get('column_count') or 0),
+        'cell_count': int(table.get('cell_count') or 0),
+        'text_preview': _preview_text(table, max_length=100),
+        'bbox_intersects_body_region': body_intersection,
+        'bbox_intersects_top_bottom_artifact': boundary_intersection and bool(proximity.get('overlap_count')),
+        'removed_candidate_proximity': proximity,
+        'likely_cause': likely_cause,
+        'severity': severity,
+        'reason': _body_table_root_reason(likely_cause, severity),
+    }
+
+
+def _body_table_root_changed_common_finding(change: dict, removed_objects: list) -> dict:
+    change = dict(change)
+    baseline = dict(change.get('baseline_table') or {})
+    filtered = dict(change.get('filtered_table') or {})
+    proximity = _table_removed_proximity(baseline, removed_objects)
+    region = change.get('region') or baseline.get('region', '')
+    changes = list(change.get('changes', []) or [])
+    structure_changed = any(
+        item in changes
+        for item in ('row_count_changed', 'column_count_changed', 'cell_count_changed'))
+    body_intersection = region == REGION_BODY
+    boundary_intersection = region in {REGION_TOP, REGION_BOTTOM}
+    near_removed = (
+        bool(proximity.get('overlap_count')) or
+        (
+            proximity.get('nearest_distance') is not None and
+            proximity.get('nearest_distance') <= 24.0))
+
+    if body_intersection and structure_changed:
+        likely_cause = 'possible_real_body_table_loss'
+        severity = 'unsafe'
+    elif body_intersection and near_removed:
+        likely_cause = 'table_geometry_changed_near_removed_artifact'
+        severity = 'review'
+    elif body_intersection:
+        likely_cause = 'insufficient_evidence'
+        severity = 'unsafe'
+    elif boundary_intersection and near_removed:
+        likely_cause = 'table_geometry_changed_near_removed_artifact'
+        severity = 'safe' if not structure_changed else 'review'
+    elif boundary_intersection:
+        likely_cause = 'insufficient_evidence'
+        severity = 'review'
+    else:
+        likely_cause = 'insufficient_evidence'
+        severity = 'review'
+
+    return {
+        'finding_type': 'changed_common_table',
+        'page_index': change.get('page_index'),
+        'page_number': change.get('page_number'),
+        'baseline_table_id': baseline.get('table_id', ''),
+        'matched_filtered_table_id': filtered.get('table_id', ''),
+        'region': region,
+        'baseline_bbox': _json_bbox(baseline.get('bbox')),
+        'filtered_bbox': _json_bbox(filtered.get('bbox')),
+        'bbox': _json_bbox(baseline.get('bbox')),
+        'row_count': int(baseline.get('row_count') or 0),
+        'filtered_row_count': int(filtered.get('row_count') or 0),
+        'column_count': int(baseline.get('column_count') or 0),
+        'filtered_column_count': int(filtered.get('column_count') or 0),
+        'cell_count': int(baseline.get('cell_count') or 0),
+        'filtered_cell_count': int(filtered.get('cell_count') or 0),
+        'changes': changes,
+        'text_preview': _preview_text(baseline, max_length=100),
+        'bbox_intersects_body_region': body_intersection,
+        'bbox_intersects_top_bottom_artifact': boundary_intersection and bool(proximity.get('overlap_count')),
+        'removed_candidate_proximity': proximity,
+        'likely_cause': likely_cause,
+        'severity': severity,
+        'reason': _body_table_root_reason(likely_cause, severity),
+    }
+
+
+def _small_artifact_like_table(table: dict) -> bool:
+    return (
+        int(table.get('row_count') or 0) <= 1 and
+        int(table.get('column_count') or 0) <= 3 and
+        int(table.get('cell_count') or 0) <= 3)
+
+
+def _table_removed_proximity(table: dict, removed_objects: list) -> dict:
+    overlap = _removed_candidate_overlap(table, removed_objects)
+    nearest = _nearest_removed_candidate(table, removed_objects)
+    return {
+        'overlap_count': overlap.get('overlap_count', 0),
+        'overlap': overlap,
+        'nearest_distance': nearest.get('distance'),
+        'nearest_candidate': nearest.get('candidate'),
+    }
+
+
+def _nearest_removed_candidate(table: dict, removed_objects: list) -> dict:
+    nearest = None
+    for removed in removed_objects or []:
+        if table.get('page_index') != removed.get('page_index'):
+            continue
+        distance = _bbox_gap(table.get('bbox'), removed.get('bbox'))
+        candidate = {
+            'candidate_id': removed.get('candidate_id', ''),
+            'proposed_role': removed.get('proposed_role', ''),
+            'region': removed.get('region', ''),
+            'bbox_gap': round(distance, 2),
+            'text_preview': removed.get('text_preview', '') or _preview_text(removed, max_length=80),
+        }
+        if nearest is None or distance < nearest['distance']:
+            nearest = {'distance': distance, 'candidate': candidate}
+
+    if nearest is None:
+        return {'distance': None, 'candidate': {}}
+    nearest['distance'] = round(nearest['distance'], 2)
+    return nearest
+
+
+def _body_table_root_reason(likely_cause: str, severity: str) -> str:
+    if likely_cause == 'header_footer_pollution_removed':
+        return 'Boundary table overlaps approved header/footer/page-number removals and is likely parser pollution.'
+    if likely_cause == 'page_number_pollution_removed':
+        return 'Boundary table is explained by approved page-number removals.'
+    if likely_cause == 'baseline_false_positive_table':
+        return 'Small body-region table overlaps approved removals; keep for manual review as a likely false positive.'
+    if likely_cause == 'possible_real_body_table_loss':
+        return 'Body-region table structure may have been lost or changed; production integration remains blocked.'
+    if likely_cause == 'table_geometry_changed_near_removed_artifact':
+        return f'Table geometry changed near approved removals; severity is {severity}.'
+    return 'Insufficient evidence to classify this table delta safely.'
+
+
+def _body_table_root_summary(
+        baseline_only_findings: list,
+        changed_common_findings: list) -> dict:
+    findings = baseline_only_findings + changed_common_findings
+    pages_affected = sorted({
+        finding.get('page_number')
+        for finding in findings
+        if finding.get('page_number') is not None
+    })
+    cause_counts = Counter(finding.get('likely_cause', '') for finding in findings)
+    severity_counts = Counter(finding.get('severity', '') for finding in findings)
+    changed_body = [
+        finding for finding in changed_common_findings
+        if finding.get('region') == REGION_BODY
+    ]
+    top_bottom_only = [
+        finding for finding in findings
+        if finding.get('region') in {REGION_TOP, REGION_BOTTOM}
+    ]
+    body_baseline_only = [
+        finding for finding in baseline_only_findings
+        if finding.get('region') == REGION_BODY
+    ]
+    return {
+        'body_region_baseline_only_table_count': len(body_baseline_only),
+        'changed_common_table_count': len(changed_common_findings),
+        'pages_affected': pages_affected,
+        'likely_false_positive_table_count': cause_counts.get('baseline_false_positive_table', 0),
+        'likely_header_footer_pollution_table_count': (
+            cause_counts.get('header_footer_pollution_removed', 0) +
+            cause_counts.get('page_number_pollution_removed', 0)),
+        'possible_real_body_table_loss_count': cause_counts.get('possible_real_body_table_loss', 0),
+        'unsafe_table_delta_count': severity_counts.get('unsafe', 0),
+        'review_table_delta_count': severity_counts.get('review', 0),
+        'safe_table_delta_count': severity_counts.get('safe', 0),
+        'changed_body_table_geometry_count': len(changed_body),
+        'top_bottom_only_table_delta_count': len(top_bottom_only),
+        'likely_cause_counts': dict(sorted(cause_counts.items())),
+        'severity_counts': dict(sorted(severity_counts.items())),
+        'classification': 'unsafe' if severity_counts.get('unsafe', 0) else (
+            'review' if severity_counts.get('review', 0) else 'safe'),
+    }
+
+
+def _body_table_root_overlap_summary(findings: list) -> dict:
+    overlap_count = 0
+    near_count = 0
+    distances = []
+    roles = Counter()
+    for finding in findings or []:
+        proximity = finding.get('removed_candidate_proximity') or {}
+        if proximity.get('overlap_count', 0):
+            overlap_count += 1
+        distance = proximity.get('nearest_distance')
+        if distance is not None:
+            distances.append(float(distance))
+            if float(distance) <= 24.0:
+                near_count += 1
+        for role, count in (proximity.get('overlap', {}).get('roles') or {}).items():
+            roles[role] += count
+
+    return {
+        'tables_overlapping_removed_candidates': overlap_count,
+        'tables_near_removed_candidates': near_count,
+        'nearest_distance_min': round(min(distances), 2) if distances else None,
+        'nearest_distance_max': round(max(distances), 2) if distances else None,
+        'overlap_roles': dict(sorted(roles.items())),
+    }
+
+
+def _body_table_root_warnings(summary: dict, findings: list) -> list:
+    warnings = []
+    if summary.get('possible_real_body_table_loss_count', 0):
+        warnings.append({
+            'type': 'possible_real_body_table_loss',
+            'count': summary.get('possible_real_body_table_loss_count'),
+        })
+    if summary.get('unsafe_table_delta_count', 0):
+        warnings.append({
+            'type': 'unsafe_table_delta',
+            'count': summary.get('unsafe_table_delta_count'),
+        })
+    if summary.get('changed_body_table_geometry_count', 0):
+        warnings.append({
+            'type': 'changed_body_table_geometry',
+            'count': summary.get('changed_body_table_geometry_count'),
+        })
+    insufficient = [
+        finding for finding in findings or []
+        if finding.get('likely_cause') == 'insufficient_evidence'
+    ]
+    if insufficient:
+        warnings.append({
+            'type': 'insufficient_table_delta_evidence',
+            'count': len(insufficient),
+        })
+    return warnings
+
+
+def _body_table_root_safe_for_phase_2s(summary: dict, warnings: list) -> bool:
+    return (
+        not summary.get('unsafe_table_delta_count', 0) and
+        not summary.get('possible_real_body_table_loss_count', 0) and
+        not warnings)
+
+
+def _body_table_root_recommendation(summary: dict, warnings: list) -> str:
+    if _body_table_root_safe_for_phase_2s(summary, warnings):
+        return 'No unsafe body table delta remains; Phase 2S can remain opt-in and guarded.'
+    if summary.get('possible_real_body_table_loss_count', 0):
+        return 'Keep production integration blocked; inspect possible real body table loss before Phase 2S.'
+    return 'Continue with report-only inspection before any production filtering integration.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:

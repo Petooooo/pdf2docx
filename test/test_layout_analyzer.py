@@ -27,6 +27,7 @@ classify_y_band = LayoutAnalyzer.classify_y_band
 find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
+build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
@@ -3017,6 +3018,153 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(report['enabled'])
         self.assertEqual(report['summary']['baseline_only_table_count'], 0)
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2r'])
+
+    def test_body_table_root_cause_body_baseline_only_defaults_to_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=3, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        finding = report['baseline_only_findings'][0]
+        self.assertEqual(finding['likely_cause'], 'possible_real_body_table_loss')
+        self.assertEqual(finding['severity'], 'unsafe')
+        self.assertEqual(report['summary']['possible_real_body_table_loss_count'], 1)
+
+    def test_body_table_root_cause_boundary_overlap_is_likely_pollution(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('footer-table', 0, REGION_BOTTOM, [50, 940, 300, 980], rows=1, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 942, 300, 978], ROLE_FOOTER),
+            ])],
+            enabled=True)
+
+        finding = report['baseline_only_findings'][0]
+        self.assertEqual(finding['likely_cause'], 'header_footer_pollution_removed')
+        self.assertEqual(finding['severity'], 'safe')
+        self.assertEqual(report['summary']['likely_header_footer_pollution_table_count'], 1)
+
+    def test_body_table_root_cause_changed_boundary_near_artifact_can_be_safe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('footer-table', 0, REGION_BOTTOM, [50, 940, 300, 980], rows=1, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('footer-table-filtered', 0, REGION_BOTTOM, [50, 940, 300, 970], rows=1, cols=3),
+        ])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 972, 300, 980], ROLE_FOOTER),
+            ])],
+            enabled=True)
+
+        finding = report['changed_common_findings'][0]
+        self.assertEqual(finding['likely_cause'], 'table_geometry_changed_near_removed_artifact')
+        self.assertEqual(finding['severity'], 'safe')
+
+    def test_body_table_root_cause_changed_body_cell_loss_is_unsafe(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2),
+        ])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        finding = report['changed_common_findings'][0]
+        self.assertEqual(finding['likely_cause'], 'possible_real_body_table_loss')
+        self.assertEqual(finding['severity'], 'unsafe')
+
+    def test_body_table_root_cause_body_false_positive_can_be_review(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-artifact-table', 0, REGION_BODY, [50, 900, 300, 940], rows=1, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 902, 300, 938], ROLE_FOOTER),
+            ])],
+            enabled=True)
+
+        finding = report['baseline_only_findings'][0]
+        self.assertEqual(finding['likely_cause'], 'baseline_false_positive_table')
+        self.assertEqual(finding['severity'], 'review')
+        self.assertEqual(report['summary']['likely_false_positive_table_count'], 1)
+
+    def test_body_table_root_cause_reports_overlap_and_distance(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('footer-table', 0, REGION_BOTTOM, [50, 940, 300, 980], rows=1, cols=3),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 942, 300, 978], ROLE_FOOTER),
+            ])],
+            enabled=True)
+        proximity = report['baseline_only_findings'][0]['removed_candidate_proximity']
+
+        self.assertEqual(proximity['overlap_count'], 1)
+        self.assertEqual(proximity['nearest_distance'], 0.0)
+        self.assertEqual(report['overlap_proximity_summary']['tables_overlapping_removed_candidates'], 1)
+
+    def test_body_table_root_cause_does_not_mutate_inputs(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+        ])
+        filtered = _parse_metrics_with_tables([])
+        removed = [_removed_objects_page([
+            _removed_raw_object('Approved Header', REGION_TOP, [50, 20, 300, 44], ROLE_HEADER),
+        ])]
+        before = json.dumps({
+            'baseline': baseline,
+            'filtered': filtered,
+            'removed': removed,
+        }, sort_keys=True)
+
+        build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=removed,
+            enabled=True)
+
+        after = json.dumps({
+            'baseline': baseline,
+            'filtered': filtered,
+            'removed': removed,
+        }, sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_body_table_root_cause_disabled_mode_is_clear(self):
+        report = build_body_table_delta_root_cause_report(
+            baseline_parse_metrics=_parse_metrics_with_tables([
+                _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+            ]))
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['classification'], 'disabled')
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2s'])
 
 
 def _page(page_index, blocks):

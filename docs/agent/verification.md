@@ -2357,3 +2357,119 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2R recommendation
 
 Phase 2R is not safe as a production integration step yet. The next phase should remain opt-in/report-only and inspect the body-region baseline-only table plus changed common body tables before any persistent filtering behavior is attempted.
+
+## Phase 2R
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2R added an internal/report-only body table delta root-cause helper. The helper focuses on the unsafe Phase 2Q table deltas by classifying baseline-only and changed common tables with removed-candidate overlap, nearest removed-candidate distance, region, bbox, row/column/cell counts, and severity.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+- No production body filtering was enabled.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/body-table-delta-root-cause-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, filtered parse report, table delta report, and generated root-cause report remained ignored.
+
+### Sample summary
+
+- Body-region baseline-only table count: 1.
+- Changed common table count: 11.
+- Pages affected: 1 through 12.
+- Likely false-positive table count: 1.
+- Likely header/footer pollution table count: 11.
+- Possible real body table loss count: 0.
+- Unsafe table delta count: 8.
+- Review table delta count: 4.
+- Safe table delta count: 11.
+- Changed body table geometry count: 8.
+- Top/bottom-only table delta count: 14.
+- Classification: `unsafe`.
+
+Overlap/proximity summary:
+
+- Tables overlapping removed candidates: 12.
+- Tables near removed candidates: 12.
+- Nearest distance min/max: 0.0 / 115.8.
+- Overlap roles: `footer` 24, `page_number` 12.
+
+Interpretation:
+
+- The 11 top/bottom baseline-only tables are likely header/footer/page-number pollution removed by reviewed filtering.
+- The single body-region baseline-only table is a small 1x3 structure overlapping approved removals and is classified as `baseline_false_positive_table`, but severity remains `review`.
+- The 11 changed common tables are bbox-only changes, but 8 are body-region geometry changes with insufficient evidence, so they remain `unsafe`.
+- No possible real body table loss was proven, but production integration remains blocked because body table geometry changed.
+
+Safety warnings:
+
+- `unsafe_table_delta`: 8.
+- `changed_body_table_geometry`: 8.
+- `insufficient_table_delta_evidence`: 11.
+
+### Tests added
+
+- Body-region baseline-only table is classified as unsafe by default.
+- Top/bottom baseline-only table overlapping approved removed candidates is classified as likely pollution removed.
+- Changed common table near removed top/bottom artifacts can be classified as safe when body impact is absent.
+- Changed common body table cell loss triggers unsafe.
+- False-positive body table can be classified separately when evidence supports it.
+- Overlap and distance-to-removed-candidate metrics are reported.
+- Input baseline/filtered parse outputs are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 151 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 151 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2S recommendation
+
+Phase 2S is not safe as production integration. The next phase should remain internal/report-only and inspect the 8 changed body table geometries, especially whether bbox-only changes are harmless stream-table boundary shifts or signs of body table structure instability.
