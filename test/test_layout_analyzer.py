@@ -29,6 +29,7 @@ build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclu
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
+build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
@@ -3341,6 +3342,89 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['classification'], 'disabled')
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2t'])
 
+    def test_table_geometry_visual_review_pack_includes_all_changed_items(self):
+        safety_report = _geometry_safety_report_with_preserved_items(8)
+
+        report = build_table_geometry_visual_review_pack(
+            safety_report,
+            visual_rendering={'supported': True, 'output_directory': 'local_reports/table_geometry_review'},
+            enabled=True)
+
+        self.assertTrue(report['enabled'])
+        self.assertEqual(report['summary']['review_item_count'], 8)
+        self.assertEqual(report['summary']['affected_pages'], [5, 8, 10])
+        self.assertEqual(len(report['review_items']), 8)
+        for item in report['review_items']:
+            self.assertIn('baseline_bbox', item)
+            self.assertIn('filtered_bbox', item)
+            self.assertIn('row_count_before', item)
+            self.assertIn('row_count_after', item)
+            self.assertIn('human_decision_fields', item)
+
+    def test_table_geometry_visual_review_preserved_items_need_human_approval(self):
+        safety_report = _geometry_safety_report_with_preserved_items(1)
+
+        report = build_table_geometry_visual_review_pack(
+            safety_report,
+            visual_rendering={'supported': True},
+            enabled=True)
+        item = report['review_items'][0]
+
+        self.assertEqual(item['review_classification'], 'likely_safe_but_needs_human_approval')
+        self.assertTrue(item['human_approval_required'])
+        self.assertEqual(report['summary']['requiring_human_approval_count'], 1)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2u'])
+
+    def test_table_geometry_visual_review_unsafe_geometry_change_is_marked_unsafe(self):
+        safety_report = _geometry_safety_report_from_tables(
+            [_table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2, cells=4)],
+            [_table_record('body-table-filtered', 0, REGION_BODY, [50, 400, 520, 455], rows=3, cols=2, cells=4)])
+
+        report = build_table_geometry_visual_review_pack(
+            safety_report,
+            visual_rendering={'supported': True},
+            enabled=True)
+        item = report['review_items'][0]
+
+        self.assertEqual(item['review_classification'], 'unsafe_do_not_integrate')
+        self.assertFalse(item['human_approval_required'])
+        self.assertEqual(report['summary']['automatically_unsafe_count'], 1)
+
+    def test_table_geometry_visual_review_reports_missing_visual_rendering_support(self):
+        safety_report = _geometry_safety_report_with_preserved_items(1)
+
+        report = build_table_geometry_visual_review_pack(
+            safety_report,
+            visual_rendering={'supported': False, 'skipped_reason': 'fitz_unavailable'},
+            enabled=True)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertIn('visual_rendering_unavailable', warning_types)
+        self.assertEqual(report['visual_rendering']['skipped_reason'], 'fitz_unavailable')
+
+    def test_table_geometry_visual_review_report_does_not_mutate_inputs(self):
+        safety_report = _geometry_safety_report_with_preserved_items(1)
+        before = json.dumps(safety_report, sort_keys=True)
+
+        build_table_geometry_visual_review_pack(
+            safety_report,
+            visual_rendering={'supported': True},
+            enabled=True)
+
+        after = json.dumps(safety_report, sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_table_geometry_visual_review_disabled_mode_is_clear(self):
+        safety_report = _geometry_safety_report_with_preserved_items(1)
+
+        report = build_table_geometry_visual_review_pack(
+            safety_report,
+            enabled=False)
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['classification'], 'disabled')
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2u'])
+
 
 def _page(page_index, blocks):
     return {
@@ -3848,6 +3932,47 @@ def _parse_metrics_with_tables(tables):
         }],
         'warnings': [],
     }
+
+
+def _geometry_safety_report_with_preserved_items(count):
+    pages = [4, 7, 9]
+    baseline_tables = []
+    filtered_tables = []
+    for index in range(count):
+        page_index = pages[index % len(pages)]
+        top = 300 + index * 12
+        baseline_tables.append(_table_record(
+            f'body-table-{index}',
+            page_index,
+            REGION_BODY,
+            [50, top, 520, top + 40],
+            rows=1,
+            cols=2,
+            cells=2,
+            cell_bboxes=[
+                [50, top, 285, top + 20],
+                [285, top, 520, top + 20],
+            ]))
+        filtered_tables.append(_table_record(
+            f'body-table-{index}-filtered',
+            page_index,
+            REGION_BODY,
+            [50, top, 520, top + 38],
+            rows=1,
+            cols=2,
+            cells=2,
+            cell_bboxes=[
+                [50, top, 285, top + 20],
+                [285, top, 520, top + 20],
+            ]))
+    return _geometry_safety_report_from_tables(baseline_tables, filtered_tables)
+
+
+def _geometry_safety_report_from_tables(baseline_tables, filtered_tables):
+    return build_body_table_geometry_delta_safety_report(
+        baseline_parse_metrics=_parse_metrics_with_tables(baseline_tables),
+        filtered_parse_metrics=_parse_metrics_with_tables(filtered_tables),
+        enabled=True)
 
 
 def _table_record(

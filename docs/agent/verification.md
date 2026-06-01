@@ -2584,3 +2584,104 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2T recommendation
 
 Phase 2T is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. It should not be production integration yet; the 8 body table geometry changes are structurally preserved but still review-level stream-table boundary adjustments.
+
+## Phase 2T
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2T added an internal/local-only table geometry visual review pack helper. The helper turns Phase 2S changed body table geometry findings into JSON-serializable review items with baseline/filtered bbox data, row/column/cell counts, preserved signature indicators, likely cause, current severity, local visual artifact metadata, and blank human decision fields.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local review pack
+
+Generated ignored local-only files:
+
+```text
+local_reports/table-geometry-visual-review.md
+local_reports/table-geometry-review-data.json
+local_reports/table_geometry_review/
+```
+
+The local sample PDF, source reports, generated review pack, JSON data, and review images remained ignored and were not staged or committed.
+
+### Sample summary
+
+- Visual review item count: 8.
+- Affected pages: 5, 8, and 10.
+- Row/column/cell count preservation: 8 of 8.
+- Text/cell signature preservation: 8 of 8.
+- Items requiring human approval: 8.
+- Generated visual artifacts: 8 crop images.
+- Automatically unsafe items: 0.
+- Review classification: 8 `likely_safe_but_needs_human_approval`.
+
+Interpretation:
+
+- The 8 body table geometry changes are structurally preserved, but still require human visual approval.
+- The local review markdown includes blank decision fields: `approve_safe_boundary_shift`, `reject_unsafe_table_change`, and `unsure`.
+- The rendered crops label baseline table bbox, filtered table bbox, and nearest approved removed header/footer/page-number candidate.
+- Phase 2U should remain blocked until the local visual review pack is manually reviewed.
+
+### Tests added
+
+- Visual review pack includes all changed table geometry items.
+- Each review item includes baseline/filtered bbox and row/column/cell counts.
+- Each review item includes human decision fields.
+- Preserved row/column/cell/text signatures are marked as likely safe but still requiring human approval.
+- Unsafe synthetic geometry changes are marked unsafe.
+- Missing visual rendering support is reported clearly.
+- Input reports are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 167 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 167 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review image files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample, generated report, review JSON, or review image was staged.
+
+### Phase 2U recommendation
+
+Phase 2U is not safe to attempt until the local visual review pack is manually reviewed. If the 8 items are explicitly marked `approve_safe_boundary_shift`, Phase 2U may remain internal, opt-in, and guarded; it still should not be production integration by default.

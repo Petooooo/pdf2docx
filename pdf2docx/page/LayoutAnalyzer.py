@@ -1391,6 +1391,67 @@ def build_body_table_geometry_delta_safety_report(
     }
 
 
+def build_table_geometry_visual_review_pack(
+        body_table_geometry_delta_safety_report: dict = None,
+        visual_artifacts: list = None,
+        visual_rendering: dict = None,
+        enabled: bool = False) -> dict:
+    '''Build local-only review data for changed body table geometries.'''
+    safety_report = body_table_geometry_delta_safety_report or {}
+    rendering = dict(visual_rendering or {})
+    artifacts = [
+        dict(artifact) for artifact in visual_artifacts or []
+    ]
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'table_geometry_visual_review_pack_local_only',
+            'summary': _table_geometry_visual_review_disabled_summary(safety_report),
+            'review_items': [],
+            'visual_rendering': _table_geometry_visual_rendering_summary(
+                rendering,
+                artifacts),
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2u': False,
+                'reason': 'Table geometry visual review pack generation is disabled.',
+            },
+        }
+
+    findings = [
+        dict(finding) for finding in safety_report.get('findings', []) or []
+    ]
+    artifact_map = _table_geometry_visual_artifact_map(artifacts)
+    review_items = [
+        _table_geometry_visual_review_item(index, finding, artifact_map)
+        for index, finding in enumerate(findings, start=1)
+    ]
+    rendering_summary = _table_geometry_visual_rendering_summary(
+        rendering,
+        artifacts)
+    summary = _table_geometry_visual_review_summary(
+        review_items,
+        rendering_summary)
+    warnings = _table_geometry_visual_review_warnings(
+        summary,
+        rendering_summary,
+        safety_report)
+
+    return {
+        'enabled': True,
+        'policy': 'table_geometry_visual_review_pack_local_only',
+        'source_policy': safety_report.get('policy', ''),
+        'summary': summary,
+        'review_items': review_items,
+        'visual_rendering': rendering_summary,
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2u': _table_geometry_visual_review_safe_for_phase_2u(summary, warnings),
+            'reason': _table_geometry_visual_review_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -4815,6 +4876,193 @@ def _body_table_geometry_recommendation(summary: dict, warnings: list) -> str:
     if summary.get('unsafe_count', 0):
         return 'Keep production integration blocked; changed body table geometry still has unsafe structure or text signals.'
     return 'Continue report-only inspection before any production filtering integration.'
+
+
+def _table_geometry_visual_review_disabled_summary(safety_report: dict) -> dict:
+    safety_summary = (safety_report or {}).get('summary') or {}
+    return {
+        'review_item_count': safety_summary.get('changed_body_table_geometry_count', 0),
+        'affected_pages': safety_summary.get('affected_pages', []),
+        'row_column_cell_counts_preserved_count': 0,
+        'text_cell_signature_preserved_count': 0,
+        'requiring_human_approval_count': 0,
+        'automatically_unsafe_count': 0,
+        'generated_visual_artifact_count': 0,
+        'classification_counts': {},
+        'classification': 'disabled',
+    }
+
+
+def _table_geometry_visual_artifact_map(artifacts: list) -> dict:
+    artifact_map = {}
+    for artifact in artifacts or []:
+        for key in (
+                artifact.get('review_item_id'),
+                artifact.get('baseline_table_id'),
+                artifact.get('filtered_table_id')):
+            if key:
+                artifact_map[key] = dict(artifact)
+    return artifact_map
+
+
+def _table_geometry_visual_review_item(index: int, finding: dict, artifact_map: dict) -> dict:
+    review_item_id = f'table-geometry-review-{index:03d}'
+    baseline_table_id = finding.get('baseline_table_id', '')
+    filtered_table_id = finding.get('filtered_table_id', '')
+    artifact = (
+        artifact_map.get(review_item_id) or
+        artifact_map.get(baseline_table_id) or
+        artifact_map.get(filtered_table_id) or {})
+    classification = _table_geometry_visual_review_classification(finding)
+    return {
+        'review_item_id': review_item_id,
+        'page_index': finding.get('page_index'),
+        'page_number': finding.get('page_number'),
+        'baseline_table_id': baseline_table_id,
+        'filtered_table_id': filtered_table_id,
+        'baseline_bbox': _json_bbox(finding.get('baseline_bbox')),
+        'filtered_bbox': _json_bbox(finding.get('filtered_bbox')),
+        'bbox_delta': dict(finding.get('bbox_delta') or {}),
+        'bbox_overlap_ratio': finding.get('bbox_overlap_ratio'),
+        'row_count_before': int(finding.get('row_count_before') or 0),
+        'row_count_after': int(finding.get('row_count_after') or 0),
+        'column_count_before': int(finding.get('column_count_before') or 0),
+        'column_count_after': int(finding.get('column_count_after') or 0),
+        'cell_count_before': int(finding.get('cell_count_before') or 0),
+        'cell_count_after': int(finding.get('cell_count_after') or 0),
+        'cell_text_signature_before': list(finding.get('cell_text_signature_before') or []),
+        'cell_text_signature_after': list(finding.get('cell_text_signature_after') or []),
+        'text_cell_signature_preserved': finding.get('text_cell_signature_preserved'),
+        'text_cell_signature_changed': finding.get('text_cell_signature_changed'),
+        'nearest_removed_candidate': dict(finding.get('nearest_removed_candidate') or {}),
+        'distance_to_nearest_removed_candidate': finding.get(
+            'distance_to_nearest_removed_candidate'),
+        'likely_cause': finding.get('likely_cause', ''),
+        'current_severity': finding.get('severity', ''),
+        'short_preview': finding.get('text_preview', ''),
+        'review_classification': classification,
+        'human_approval_required': classification != 'unsafe_do_not_integrate',
+        'human_decision_fields': {
+            'approve_safe_boundary_shift': '[ ]',
+            'reject_unsafe_table_change': '[ ]',
+            'unsure': '[ ]',
+        },
+        'reviewer_notes': '',
+        'visual_artifact': artifact,
+    }
+
+
+def _table_geometry_visual_review_classification(finding: dict) -> str:
+    count_delta = finding.get('row_column_cell_count_delta') or {}
+    counts_changed = any(bool(value) for value in count_delta.values())
+    if (
+            finding.get('severity') == 'unsafe' or
+            counts_changed or
+            finding.get('text_cell_signature_changed')):
+        return 'unsafe_do_not_integrate'
+    if (
+            finding.get('text_cell_signature_preserved') is True and
+            not counts_changed and
+            finding.get('severity') in ('review', 'safe')):
+        return 'likely_safe_but_needs_human_approval'
+    return 'suspicious_needs_more_review'
+
+
+def _table_geometry_visual_rendering_summary(rendering: dict, artifacts: list) -> dict:
+    generated_count = len(artifacts or [])
+    supported = bool(rendering.get('supported', generated_count > 0))
+    skipped_reason = rendering.get('skipped_reason', '')
+    if not supported and not skipped_reason:
+        skipped_reason = 'visual_rendering_support_not_available_or_not_requested'
+    return {
+        'supported': supported,
+        'generated_artifact_count': generated_count,
+        'output_directory': rendering.get('output_directory', ''),
+        'skipped_reason': skipped_reason,
+    }
+
+
+def _table_geometry_visual_review_summary(review_items: list, rendering_summary: dict) -> dict:
+    classification_counts = Counter(
+        item.get('review_classification', '') for item in review_items or [])
+    counts_preserved = [
+        item for item in review_items or []
+        if (
+            item.get('row_count_before') == item.get('row_count_after') and
+            item.get('column_count_before') == item.get('column_count_after') and
+            item.get('cell_count_before') == item.get('cell_count_after'))
+    ]
+    text_preserved = [
+        item for item in review_items or []
+        if item.get('text_cell_signature_preserved') is True
+    ]
+    human_required = [
+        item for item in review_items or []
+        if item.get('human_approval_required')
+    ]
+    return {
+        'review_item_count': len(review_items or []),
+        'affected_pages': sorted({
+            item.get('page_number')
+            for item in review_items or []
+            if item.get('page_number') is not None
+        }),
+        'row_column_cell_counts_preserved_count': len(counts_preserved),
+        'text_cell_signature_preserved_count': len(text_preserved),
+        'requiring_human_approval_count': len(human_required),
+        'automatically_unsafe_count': classification_counts.get('unsafe_do_not_integrate', 0),
+        'generated_visual_artifact_count': rendering_summary.get('generated_artifact_count', 0),
+        'classification_counts': dict(sorted(classification_counts.items())),
+        'classification': 'unsafe' if classification_counts.get('unsafe_do_not_integrate', 0) else (
+            'review' if human_required else 'safe'),
+    }
+
+
+def _table_geometry_visual_review_warnings(
+        summary: dict,
+        rendering_summary: dict,
+        safety_report: dict) -> list:
+    warnings = []
+    if not safety_report:
+        warnings.append({
+            'type': 'missing_geometry_safety_report',
+            'message': 'No Phase 2S body table geometry safety report was provided.',
+        })
+    if summary.get('automatically_unsafe_count', 0):
+        warnings.append({
+            'type': 'unsafe_table_geometry_review_item',
+            'count': summary.get('automatically_unsafe_count'),
+        })
+    if not rendering_summary.get('supported'):
+        warnings.append({
+            'type': 'visual_rendering_unavailable',
+            'message': rendering_summary.get('skipped_reason'),
+        })
+    if summary.get('requiring_human_approval_count', 0):
+        warnings.append({
+            'type': 'human_approval_required',
+            'count': summary.get('requiring_human_approval_count'),
+        })
+    return warnings
+
+
+def _table_geometry_visual_review_safe_for_phase_2u(summary: dict, warnings: list) -> bool:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    return (
+        bool(summary.get('review_item_count', 0)) and
+        not summary.get('automatically_unsafe_count', 0) and
+        'missing_geometry_safety_report' not in warning_types and
+        'human_approval_required' not in warning_types)
+
+
+def _table_geometry_visual_review_recommendation(summary: dict, warnings: list) -> str:
+    if summary.get('automatically_unsafe_count', 0):
+        return 'Keep production integration blocked; at least one table geometry item is automatically unsafe.'
+    if summary.get('requiring_human_approval_count', 0):
+        return 'Use the local-only review pack for human approval before Phase 2U; production integration remains blocked.'
+    if _table_geometry_visual_review_safe_for_phase_2u(summary, warnings):
+        return 'All review items are approved or safe; Phase 2U may remain opt-in and guarded.'
+    return 'Review pack is incomplete; keep the workflow report-only.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
