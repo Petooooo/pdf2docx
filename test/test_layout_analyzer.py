@@ -4430,6 +4430,189 @@ class TestLayoutAnalyzer(unittest.TestCase):
                 build_reviewed_filtering_internal_config()),
             {})
 
+    def test_internal_config_missing_config_does_not_run_filtered_parse_integration(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-path.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            converter = Converter(str(pdf_path))
+            settings = converter.default_settings.copy()
+            try:
+                converter.load_pages().parse_document(**settings)
+                self.assertIsNone(converter.pages._reviewed_filtering_internal_config_report)
+                self.assertIsNone(converter.pages._reviewed_filtering_internal_filtered_parse_report)
+            finally:
+                converter.close()
+
+    def test_internal_config_enabled_false_does_not_apply_filtered_parse(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'disabled-config.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            report = _run_synthetic_internal_filtered_parse_integration(
+                pdf_path,
+                decisions,
+                enabled=False)
+
+            self.assertEqual(
+                report['config']['summary']['activation_status'],
+                'disabled')
+            self.assertFalse(report['integration']['applied_to_parse'])
+            self.assertEqual(report['integration']['summary']['removed_raw_block_count'], 0)
+
+    def test_internal_config_enabled_without_review_decisions_blocks_integration(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'missing-decisions.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            report = _run_synthetic_internal_filtered_parse_integration(
+                pdf_path,
+                review_decisions=None)
+
+            self.assertEqual(
+                report['config']['summary']['activation_status'],
+                'blocked')
+            self.assertFalse(report['integration']['applied_to_parse'])
+            self.assertIn(
+                'config_not_ready',
+                {warning['type'] for warning in report['integration']['safety_warnings']})
+
+    def test_internal_config_raw_would_exclude_alone_blocks_filtered_parse(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'raw-would-exclude.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            report = _run_synthetic_internal_filtered_parse_integration(
+                pdf_path,
+                review_decisions={'decisions': [], 'summary': {'candidate_count': 0}})
+
+            self.assertFalse(report['integration']['applied_to_parse'])
+            self.assertIn(
+                'config_raw_would_exclude_without_approval_blocked',
+                {warning['type'] for warning in report['integration']['safety_warnings']})
+
+    def test_internal_config_filtered_parse_applies_approved_synthetic_candidates(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'approved-filtered-parse.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            report = _run_synthetic_internal_filtered_parse_integration(
+                pdf_path,
+                decisions,
+                run_parse_pages=True)
+            summary = report['integration']['summary']
+
+            self.assertEqual(
+                report['config']['summary']['activation_status'],
+                'ready_for_internal_experiment')
+            self.assertTrue(report['integration']['applied_to_parse'])
+            self.assertEqual(
+                summary['removed_raw_block_count'],
+                filtering['summary']['removed_block_count'])
+            self.assertEqual(summary['body_region_removed_count'], 0)
+            self.assertEqual(summary['rejected_unsure_layout_placeholder_removed_count'], 0)
+            self.assertTrue(summary['body_text_signature_preserved'])
+            self.assertEqual(
+                summary['filtered_raw_block_count'],
+                summary['original_raw_block_count'] - summary['removed_raw_block_count'])
+
+    def test_internal_config_fail_closed_blocks_rejected_and_unsure_decisions(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'fail-closed-rejected.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER})
+            report = _run_synthetic_internal_filtered_parse_integration(
+                pdf_path,
+                decisions)
+            warning_types = {
+                warning['type']
+                for warning in report['integration']['safety_warnings']
+            }
+
+            self.assertEqual(report['config']['summary']['activation_status'], 'blocked')
+            self.assertFalse(report['integration']['applied_to_parse'])
+            self.assertIn('config_rejected_candidates_blocked', warning_types)
+
+    @unittest.skipIf(Pages is None, 'Pages import unavailable')
+    def test_internal_config_filtered_parse_reports_textblock_delta_warning(self):
+        inputs = _document_parse_raw_mapping_inputs()
+        safe_decisions = {
+            'decisions': [
+                _review_decision(
+                    'c-approved-header',
+                    _summary_fingerprint('Approved Header', REGION_TOP),
+                    'approve_exclude'),
+                _review_decision(
+                    'c-approved-footer',
+                    _summary_fingerprint('Approved Footer', REGION_BOTTOM),
+                    'approve_exclude'),
+            ],
+            'summary': {'decision_counts': {'approve_exclude': 2}},
+        }
+        layout_report = _document_parse_hook_layout_report({
+            **inputs,
+            'dry_run_report': {
+                'summary': {'candidate_count': 2},
+                'candidates': inputs['dry_run_report']['candidates'][:2],
+            },
+        })
+        config_report = build_reviewed_filtering_internal_config_report(
+            {
+                'enabled': True,
+                'mode': 'filtered_parse_experiment',
+                'review_decisions': safe_decisions,
+            },
+            layout_report['header_footer_exclusion_dry_run'],
+            safe_decisions)
+        filtered_experiment_report = {
+            'summary': {
+                'baseline_body_text_block_count': 3,
+                'filtered_body_text_block_count': 2,
+            },
+            'safety_warnings': [{
+                'type': 'body_text_block_count_dropped',
+                'baseline': 3,
+                'filtered': 2,
+            }],
+        }
+
+        pages = [_FakePage(0)]
+        raw_pages = [_FakeRawPage(inputs['raw_object_pages'][0]['raw_objects'])]
+        report = Pages._build_reviewed_filtering_internal_filtered_parse_report(
+            layout_report,
+            pages,
+            raw_pages,
+            config_report,
+            filtered_parse_experiment_report=filtered_experiment_report,
+            _reviewed_filtering_internal_config_enabled=True,
+            _document_parse_filtering_review_decisions=safe_decisions)
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+
+        self.assertTrue(report['applied_to_parse'])
+        self.assertEqual(report['summary']['body_text_block_delta'], -1)
+        self.assertIn('body_text_block_count_changed', warning_types)
+        self.assertIn('parse_metric_body_text_block_count_dropped', warning_types)
+        self.assertTrue(report['summary']['body_text_signature_preserved'])
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -5743,6 +5926,34 @@ def _run_synthetic_document_parse_diagnostics(
             'mapping': converter.pages._document_parse_raw_object_mapping_report,
             'copied': converter.pages._document_parse_copied_raw_filtering_apply_report,
             'guarded': converter.pages._document_parse_guarded_raw_apply_restore_report,
+        }
+    finally:
+        converter.close()
+
+
+def _run_synthetic_internal_filtered_parse_integration(
+        pdf_path,
+        review_decisions,
+        enabled=True,
+        run_parse_pages=False):
+    converter = Converter(str(pdf_path))
+    settings = converter.default_settings.copy()
+    settings['_reviewed_header_footer_filtering_config'] = build_reviewed_filtering_internal_config({
+        'enabled': enabled,
+        'mode': 'filtered_parse_experiment',
+        'review_decisions': review_decisions,
+    })
+    try:
+        converter.load_pages().parse_document(**settings)
+        if run_parse_pages:
+            converter.parse_pages(**settings)
+        return {
+            'config': converter.pages._reviewed_filtering_internal_config_report,
+            'integration': converter.pages._reviewed_filtering_internal_filtered_parse_report,
+            'filtered_experiment': converter.pages._document_parse_filtered_parse_experiment_report,
+            'finalized_pages': sum(
+                1 for page in converter.pages
+                if getattr(page, 'finalized', False)),
         }
     finally:
         converter.close()

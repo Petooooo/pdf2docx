@@ -173,3 +173,40 @@ behavior.
 Public CLI/API exposure remains intentionally blocked. Any future public-facing
 option needs a separate design review after the internal experiments and
 synthetic regressions are stronger.
+
+## Phase 3B Internal Filtered Parse Integration
+
+Phase 3B connects the Phase 3A internal config scaffold to the private
+`Pages.parse()` document-parse diagnostic path. This is still an internal
+experiment path only.
+
+Behavior:
+
+- Default conversion remains unchanged when no private config is supplied.
+- `enabled=False` keeps reviewed filtering disabled.
+- `filtered_parse_experiment` is the only config mode that can apply reviewed
+  filtering to the current internal parse input.
+- The filtering insertion point remains `document_parse`, after raw pages are
+  restored/cleaned and before margin and section parsing.
+- Existing dry-run, raw-object mapping, copied-apply, guarded-restore, and
+  filtered-parse diagnostics run first when the config is ready.
+- The integration applies only explicit `approve_exclude` candidates.
+- Raw `would_exclude` labels alone are not eligible.
+- Rejected, unsure, review-only, layout-placeholder, and body-region candidates
+  remain protected.
+- Fail-closed config and mapping warnings block the internal apply path.
+- Body TextBlock count deltas are recorded as diagnostics; preserved body text
+  signature is required before such deltas can be treated as non-blocking.
+
+Public exposure remains blocked:
+
+- No public CLI flag was added.
+- No public `Converter.convert()` default changed.
+- No public documented API option was added.
+- DOCX header/footer generation remains future work.
+- Cross-page paragraph merging remains future work.
+- Table parsing behavior remains unchanged.
+
+Phase 3C should stay internal and should focus on broadening synthetic
+coverage, especially callout/text-box and table geometry cases, before any
+public opt-in design is considered.

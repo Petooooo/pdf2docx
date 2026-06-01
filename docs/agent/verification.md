@@ -3886,3 +3886,123 @@ Phase 3B should remain internal and non-default. The next safe step is to use
 the config scaffold to drive one narrow guarded diagnostic path in tests or local
 experiments, while keeping public CLI/API exposure and production default
 integration blocked.
+
+## Phase 3B
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 3B connected the Phase 3A private internal config scaffold to an
+explicitly opt-in filtered parse integration path at the `document_parse`
+insertion point.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains disabled unless a private underscored config is
+  supplied.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Internal integration behavior
+
+Config mode used in tests:
+
+- `filtered_parse_experiment`
+
+The private integration path now:
+
+- requires `enabled=True`
+- requires `activation_status=ready_for_internal_experiment`
+- requires explicit `approve_exclude` review decisions
+- blocks raw `would_exclude` without approval
+- blocks missing review decisions
+- blocks fail-closed rejected/unsure decisions
+- protects body-region candidates
+- protects layout-placeholder candidates
+- runs existing dry-run, mapping, copied-apply, guarded-restore, and filtered
+  parse diagnostics before applying
+- applies reviewed filtering only to the current internal parse input when the
+  config is ready
+- records approval/removal counts and parse diagnostics
+
+Synthetic fixture integration result:
+
+- Approved repeated header/footer/page-number synthetic fixture applied
+  internally through `Pages.parse()`.
+- Removed approved raw blocks matched the reviewed filtering report count.
+- Body-region removed count stayed at 0.
+- Rejected/unsure/layout-placeholder removed count stayed at 0.
+- Body text signature was preserved.
+- Body TextBlock count deltas are recorded as diagnostics rather than silently
+  accepted.
+- Unsafe warning types still block through fail-closed behavior.
+
+No local Phase 3B report was generated. Existing local sample PDFs, local
+reports, review images, and generated DOCX files remained ignored.
+
+### Tests added
+
+- Missing config leaves the internal integration report unset.
+- `enabled=False` stores diagnostics but does not apply filtering.
+- Enabled config without review decisions blocks integration.
+- Raw `would_exclude` without manual approval blocks integration.
+- Approved synthetic review decisions run the internal filtered parse path.
+- Fail-closed rejected/unsure decisions block integration.
+- Body TextBlock count changes are reported with signature-preservation context.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "internal_config"
+```
+
+Result: passed. 9 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 245 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 245 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: only Phase 3B code/test/docs files were modified. Local sample PDFs,
+generated local reports, `.venv/`, caches, and test outputs remained ignored.
+
+### Phase 3B recommendation
+
+Phase 3C should remain internal and non-default. The next direction should be
+additional synthetic coverage for callout/text-box, list/heading, and synthetic
+table-geometry cases before any public opt-in or production-default integration
+is considered.

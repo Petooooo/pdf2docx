@@ -6,14 +6,17 @@ import copy
 import logging
 
 from .LayoutAnalyzer import (
+    REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT,
     build_document_parse_copied_raw_page_filtering_apply_report,
     build_document_parse_filtering_hook_report,
     build_document_parse_filtered_parse_experiment_report,
     build_document_parse_guarded_raw_page_apply_restore_report,
     build_document_parse_raw_object_mapping_report,
     build_layout_analysis_report,
+    build_reviewed_filtering_internal_config_report,
     classify_y_band,
     reviewed_raw_object_removal_plan,
+    reviewed_filtering_config_to_document_parse_settings,
     REGION_BODY,
 )
 from .RawPageFactory import RawPageFactory
@@ -32,6 +35,8 @@ class Pages(BaseCollection):
         self._document_parse_copied_raw_filtering_apply_report = None
         self._document_parse_guarded_raw_apply_restore_report = None
         self._document_parse_filtered_parse_experiment_report = None
+        self._reviewed_filtering_internal_config_report = None
+        self._reviewed_filtering_internal_filtered_parse_report = None
 
 
     @property
@@ -55,6 +60,9 @@ class Pages(BaseCollection):
         self._document_parse_copied_raw_filtering_apply_report = None
         self._document_parse_guarded_raw_apply_restore_report = None
         self._document_parse_filtered_parse_experiment_report = None
+        self._reviewed_filtering_internal_config_report = None
+        self._reviewed_filtering_internal_filtered_parse_report = None
+        settings = dict(settings)
 
         # ---------------------------------------------
         # 0. extract fonts properties, especially line height ratio
@@ -108,6 +116,15 @@ class Pages(BaseCollection):
             layout_analysis_report = self._layout_analysis_report = Pages._build_layout_analysis_report(
                 pages, raw_pages, **settings)
 
+        if self._internal_reviewed_filtering_config(settings) is not None:
+            if layout_analysis_report is None:
+                layout_analysis_report = self._layout_analysis_report = Pages._build_layout_analysis_report(
+                    pages, raw_pages, **settings)
+            translated_settings = self._run_reviewed_filtering_internal_config(
+                layout_analysis_report,
+                **settings)
+            settings.update(translated_settings)
+
         if settings.get('_document_parse_filtering_hook_enabled'):
             if layout_analysis_report is None:
                 layout_analysis_report = Pages._build_layout_analysis_report(
@@ -156,6 +173,13 @@ class Pages(BaseCollection):
                 raw_pages,
                 **settings)
 
+        if self._reviewed_filtering_internal_config_report:
+            self._run_reviewed_filtering_internal_filtered_parse(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                **settings)
+
         header, footer = Pages._parse_document(raw_pages)
 
 
@@ -178,6 +202,63 @@ class Pages(BaseCollection):
         '''Parse structure in document/pages level, e.g. header, footer'''
         # TODO
         return '', ''
+
+
+    def _run_reviewed_filtering_internal_config(
+            self,
+            layout_analysis_report:dict,
+            **settings):
+        '''Translate a private reviewed-filtering config into private parse settings.'''
+        config = self._internal_reviewed_filtering_config(settings)
+        review_decisions = None
+        if isinstance(config, dict):
+            review_decisions = config.get('review_decisions')
+
+        self._reviewed_filtering_internal_config_report = build_reviewed_filtering_internal_config_report(
+            config,
+            (layout_analysis_report or {}).get('header_footer_exclusion_dry_run', {}),
+            review_decisions,
+            enabled=True)
+
+        translated = reviewed_filtering_config_to_document_parse_settings(
+            self._reviewed_filtering_internal_config_report.get('config'),
+            review_decisions=review_decisions,
+            activation_status=(
+                self._reviewed_filtering_internal_config_report.get('summary', {})
+                .get('activation_status', '')))
+        if translated:
+            translated['_reviewed_filtering_internal_config_enabled'] = True
+        return translated
+
+
+    @staticmethod
+    def _internal_reviewed_filtering_config(settings:dict):
+        if not settings:
+            return None
+        if '_reviewed_header_footer_filtering_config' in settings:
+            return settings.get('_reviewed_header_footer_filtering_config')
+        return settings.get('_reviewed_filtering_internal_config')
+
+
+    def _run_reviewed_filtering_internal_filtered_parse(
+            self,
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            **settings):
+        '''Apply reviewed filtering to this private parse only when config-gated.'''
+        report = Pages._build_reviewed_filtering_internal_filtered_parse_report(
+            layout_analysis_report,
+            pages,
+            raw_pages,
+            self._reviewed_filtering_internal_config_report,
+            raw_object_mapping_report=self._document_parse_raw_object_mapping_report,
+            copied_apply_report=self._document_parse_copied_raw_filtering_apply_report,
+            guarded_apply_restore_report=self._document_parse_guarded_raw_apply_restore_report,
+            filtered_parse_experiment_report=self._document_parse_filtered_parse_experiment_report,
+            **settings)
+        self._reviewed_filtering_internal_filtered_parse_report = report
+        return report
 
 
     def _run_document_parse_filtering_hook(self, layout_analysis_report:dict, **settings):
@@ -484,6 +565,319 @@ class Pages(BaseCollection):
             expected_mapping_count=settings.get(
                 '_document_parse_filtered_parse_expected_mapping_count'),
             apply_skipped_reason=apply_skipped_reason)
+
+
+    @staticmethod
+    def _build_reviewed_filtering_internal_filtered_parse_report(
+            layout_analysis_report:dict,
+            pages:list,
+            raw_pages:list,
+            config_report:dict,
+            raw_object_mapping_report:dict=None,
+            copied_apply_report:dict=None,
+            guarded_apply_restore_report:dict=None,
+            filtered_parse_experiment_report:dict=None,
+            **settings):
+        '''Apply reviewed filtering to this parse when the private config is ready.'''
+        layout_analysis_report = layout_analysis_report or {}
+        config_report = config_report or {}
+        config = config_report.get('config') or {}
+        config_summary = config_report.get('summary') or {}
+        activation_status = config_summary.get('activation_status', '')
+        mode = config.get('mode', config_summary.get('mode', ''))
+        raw_object_pages_before = Pages._raw_object_mapping_pages(pages, raw_pages)
+
+        mapping_report = raw_object_mapping_report
+        copied_report = copied_apply_report
+        if (
+                mode == REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT and
+                activation_status == 'ready_for_internal_experiment'):
+            mapping_report = mapping_report or Pages._build_document_parse_raw_object_mapping_report(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                **settings)
+            copied_report = copied_report or Pages._build_document_parse_copied_raw_filtering_apply_report(
+                layout_analysis_report,
+                pages,
+                raw_pages,
+                raw_object_mapping_report=mapping_report,
+                **settings)
+
+        pre_apply_warnings = Pages._reviewed_filtering_internal_pre_apply_warnings(
+            config_report,
+            mapping_report,
+            copied_report,
+            filtered_parse_experiment_report)
+        apply_blocked = (
+            mode != REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT or
+            activation_status != 'ready_for_internal_experiment' or
+            not settings.get('_reviewed_filtering_internal_config_enabled') or
+            (
+                config.get('fail_closed_on_warning', True) and
+                Pages._reviewed_filtering_internal_has_blocking_warning(pre_apply_warnings)))
+
+        removed_by_page = []
+        applied_to_parse = False
+        if not apply_blocked:
+            removed_by_page = Pages._apply_guarded_raw_page_filter(
+                pages,
+                raw_pages,
+                reviewed_raw_object_removal_plan(mapping_report))
+            applied_to_parse = True
+
+        raw_object_pages_after = Pages._raw_object_mapping_pages(pages, raw_pages)
+        summary = Pages._reviewed_filtering_internal_filtered_parse_summary(
+            config_report,
+            raw_object_pages_before,
+            raw_object_pages_after,
+            removed_by_page,
+            mapping_report,
+            copied_report,
+            filtered_parse_experiment_report,
+            applied_to_parse,
+            apply_blocked)
+        warnings = Pages._reviewed_filtering_internal_post_apply_warnings(
+            pre_apply_warnings,
+            summary,
+            filtered_parse_experiment_report)
+
+        return {
+            'enabled': bool(config_report.get('enabled')),
+            'experiment_mode': mode or '',
+            'production_default_changed': False,
+            'public_cli_exposed': False,
+            'public_api_exposed': False,
+            'policy': 'internal_config_filtered_parse_only',
+            'insertion_point': 'document_parse',
+            'applied_to_parse': applied_to_parse,
+            'config_summary': dict(config_summary),
+            'summary': summary,
+            'removed_objects_by_page': Pages._copy_removed_by_page(removed_by_page),
+            'removed_counts_by_role': Pages._removed_counts_by_role(removed_by_page),
+            'removed_counts_by_page': Pages._removed_counts_by_page(removed_by_page),
+            'filtered_parse_experiment_summary': dict(
+                (filtered_parse_experiment_report or {}).get('summary') or {}),
+            'guarded_apply_restore_summary': dict(
+                (guarded_apply_restore_report or {}).get('summary') or {}),
+            'safety_warnings': warnings,
+            'recommendation': {
+                'safe_for_internal_filtered_parse': (
+                    applied_to_parse and
+                    not Pages._reviewed_filtering_internal_has_blocking_warning(warnings)),
+                'reason': Pages._reviewed_filtering_internal_recommendation(
+                    applied_to_parse,
+                    warnings),
+            },
+        }
+
+
+    @staticmethod
+    def _reviewed_filtering_internal_pre_apply_warnings(
+            config_report:dict,
+            mapping_report:dict,
+            copied_apply_report:dict,
+            filtered_parse_experiment_report:dict):
+        warnings = []
+        config_summary = (config_report or {}).get('summary') or {}
+        if config_summary.get('activation_status') != 'ready_for_internal_experiment':
+            warnings.append({
+                'type': 'config_not_ready',
+                'activation_status': config_summary.get('activation_status', ''),
+            })
+        for warning in (config_report or {}).get('warnings', []) or []:
+            warnings.append({
+                'type': f'config_{warning.get("type", "warning")}',
+                'message': warning.get('message', ''),
+                'count': warning.get('count'),
+            })
+        for warning in (mapping_report or {}).get('safety_warnings', []) or []:
+            warnings.append({
+                'type': f'mapping_{warning.get("type", "warning")}',
+                'message': warning.get('message', ''),
+                'count': warning.get('count'),
+            })
+        for warning in (copied_apply_report or {}).get('safety_warnings', []) or []:
+            warnings.append({
+                'type': f'copied_apply_{warning.get("type", "warning")}',
+                'message': warning.get('message', ''),
+                'count': warning.get('count'),
+            })
+
+        copied_summary = (copied_apply_report or {}).get('summary') or {}
+        if copied_summary.get('body_region_removed_count', 0):
+            warnings.append({
+                'type': 'copied_apply_body_region_removed',
+                'count': copied_summary.get('body_region_removed_count'),
+            })
+        if copied_summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+            warnings.append({
+                'type': 'copied_apply_blocked_candidate_removed',
+                'count': copied_summary.get('rejected_unsure_layout_placeholder_removed_count'),
+            })
+
+        parse_summary = (filtered_parse_experiment_report or {}).get('summary') or {}
+        if parse_summary.get('body_region_removed_count', 0):
+            warnings.append({
+                'type': 'filtered_experiment_body_region_removed',
+                'count': parse_summary.get('body_region_removed_count'),
+            })
+        if parse_summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+            warnings.append({
+                'type': 'filtered_experiment_blocked_candidate_removed',
+                'count': parse_summary.get('rejected_unsure_layout_placeholder_removed_count'),
+            })
+        return warnings
+
+
+    @staticmethod
+    def _reviewed_filtering_internal_filtered_parse_summary(
+            config_report:dict,
+            raw_object_pages_before:list,
+            raw_object_pages_after:list,
+            removed_by_page:list,
+            mapping_report:dict,
+            copied_apply_report:dict,
+            filtered_parse_experiment_report:dict,
+            applied_to_parse:bool,
+            apply_blocked:bool):
+        removed_objects = Pages._flatten_removed_by_page(removed_by_page)
+        mapping_summary = (mapping_report or {}).get('summary') or {}
+        copied_summary = (copied_apply_report or {}).get('summary') or {}
+        parse_summary = (filtered_parse_experiment_report or {}).get('summary') or {}
+        body_signature_before = Pages._raw_object_body_text_signature(raw_object_pages_before)
+        body_signature_after = Pages._raw_object_body_text_signature(raw_object_pages_after)
+        baseline_body_text_block_count = parse_summary.get('baseline_body_text_block_count', 0)
+        filtered_body_text_block_count = parse_summary.get('filtered_body_text_block_count', 0)
+        return {
+            'config_mode': ((config_report or {}).get('summary') or {}).get('mode', ''),
+            'config_activation_status': ((config_report or {}).get('summary') or {}).get(
+                'activation_status', ''),
+            'applied_to_parse': bool(applied_to_parse),
+            'apply_blocked': bool(apply_blocked),
+            'original_raw_block_count': Pages._raw_object_page_count(raw_object_pages_before),
+            'filtered_raw_block_count': Pages._raw_object_page_count(raw_object_pages_after),
+            'removed_raw_block_count': len(removed_objects),
+            'approved_candidate_count': mapping_summary.get(
+                'approved_candidate_count',
+                ((config_report or {}).get('summary') or {}).get('eligible_candidate_count', 0)),
+            'blocked_candidate_count': mapping_summary.get(
+                'blocked_candidate_count',
+                ((config_report or {}).get('summary') or {}).get('blocked_candidate_count', 0)),
+            'body_region_removed_count': sum(
+                1 for item in removed_objects
+                if item.get('region') == REGION_BODY),
+            'rejected_unsure_layout_placeholder_removed_count': copied_summary.get(
+                'rejected_unsure_layout_placeholder_removed_count',
+                sum(1 for item in removed_objects if item.get('proposed_role') == 'layout_placeholder')),
+            'baseline_parsed_text_block_count': parse_summary.get('baseline_parsed_text_block_count', 0),
+            'filtered_parsed_text_block_count': parse_summary.get('filtered_parsed_text_block_count', 0),
+            'baseline_body_text_block_count': baseline_body_text_block_count,
+            'filtered_body_text_block_count': filtered_body_text_block_count,
+            'body_text_block_delta': filtered_body_text_block_count - baseline_body_text_block_count,
+            'baseline_table_count': parse_summary.get('baseline_table_count', 0),
+            'filtered_table_count': parse_summary.get('filtered_table_count', 0),
+            'baseline_image_count': parse_summary.get('baseline_image_count', 0),
+            'filtered_image_count': parse_summary.get('filtered_image_count', 0),
+            'baseline_section_count': parse_summary.get('baseline_section_count', 0),
+            'filtered_section_count': parse_summary.get('filtered_section_count', 0),
+            'body_text_signature_preserved': body_signature_before == body_signature_after,
+            'body_text_signature_length': len(body_signature_after),
+            'copied_apply_count_matches': (
+                copied_summary.get('removed_copied_block_count') is None or
+                copied_summary.get('removed_copied_block_count') == len(removed_objects)),
+            'mapping_count_matches': (
+                mapping_summary.get('mapped_raw_object_count') is None or
+                mapping_summary.get('mapped_raw_object_count') == len(removed_objects)),
+            'default_conversion_unchanged': True,
+        }
+
+
+    @staticmethod
+    def _reviewed_filtering_internal_post_apply_warnings(
+            pre_apply_warnings:list,
+            summary:dict,
+            filtered_parse_experiment_report:dict):
+        warnings = [dict(warning) for warning in pre_apply_warnings or []]
+        if summary.get('apply_blocked') and summary.get('config_activation_status') == 'ready_for_internal_experiment':
+            warnings.append({'type': 'internal_filtered_parse_apply_blocked'})
+        if not summary.get('body_text_signature_preserved', True):
+            warnings.append({'type': 'body_text_signature_changed'})
+        if summary.get('body_region_removed_count', 0):
+            warnings.append({
+                'type': 'body_region_removed_during_internal_filtered_parse',
+                'count': summary.get('body_region_removed_count'),
+            })
+        if summary.get('rejected_unsure_layout_placeholder_removed_count', 0):
+            warnings.append({
+                'type': 'blocked_or_placeholder_removed_during_internal_filtered_parse',
+                'count': summary.get('rejected_unsure_layout_placeholder_removed_count'),
+            })
+        if not summary.get('mapping_count_matches', True):
+            warnings.append({'type': 'mapping_count_mismatch'})
+        if not summary.get('copied_apply_count_matches', True):
+            warnings.append({'type': 'copied_apply_count_mismatch'})
+        if summary.get('body_text_block_delta', 0):
+            warnings.append({
+                'type': 'body_text_block_count_changed',
+                'baseline': summary.get('baseline_body_text_block_count', 0),
+                'filtered': summary.get('filtered_body_text_block_count', 0),
+                'classification': (
+                    'acceptable_boundary_or_grouping_shift'
+                    if summary.get('body_text_signature_preserved', False) else
+                    'unsafe_body_text_loss'),
+            })
+
+        for warning in (filtered_parse_experiment_report or {}).get('safety_warnings', []) or []:
+            warning_type = warning.get('type', 'warning')
+            if warning_type in {
+                    'table_count_changed',
+                    'image_count_changed',
+                    'section_count_changed',
+                    'body_text_block_count_dropped',
+                    'paragraph_fragmentation_increased'}:
+                warnings.append({
+                    'type': f'parse_metric_{warning_type}',
+                    'baseline': warning.get('baseline'),
+                    'filtered': warning.get('filtered'),
+                })
+        return warnings
+
+
+    @staticmethod
+    def _reviewed_filtering_internal_has_blocking_warning(warnings:list):
+        blocking_types = {
+            'config_not_ready',
+            'config_invalid_reviewed_filtering_mode',
+            'config_missing_review_decisions',
+            'config_raw_would_exclude_without_approval_blocked',
+            'mapping_ambiguous_raw_object_match',
+            'mapping_missing_raw_object_match',
+            'mapping_unsafe_raw_object_match',
+            'copied_apply_body_region_removed',
+            'copied_apply_blocked_candidate_removed',
+            'filtered_experiment_body_region_removed',
+            'filtered_experiment_blocked_candidate_removed',
+            'body_text_signature_changed',
+            'body_region_removed_during_internal_filtered_parse',
+            'blocked_or_placeholder_removed_during_internal_filtered_parse',
+            'mapping_count_mismatch',
+            'copied_apply_count_mismatch',
+        }
+        return bool({warning.get('type') for warning in warnings or []}.intersection(blocking_types))
+
+
+    @staticmethod
+    def _reviewed_filtering_internal_recommendation(
+            applied_to_parse:bool,
+            warnings:list):
+        if not applied_to_parse:
+            return 'Internal filtered parse integration did not apply; resolve fail-closed config or mapping warnings first.'
+        if Pages._reviewed_filtering_internal_has_blocking_warning(warnings):
+            return 'Internal filtered parse integration produced blocking warnings; keep production integration disabled.'
+        if warnings:
+            return 'Internal filtered parse integration applied with non-blocking diagnostics; keep this private while reviewing metric shifts.'
+        return 'Internal filtered parse integration applied only approved candidates and preserved body safety invariants.'
 
 
     @staticmethod
@@ -920,6 +1314,70 @@ class Pages(BaseCollection):
             raw_page.blocks[:] = list(blocks)
         else:
             raw_page.blocks = list(blocks)
+
+
+    @staticmethod
+    def _raw_object_page_count(raw_object_pages:list):
+        return sum(
+            len(page.get('raw_objects', []) or [])
+            for page in raw_object_pages or [])
+
+
+    @staticmethod
+    def _raw_object_body_text_signature(raw_object_pages:list):
+        signature = []
+        for page in raw_object_pages or []:
+            page_height = page.get('height', page.get('page_height', 0)) or 1
+            for raw_object in page.get('raw_objects', []) or []:
+                bbox = Pages._json_bbox(raw_object.get('bbox'))
+                region = raw_object.get('region') or classify_y_band(bbox, page_height)
+                text = ' '.join(str(raw_object.get('text', '')).split())
+                if region == REGION_BODY and text:
+                    signature.append(text.lower())
+        return signature
+
+
+    @staticmethod
+    def _flatten_removed_by_page(removed_by_page:list):
+        return [
+            dict(raw_object)
+            for page in removed_by_page or []
+            for raw_object in page.get('objects', []) or []
+        ]
+
+
+    @staticmethod
+    def _copy_removed_by_page(removed_by_page:list):
+        return [
+            {
+                'page_index': page.get('page_index'),
+                'page_number': page.get('page_number'),
+                'removed_count': page.get('removed_count', 0),
+                'objects': [dict(raw_object) for raw_object in page.get('objects', []) or []],
+            }
+            for page in removed_by_page or []
+        ]
+
+
+    @staticmethod
+    def _removed_counts_by_role(removed_by_page:list):
+        counts = {}
+        for raw_object in Pages._flatten_removed_by_page(removed_by_page):
+            role = raw_object.get('proposed_role', '') or 'unknown'
+            counts[role] = counts.get(role, 0) + 1
+        return dict(sorted(counts.items()))
+
+
+    @staticmethod
+    def _removed_counts_by_page(removed_by_page:list):
+        return [
+            {
+                'page_index': page.get('page_index'),
+                'page_number': page.get('page_number'),
+                'removed_count': page.get('removed_count', 0),
+            }
+            for page in removed_by_page or []
+        ]
 
 
     @staticmethod
