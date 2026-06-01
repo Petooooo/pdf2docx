@@ -29,6 +29,7 @@ build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclu
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
+build_table_geometry_visual_approval_gate_report = LayoutAnalyzer.build_table_geometry_visual_approval_gate_report
 build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
@@ -50,6 +51,7 @@ make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
 parse_exclusion_review_markdown = LayoutAnalyzer.parse_exclusion_review_markdown
+parse_table_geometry_visual_review_markdown = LayoutAnalyzer.parse_table_geometry_visual_review_markdown
 text_block_records = LayoutAnalyzer.text_block_records
 
 try:
@@ -3425,6 +3427,152 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['classification'], 'disabled')
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2u'])
 
+    def test_table_visual_approval_gate_passes_when_all_expected_items_approved(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(item_count=8))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'passed')
+        self.assertEqual(report['summary']['approve_count'], 8)
+        self.assertEqual(report['summary']['reject_count'], 0)
+        self.assertEqual(report['summary']['unsure_count'], 0)
+        self.assertEqual(report['summary']['missing_decision_count'], 0)
+        self.assertTrue(report['recommendation']['safe_to_attempt_phase_2v'])
+
+    def test_table_visual_approval_gate_blocks_rejected_item(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(
+                item_count=8,
+                decisions={3: 'reject_unsafe_table_change'}))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertEqual(report['summary']['reject_count'], 1)
+        self.assertIn(
+            'rejected_items_present',
+            {reason['type'] for reason in report['blocking_reasons']})
+
+    def test_table_visual_approval_gate_blocks_unsure_item(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(
+                item_count=8,
+                decisions={2: 'unsure'}))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertEqual(report['summary']['unsure_count'], 1)
+        self.assertIn(
+            'unsure_items_present',
+            {reason['type'] for reason in report['blocking_reasons']})
+
+    def test_table_visual_approval_gate_blocks_missing_decision(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(
+                item_count=8,
+                decisions={4: None}))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertEqual(report['summary']['missing_decision_count'], 1)
+
+    def test_table_visual_approval_gate_blocks_item_count_mismatch(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(item_count=7))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertIn(
+            'parsed_review_item_count_mismatch',
+            {reason['type'] for reason in report['blocking_reasons']})
+
+    def test_table_visual_approval_gate_blocks_row_column_cell_inconsistency(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(
+                item_count=8,
+                changed_counts={5}))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertEqual(report['summary']['row_column_cell_preservation_count'], 7)
+        self.assertIn(
+            'row_column_cell_counts_not_fully_preserved',
+            {reason['type'] for reason in report['blocking_reasons']})
+
+    def test_table_visual_approval_gate_blocks_text_signature_inconsistency(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(
+                item_count=8,
+                changed_text={6}))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertEqual(report['summary']['text_cell_signature_preservation_count'], 7)
+        self.assertIn(
+            'text_cell_signatures_not_fully_preserved',
+            {reason['type'] for reason in report['blocking_reasons']})
+
+    def test_table_visual_review_markdown_parsing_is_whitespace_tolerant(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(item_count=1, extra_whitespace=True))
+
+        self.assertEqual(decisions['summary']['review_item_count'], 1)
+        self.assertEqual(decisions['items'][0]['manual_decision'], 'approve_safe_boundary_shift')
+        self.assertTrue(decisions['items'][0]['row_column_cell_counts_preserved'])
+
+    def test_table_visual_approval_gate_report_does_not_mutate_inputs(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(item_count=8))
+        before = json.dumps(decisions, sort_keys=True)
+
+        build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=True)
+
+        after = json.dumps(decisions, sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_table_visual_approval_gate_disabled_mode_is_clear(self):
+        decisions = parse_table_geometry_visual_review_markdown(
+            _table_visual_review_markdown(item_count=8))
+
+        report = build_table_geometry_visual_approval_gate_report(
+            decisions,
+            expected_review_item_count=8,
+            enabled=False)
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['gate_status'], 'blocked')
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2v'])
+
 
 def _page(page_index, blocks):
     return {
@@ -3973,6 +4121,50 @@ def _geometry_safety_report_from_tables(baseline_tables, filtered_tables):
         baseline_parse_metrics=_parse_metrics_with_tables(baseline_tables),
         filtered_parse_metrics=_parse_metrics_with_tables(filtered_tables),
         enabled=True)
+
+
+def _table_visual_review_markdown(
+        item_count=8,
+        decisions=None,
+        changed_counts=None,
+        changed_text=None,
+        extra_whitespace=False):
+    decisions = decisions or {}
+    changed_counts = changed_counts or set()
+    changed_text = changed_text or set()
+    lines = ['# Table Geometry Visual Review Pack', '']
+    pages = [5, 8, 10]
+    for index in range(1, item_count + 1):
+        page_number = pages[(index - 1) % len(pages)]
+        item_id = f'table-geometry-review-{index:03d}'
+        cell_after = 2 if index not in changed_counts else 3
+        text_preserved = 'False' if index in changed_text else 'True'
+        decision = decisions.get(index, 'approve_safe_boundary_shift')
+        markers = {
+            'approve_safe_boundary_shift': '[ ]',
+            'reject_unsafe_table_change': '[ ]',
+            'unsure': '[ ]',
+        }
+        if decision:
+            markers[decision] = '[x]'
+        prefix = '-   ' if extra_whitespace else '- '
+        lines.extend([
+            f'### {item_id} | Page {page_number}',
+            '',
+            f'{prefix}baseline_table_id: baseline-{index}',
+            f'{prefix}filtered_table_id: filtered-{index}',
+            f'{prefix}row_count_before_after: 1 -> 1',
+            f'{prefix}column_count_before_after: 2 -> 2',
+            f'{prefix}cell_count_before_after: 2 -> {cell_after}',
+            f'{prefix}text_cell_signature_preserved: {text_preserved}',
+            (
+                f'{prefix}human_decision:   approve_safe_boundary_shift: {markers["approve_safe_boundary_shift"]}    '
+                f'reject_unsafe_table_change: {markers["reject_unsafe_table_change"]}    '
+                f'unsure: {markers["unsure"]}'
+            ),
+            '',
+        ])
+    return '\n'.join(lines)
 
 
 def _table_record(

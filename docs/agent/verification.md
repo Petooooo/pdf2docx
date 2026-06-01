@@ -2685,3 +2685,106 @@ Result: confirmed local PDF/report/review image files, `.venv/`, generated cache
 ### Phase 2U recommendation
 
 Phase 2U is not safe to attempt until the local visual review pack is manually reviewed. If the 8 items are explicitly marked `approve_safe_boundary_shift`, Phase 2U may remain internal, opt-in, and guarded; it still should not be production integration by default.
+
+## Phase 2U
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2U added an internal/report-only table visual approval gate. The gate parses the local table geometry visual review markdown and blocks any future filtered parse integration unless all expected changed body table geometry items are explicitly approved and structural preservation signals remain intact.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local gate report
+
+Generated ignored local-only file:
+
+```text
+local_reports/table-visual-approval-gate-report.md
+```
+
+The local sample PDF, source reports, visual review markdown, visual review JSON, review images, and generated gate report remained ignored and were not staged or committed.
+
+### Sample summary
+
+- Expected review item count: 8.
+- Parsed review item count: 8.
+- `approve_safe_boundary_shift`: 8.
+- `reject_unsafe_table_change`: 0.
+- `unsure`: 0.
+- Missing decision count: 0.
+- Conflict decision count: 0.
+- Row/column/cell preservation count: 8.
+- Text/cell signature preservation count: 8.
+- Gate status: `passed`.
+- Blocking reasons: none.
+
+Interpretation:
+
+- The local visual approval gate passed for the 8 changed body table geometry items.
+- This only removes the Phase 2T manual-review blocker for the next internal experiment.
+- Production integration remains blocked by policy; Phase 2V must remain internal, opt-in, and guarded.
+
+### Tests added
+
+- Gate passes when all expected items are approved.
+- Gate blocks when any item is rejected.
+- Gate blocks when any item is unsure.
+- Gate blocks when any item has a missing decision.
+- Gate blocks when parsed item count does not match expected count.
+- Gate blocks when row/column/cell preservation is false.
+- Gate blocks when text/cell signature preservation is false.
+- Local review markdown parsing is robust to whitespace.
+- Input reports are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 177 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 177 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review image files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample, generated report, review JSON, or review image was staged.
+
+### Phase 2V recommendation
+
+Phase 2V is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. The table visual approval gate passed, but reviewed filtering must still not become default behavior and must not be connected to production conversion without another approval step.

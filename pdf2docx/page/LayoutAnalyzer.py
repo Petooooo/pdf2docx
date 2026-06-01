@@ -44,6 +44,13 @@ _REVIEW_SECTION_RE = re.compile(
 _REVIEW_FIELD_RE = re.compile(r'^-\s+([a-zA-Z_]+):\s*(.*)$')
 _REVIEW_DECISION_RE = re.compile(
     r'(approve_exclude|reject_exclude|unsure):\s*\[([^\]]*)\]')
+_TABLE_VISUAL_REVIEW_SECTION_RE = re.compile(
+    r'^###\s+([^|]+?)\s*\|\s*Page\s+(\d+)\s*$',
+    re.IGNORECASE)
+_TABLE_VISUAL_DECISION_RE = re.compile(
+    r'(approve_safe_boundary_shift|reject_unsafe_table_change|unsure):\s*\[([^\]]*)\]',
+    re.IGNORECASE)
+_COUNT_PAIR_RE = re.compile(r'(-?\d+)\s*->\s*(-?\d+)')
 _PAGE_NUMBER_RE_LIST = (
     re.compile(r'^(?:page|p\.?)\s*\d+$', re.IGNORECASE),
     re.compile(r'^(?:page|p\.?)\s*\d+\s*(?:/|of)\s*\d+$', re.IGNORECASE),
@@ -324,6 +331,12 @@ def load_exclusion_review_decisions(path: str) -> dict:
         return parse_exclusion_review_markdown(stream.read())
 
 
+def load_table_geometry_visual_review_decisions(path: str) -> dict:
+    '''Read a local table geometry visual review markdown file.'''
+    with open(path, 'r', encoding='utf-8') as stream:
+        return parse_table_geometry_visual_review_markdown(stream.read())
+
+
 def parse_exclusion_review_markdown(markdown_text: str) -> dict:
     '''Parse Phase 1G local review markdown into structured decisions.'''
     decisions = []
@@ -377,6 +390,84 @@ def parse_exclusion_review_markdown(markdown_text: str) -> dict:
         'decisions': decisions,
         'summary': {
             'candidate_count': len(decisions),
+            'decision_counts': dict(sorted(decision_counts.items())),
+        },
+    }
+
+
+def parse_table_geometry_visual_review_markdown(markdown_text: str) -> dict:
+    '''Parse local table-geometry visual review decisions.'''
+    items = []
+    current = None
+
+    def flush_current():
+        if not current:
+            return
+        if current.get('review_item_id'):
+            current.setdefault('manual_decision', DECISION_NONE)
+            current.setdefault('checked_decisions', [])
+            current.setdefault('row_column_cell_counts_preserved', False)
+            current.setdefault('text_cell_signature_preserved', False)
+            items.append(current.copy())
+
+    for raw_line in (markdown_text or '').splitlines():
+        line = raw_line.strip()
+        section = _TABLE_VISUAL_REVIEW_SECTION_RE.match(line)
+        if section:
+            flush_current()
+            current = {
+                'review_item_id': normalize_text(section.group(1)),
+                'page_number': int(section.group(2)),
+            }
+            continue
+
+        if current is None:
+            continue
+
+        field = _REVIEW_FIELD_RE.match(line)
+        if not field:
+            continue
+
+        field_name = field.group(1)
+        field_value = field.group(2).strip()
+        if field_name in {
+                'baseline_table_id',
+                'filtered_table_id',
+                'likely_cause',
+                'current_severity',
+                'review_classification'}:
+            current[field_name] = _strip_inline_code(field_value)
+        elif field_name == 'row_count_before_after':
+            before, after = _parse_count_pair(field_value)
+            current['row_count_before'] = before
+            current['row_count_after'] = after
+        elif field_name == 'column_count_before_after':
+            before, after = _parse_count_pair(field_value)
+            current['column_count_before'] = before
+            current['column_count_after'] = after
+        elif field_name == 'cell_count_before_after':
+            before, after = _parse_count_pair(field_value)
+            current['cell_count_before'] = before
+            current['cell_count_after'] = after
+        elif field_name == 'text_cell_signature_preserved':
+            current['text_cell_signature_preserved'] = _parse_bool(field_value)
+        elif field_name == 'human_decision':
+            decision, checked = _parse_table_visual_human_decision(field_value)
+            current['manual_decision'] = decision
+            current['checked_decisions'] = checked
+
+        current['row_column_cell_counts_preserved'] = _table_visual_counts_preserved(current)
+
+    flush_current()
+
+    decision_counts = defaultdict(int)
+    for item in items:
+        decision_counts[item.get('manual_decision', DECISION_NONE)] += 1
+
+    return {
+        'items': items,
+        'summary': {
+            'review_item_count': len(items),
             'decision_counts': dict(sorted(decision_counts.items())),
         },
     }
@@ -1452,6 +1543,60 @@ def build_table_geometry_visual_review_pack(
     }
 
 
+def build_table_geometry_visual_approval_gate_report(
+        visual_review_decisions: dict = None,
+        visual_review_markdown: str = None,
+        table_geometry_visual_review_pack: dict = None,
+        expected_review_item_count: int = 8,
+        enabled: bool = False) -> dict:
+    '''Validate human approvals for table geometry review items.'''
+    if visual_review_decisions is not None:
+        decisions = _copy_table_visual_decisions(visual_review_decisions)
+    elif visual_review_markdown is not None:
+        decisions = parse_table_geometry_visual_review_markdown(visual_review_markdown)
+    else:
+        decisions = _table_visual_decisions_from_pack(table_geometry_visual_review_pack)
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'table_geometry_visual_approval_gate_report_only',
+            'summary': _table_geometry_visual_gate_disabled_summary(
+                decisions,
+                expected_review_item_count),
+            'items': [],
+            'blocking_reasons': [],
+            'gate_status': 'blocked',
+            'recommendation': {
+                'safe_to_attempt_phase_2v': False,
+                'reason': 'Table geometry visual approval gate is disabled.',
+            },
+        }
+
+    items = [
+        dict(item) for item in decisions.get('items', []) or []
+    ]
+    summary = _table_geometry_visual_gate_summary(
+        items,
+        expected_review_item_count)
+    blocking_reasons = _table_geometry_visual_gate_blocking_reasons(summary)
+    gate_status = 'passed' if not blocking_reasons else 'blocked'
+    summary['gate_status'] = gate_status
+
+    return {
+        'enabled': True,
+        'policy': 'table_geometry_visual_approval_gate_report_only',
+        'summary': summary,
+        'items': items,
+        'blocking_reasons': blocking_reasons,
+        'gate_status': gate_status,
+        'recommendation': {
+            'safe_to_attempt_phase_2v': gate_status == 'passed',
+            'reason': _table_geometry_visual_gate_recommendation(gate_status, blocking_reasons),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -2285,6 +2430,39 @@ def _parse_human_decision(text: str) -> tuple:
     if not checked:
         return DECISION_NONE, checked
     return DECISION_CONFLICT, checked
+
+
+def _parse_table_visual_human_decision(text: str) -> tuple:
+    checked = [
+        name.lower() for name, marker in _TABLE_VISUAL_DECISION_RE.findall(text or '')
+        if normalize_text(marker).lower() == 'x'
+    ]
+    if len(checked) == 1:
+        return checked[0], checked
+    if not checked:
+        return DECISION_NONE, checked
+    return DECISION_CONFLICT, checked
+
+
+def _parse_count_pair(text: str) -> tuple:
+    match = _COUNT_PAIR_RE.search(text or '')
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_bool(text: str) -> bool:
+    return normalize_text(text).lower() in {'true', 'yes', '1'}
+
+
+def _table_visual_counts_preserved(item: dict) -> bool:
+    return (
+        item.get('row_count_before') is not None and
+        item.get('row_count_before') == item.get('row_count_after') and
+        item.get('column_count_before') is not None and
+        item.get('column_count_before') == item.get('column_count_after') and
+        item.get('cell_count_before') is not None and
+        item.get('cell_count_before') == item.get('cell_count_after'))
 
 
 def _dry_run_candidates(dry_run_report: dict) -> list:
@@ -5063,6 +5241,144 @@ def _table_geometry_visual_review_recommendation(summary: dict, warnings: list) 
     if _table_geometry_visual_review_safe_for_phase_2u(summary, warnings):
         return 'All review items are approved or safe; Phase 2U may remain opt-in and guarded.'
     return 'Review pack is incomplete; keep the workflow report-only.'
+
+
+def _copy_table_visual_decisions(decisions: dict) -> dict:
+    decisions = decisions or {}
+    return {
+        'items': [
+            dict(item) for item in decisions.get('items', []) or []
+        ],
+        'summary': dict(decisions.get('summary') or {}),
+    }
+
+
+def _table_visual_decisions_from_pack(pack: dict) -> dict:
+    pack = pack or {}
+    items = []
+    for item in pack.get('review_items', []) or []:
+        record = dict(item)
+        record.setdefault('manual_decision', DECISION_NONE)
+        record.setdefault('checked_decisions', [])
+        record['row_column_cell_counts_preserved'] = (
+            record.get('row_count_before') == record.get('row_count_after') and
+            record.get('column_count_before') == record.get('column_count_after') and
+            record.get('cell_count_before') == record.get('cell_count_after'))
+        items.append(record)
+
+    decision_counts = defaultdict(int)
+    for item in items:
+        decision_counts[item.get('manual_decision', DECISION_NONE)] += 1
+
+    return {
+        'items': items,
+        'summary': {
+            'review_item_count': len(items),
+            'decision_counts': dict(sorted(decision_counts.items())),
+        },
+    }
+
+
+def _table_geometry_visual_gate_disabled_summary(
+        decisions: dict,
+        expected_review_item_count: int) -> dict:
+    parsed_count = len((decisions or {}).get('items', []) or [])
+    return {
+        'expected_review_item_count': expected_review_item_count,
+        'parsed_review_item_count': parsed_count,
+        'approve_count': 0,
+        'reject_count': 0,
+        'unsure_count': 0,
+        'missing_decision_count': 0,
+        'conflict_decision_count': 0,
+        'row_column_cell_preservation_count': 0,
+        'text_cell_signature_preservation_count': 0,
+        'gate_status': 'blocked',
+    }
+
+
+def _table_geometry_visual_gate_summary(
+        items: list,
+        expected_review_item_count: int) -> dict:
+    decision_counts = Counter(
+        item.get('manual_decision', DECISION_NONE) for item in items or [])
+    row_preserved = sum(
+        1 for item in items or []
+        if item.get('row_column_cell_counts_preserved') is True)
+    text_preserved = sum(
+        1 for item in items or []
+        if item.get('text_cell_signature_preserved') is True)
+    return {
+        'expected_review_item_count': expected_review_item_count,
+        'parsed_review_item_count': len(items or []),
+        'approve_count': decision_counts.get('approve_safe_boundary_shift', 0),
+        'reject_count': decision_counts.get('reject_unsafe_table_change', 0),
+        'unsure_count': decision_counts.get('unsure', 0),
+        'missing_decision_count': decision_counts.get(DECISION_NONE, 0),
+        'conflict_decision_count': decision_counts.get(DECISION_CONFLICT, 0),
+        'row_column_cell_preservation_count': row_preserved,
+        'text_cell_signature_preservation_count': text_preserved,
+        'affected_pages': sorted({
+            item.get('page_number')
+            for item in items or []
+            if item.get('page_number') is not None
+        }),
+        'gate_status': 'pending',
+    }
+
+
+def _table_geometry_visual_gate_blocking_reasons(summary: dict) -> list:
+    reasons = []
+    expected = int(summary.get('expected_review_item_count') or 0)
+    parsed = int(summary.get('parsed_review_item_count') or 0)
+    if expected != 8:
+        reasons.append({
+            'type': 'unexpected_expected_review_item_count',
+            'expected_required': 8,
+            'observed': expected,
+        })
+    if parsed != expected:
+        reasons.append({
+            'type': 'parsed_review_item_count_mismatch',
+            'expected': expected,
+            'observed': parsed,
+        })
+    if summary.get('approve_count', 0) != expected:
+        reasons.append({
+            'type': 'not_all_items_approved',
+            'expected': expected,
+            'observed': summary.get('approve_count', 0),
+        })
+    for key, reason_type in (
+            ('reject_count', 'rejected_items_present'),
+            ('unsure_count', 'unsure_items_present'),
+            ('missing_decision_count', 'missing_decisions_present'),
+            ('conflict_decision_count', 'conflicting_decisions_present')):
+        if summary.get(key, 0):
+            reasons.append({
+                'type': reason_type,
+                'count': summary.get(key, 0),
+            })
+    if summary.get('row_column_cell_preservation_count', 0) != expected:
+        reasons.append({
+            'type': 'row_column_cell_counts_not_fully_preserved',
+            'expected': expected,
+            'observed': summary.get('row_column_cell_preservation_count', 0),
+        })
+    if summary.get('text_cell_signature_preservation_count', 0) != expected:
+        reasons.append({
+            'type': 'text_cell_signatures_not_fully_preserved',
+            'expected': expected,
+            'observed': summary.get('text_cell_signature_preservation_count', 0),
+        })
+    return reasons
+
+
+def _table_geometry_visual_gate_recommendation(gate_status: str, blocking_reasons: list) -> str:
+    if gate_status == 'passed':
+        return 'Visual approval gate passed; Phase 2V may remain internal, opt-in, and guarded.'
+    reason_types = ', '.join(reason.get('type', '') for reason in blocking_reasons or [])
+    return f'Visual approval gate blocked; resolve: {reason_types}.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
