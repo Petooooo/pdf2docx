@@ -35,6 +35,7 @@ build_table_geometry_visual_approval_gate_report = LayoutAnalyzer.build_table_ge
 build_table_geometry_visual_review_pack = LayoutAnalyzer.build_table_geometry_visual_review_pack
 build_filtered_docx_generation_comparison_report = LayoutAnalyzer.build_filtered_docx_generation_comparison_report
 build_filtered_docx_residual_structure_report = LayoutAnalyzer.build_filtered_docx_residual_structure_report
+build_reviewed_filtering_feature_readiness_report = LayoutAnalyzer.build_reviewed_filtering_feature_readiness_report
 build_document_parse_copied_raw_page_filtering_apply_report = LayoutAnalyzer.build_document_parse_copied_raw_page_filtering_apply_report
 build_document_parse_filtering_hook_report = LayoutAnalyzer.build_document_parse_filtering_hook_report
 build_document_parse_filtered_parse_experiment_report = LayoutAnalyzer.build_document_parse_filtered_parse_experiment_report
@@ -3843,6 +3844,135 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(report['enabled'])
         self.assertFalse(report['recommendation']['safe_to_attempt_phase_2x'])
 
+    def test_readiness_gate_passes_when_all_evidence_is_safe(self):
+        report = build_reviewed_filtering_feature_readiness_report(
+            **_safe_readiness_inputs(),
+            enabled=True)
+
+        self.assertEqual(
+            report['readiness_status'],
+            'ready_for_internal_opt_in_integration_experiment')
+        self.assertEqual(report['blocking_reasons'], [])
+        self.assertTrue(report['recommendation']['safe_to_attempt_phase_2y'])
+
+    def test_readiness_gate_blocks_when_header_footer_approval_missing(self):
+        inputs = _safe_readiness_inputs()
+        inputs['header_footer_review_report']['approved_candidate_count'] = 0
+        inputs['raw_object_mapping_report']['summary']['approved_candidate_count'] = 0
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertEqual(report['readiness_status'], 'blocked')
+        self.assertIn(
+            'header_footer_review_approval_missing',
+            _readiness_reason_types(report))
+
+    def test_readiness_gate_blocks_when_table_visual_gate_is_missing_or_failed(self):
+        inputs = _safe_readiness_inputs()
+        inputs['table_visual_approval_gate_report'] = {
+            'gate_status': 'blocked',
+            'summary': {
+                'gate_status': 'blocked',
+                'expected_review_item_count': 8,
+                'parsed_review_item_count': 8,
+                'approve_count': 7,
+                'reject_count': 1,
+                'unsure_count': 0,
+                'missing_decision_count': 0,
+            },
+        }
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertEqual(report['readiness_status'], 'blocked')
+        self.assertIn(
+            'table_visual_approval_gate_not_passed',
+            _readiness_reason_types(report))
+
+    def test_readiness_gate_blocks_when_body_region_removal_is_nonzero(self):
+        inputs = _safe_readiness_inputs()
+        inputs['filtered_parse_experiment_report']['summary']['body_region_removed_count'] = 1
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertIn('body_region_removed', _readiness_reason_types(report))
+
+    def test_readiness_gate_blocks_true_residual_header_footer_pollution(self):
+        inputs = _safe_readiness_inputs()
+        inputs['docx_residual_structure_report']['summary'][
+            'true_residual_header_footer_pollution_count'] = 1
+        inputs['docx_residual_structure_report']['summary']['classification'] = 'unsafe'
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertIn(
+            'true_residual_header_footer_pollution_present',
+            _readiness_reason_types(report))
+
+    def test_readiness_gate_blocks_body_text_loss_warnings(self):
+        inputs = _safe_readiness_inputs()
+        inputs['docx_residual_structure_report']['summary']['body_text_loss_warning_count'] = 1
+        inputs['docx_residual_structure_report']['summary']['classification'] = 'unsafe'
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertIn(
+            'body_text_loss_warnings_present',
+            _readiness_reason_types(report))
+
+    def test_readiness_gate_blocks_table_text_loss_warnings(self):
+        inputs = _safe_readiness_inputs()
+        inputs['docx_residual_structure_report']['summary']['table_text_loss_warning_count'] = 1
+        inputs['docx_residual_structure_report']['summary']['classification'] = 'unsafe'
+
+        report = build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertIn(
+            'table_text_loss_warnings_present',
+            _readiness_reason_types(report))
+
+    def test_readiness_gate_records_local_sample_dependency_as_non_blocking_risk(self):
+        report = build_reviewed_filtering_feature_readiness_report(
+            **_safe_readiness_inputs(),
+            enabled=True)
+
+        self.assertEqual(
+            report['readiness_status'],
+            'ready_for_internal_opt_in_integration_experiment')
+        self.assertIn(
+            'local_sample_dependency',
+            {risk['type'] for risk in report['non_blocking_risks']})
+
+    def test_readiness_gate_report_does_not_mutate_inputs(self):
+        inputs = _safe_readiness_inputs()
+        before = json.loads(json.dumps(inputs))
+
+        build_reviewed_filtering_feature_readiness_report(
+            **inputs,
+            enabled=True)
+
+        self.assertEqual(inputs, before)
+
+    def test_readiness_gate_disabled_mode_is_clear(self):
+        report = build_reviewed_filtering_feature_readiness_report(
+            **_safe_readiness_inputs())
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['readiness_status'], 'blocked')
+        self.assertIn('readiness_gate_disabled', _readiness_reason_types(report))
+
 
 def _page(page_index, blocks):
     return {
@@ -4435,6 +4565,117 @@ def _table_visual_review_markdown(
             '',
         ])
     return '\n'.join(lines)
+
+
+def _safe_readiness_inputs():
+    return {
+        'header_footer_review_report': {
+            'approved_candidate_count': 4,
+            'blocked_candidate_count': 5,
+            'summary': {
+                'would_remove_block_count': 48,
+                'removed_block_count': 48,
+            },
+        },
+        'raw_object_mapping_report': {
+            'summary': {
+                'approved_candidate_count': 4,
+                'blocked_candidate_count': 5,
+                'expected_would_remove_count': 48,
+                'observed_would_remove_count': 48,
+                'mapped_raw_object_count': 48,
+                'exact_match_count': 48,
+                'fuzzy_match_count': 0,
+                'ambiguous_match_count': 0,
+                'missing_match_count': 0,
+                'unsafe_match_count': 0,
+                'body_region_matched_for_removal_count': 0,
+                'rejected_unsure_layout_placeholder_matched_for_removal_count': 0,
+                'all_expected_blocks_mapped_once': True,
+            },
+        },
+        'filtered_parse_experiment_report': _filtered_docx_experiment_report(),
+        'table_visual_approval_gate_report': _passed_table_visual_gate_report(),
+        'body_table_geometry_delta_safety_report': {
+            'summary': {
+                'changed_body_table_geometry_count': 8,
+                'stream_table_boundary_adjustment_count': 8,
+                'possible_body_table_structure_change_count': 0,
+                'possible_cell_loss_count': 0,
+                'unchanged_row_column_cell_count': 8,
+                'changed_row_column_cell_count': 0,
+                'text_cell_signature_preserved_count': 8,
+                'text_cell_signature_changed_count': 0,
+                'classification': 'review',
+            },
+        },
+        'filtered_docx_comparison_report': {
+            'summary': {
+                'table_visual_approval_gate_status': 'passed',
+                'baseline_raw_block_count': 790,
+                'filtered_raw_block_count': 742,
+                'removed_approved_header_footer_page_number_count': 48,
+                'baseline_parsed_text_block_count': 523,
+                'filtered_parsed_text_block_count': 486,
+                'baseline_body_text_block_count': 393,
+                'filtered_body_text_block_count': 393,
+                'baseline_table_count': 139,
+                'filtered_table_count': 127,
+                'baseline_image_count': 0,
+                'filtered_image_count': 0,
+                'baseline_section_count': 50,
+                'filtered_section_count': 50,
+                'body_region_removed_count': 0,
+                'rejected_unsure_layout_placeholder_removed_count': 0,
+                'normal_conversion_still_works': True,
+                'state_restored_or_reloaded': True,
+            },
+            'docx_files': {
+                'baseline': {
+                    'path': 'local_reports/docx_compare/baseline.docx',
+                    'local_only_path': True,
+                    'exists': True,
+                    'size_bytes': 1200,
+                    'empty': False,
+                },
+                'filtered': {
+                    'path': 'local_reports/docx_compare/filtered.docx',
+                    'local_only_path': True,
+                    'exists': True,
+                    'size_bytes': 1100,
+                    'empty': False,
+                },
+            },
+            'safety_warnings': [],
+        },
+        'docx_residual_structure_report': {
+            'summary': {
+                'classification': 'safe',
+                'residual_removed_string_count': 1,
+                'true_residual_header_footer_pollution_count': 0,
+                'body_text_loss_warning_count': 0,
+                'table_text_loss_warning_count': 0,
+            },
+            'safety_warnings': [],
+        },
+        'verification_status': {
+            'layout_analyzer_tests_passed': True,
+            'py_compile_passed': True,
+            'unittest_passed': True,
+            'conversion_tests_passed': True,
+            'git_diff_check_passed': True,
+            'local_artifacts_ignored': True,
+            'local_sample_dependency': True,
+            'committed_synthetic_fixture_available': False,
+            'committed_end_to_end_regression_fixture_available': False,
+            'production_default_integration_enabled': False,
+            'public_cli_enabled': False,
+        },
+    }
+
+
+def _readiness_reason_types(report):
+    return {reason['type'] for reason in report['blocking_reasons']}
 
 
 def _filtered_docx_experiment_report():

@@ -3045,3 +3045,144 @@ Result: confirmed local PDF/report/review image/generated DOCX files, `.venv/`, 
 ### Phase 2X recommendation
 
 Phase 2X is safe to attempt only as another internal, explicitly opt-in, guarded diagnostic phase. Phase 2W found no true residual header/footer pollution in the filtered DOCX and no blocking OpenXML structure warnings; production integration must still remain disabled by default.
+
+## Phase 2X
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2X added an internal/report-only feature-readiness gate for reviewed
+header/footer filtering. The gate aggregates prior local evidence from the
+review decisions, raw-object mapping, filtered parse, table visual approval,
+filtered DOCX generation, DOCX residual inspection, and verification commands.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No production body filtering was enabled.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/reviewed-filtering-feature-readiness-report.md
+```
+
+The local sample PDF, local reports, visual review files/images, generated DOCX
+files, `.venv/`, caches, and conversion outputs remained ignored and were not
+staged or committed.
+
+### Readiness gate summary
+
+- Readiness gate status:
+  `ready_for_internal_opt_in_integration_experiment`.
+- Blocking reasons: 0.
+- Non-blocking risks: 5.
+- Header/footer review approvals: passed.
+- Table visual approval gate: passed.
+- Expected removed count: 48.
+- Actual removed count: 48.
+- Body-region removed count: 0.
+- Rejected/unsure/layout-placeholder removed count: 0.
+- Raw-object exact match count: 48.
+- Raw-object ambiguous/missing/unsafe match counts: 0 / 0 / 0.
+- Body TextBlock count preserved: yes.
+- Image count preserved: yes.
+- Section count preserved: yes.
+- Known table delta approved: yes.
+- Baseline and filtered DOCX files: present and non-empty.
+- True residual header/footer pollution count: 0.
+- Body text loss warnings: 0.
+- Table text loss warnings: 0.
+
+Non-blocking risks:
+
+- Evidence still depends on ignored local sample artifacts.
+- Synthetic fixtures are planned but not yet committed.
+- No committed end-to-end regression fixture exists yet.
+- Production default integration remains disabled.
+- Public CLI behavior remains disabled.
+
+Synthetic fixtures were only planned in Phase 2X. No synthetic PDFs or generated
+fixtures were added or committed.
+
+### Planning document
+
+Added `docs/agent/reviewed-filtering-integration-readiness.md` with:
+
+- validated evidence summary,
+- local-only limitations,
+- reasons production default integration remains blocked,
+- required synthetic fixture coverage,
+- recommended Phase 2Y direction.
+
+No extracted sample text or copyrighted content was added to committed
+documentation.
+
+### Tests added
+
+- Readiness gate passes when all required evidence is safe.
+- Readiness gate blocks when header/footer approval is missing.
+- Readiness gate blocks when the table visual approval gate is missing or
+  failed.
+- Readiness gate blocks when body-region removal is nonzero.
+- Readiness gate blocks when true residual header/footer pollution is nonzero.
+- Readiness gate blocks when body text loss warnings are nonzero.
+- Readiness gate blocks when table text loss warnings are nonzero.
+- Readiness gate records local-sample dependency as a non-blocking risk.
+- Readiness report does not mutate input reports.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 203 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 203 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report/review image/generated DOCX files, `.venv/`,
+generated caches, and conversion test outputs remain ignored. No local sample,
+generated report, review JSON, review image, or DOCX output was staged.
+
+### Phase 2Y recommendation
+
+Phase 2Y is safe to attempt only as another internal, explicitly opt-in,
+non-default phase. The recommended direction is to create committed synthetic
+fixture coverage or fixture-generation scaffolding first, then run the readiness
+gate against safe fixtures before any production integration attempt.

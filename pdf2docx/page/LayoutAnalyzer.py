@@ -1725,6 +1725,72 @@ def build_filtered_docx_residual_structure_report(
     }
 
 
+def build_reviewed_filtering_feature_readiness_report(
+        header_footer_review_report: dict = None,
+        raw_object_mapping_report: dict = None,
+        filtered_parse_experiment_report: dict = None,
+        table_visual_approval_gate_report: dict = None,
+        body_table_geometry_delta_safety_report: dict = None,
+        filtered_docx_comparison_report: dict = None,
+        docx_residual_structure_report: dict = None,
+        verification_status: dict = None,
+        evidence_overrides: dict = None,
+        enabled: bool = False) -> dict:
+    '''Aggregate prior report evidence into an internal readiness gate.'''
+    evidence = _reviewed_filtering_readiness_evidence(
+        header_footer_review_report,
+        raw_object_mapping_report,
+        filtered_parse_experiment_report,
+        table_visual_approval_gate_report,
+        body_table_geometry_delta_safety_report,
+        filtered_docx_comparison_report,
+        docx_residual_structure_report,
+        verification_status,
+        evidence_overrides)
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'reviewed_filtering_feature_readiness_gate_report_only',
+            'readiness_status': 'blocked',
+            'evidence_summary': evidence,
+            'blocking_reasons': [{
+                'type': 'readiness_gate_disabled',
+                'message': 'Feature readiness gate is disabled.',
+            }],
+            'non_blocking_risks': _reviewed_filtering_non_blocking_risks(evidence),
+            'required_synthetic_fixture_coverage': _reviewed_filtering_fixture_coverage(),
+            'recommendation': {
+                'safe_to_attempt_phase_2y': False,
+                'reason': 'Enable the internal readiness gate before attempting Phase 2Y.',
+            },
+        }
+
+    blocking_reasons = _reviewed_filtering_readiness_blocking_reasons(evidence)
+    non_blocking_risks = _reviewed_filtering_non_blocking_risks(evidence)
+    readiness_status = (
+        'ready_for_internal_opt_in_integration_experiment'
+        if not blocking_reasons else
+        'blocked')
+
+    return {
+        'enabled': True,
+        'policy': 'reviewed_filtering_feature_readiness_gate_report_only',
+        'readiness_status': readiness_status,
+        'evidence_summary': evidence,
+        'blocking_reasons': blocking_reasons,
+        'non_blocking_risks': non_blocking_risks,
+        'required_synthetic_fixture_coverage': _reviewed_filtering_fixture_coverage(),
+        'recommendation': {
+            'safe_to_attempt_phase_2y': readiness_status != 'blocked',
+            'reason': _reviewed_filtering_readiness_recommendation(
+                readiness_status,
+                blocking_reasons,
+                non_blocking_risks),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -6082,6 +6148,527 @@ def _filtered_docx_residual_recommendation(summary: dict, warnings: list) -> str
     if _filtered_docx_residual_safe_for_phase_2x(summary, warnings):
         return 'DOCX residual structure inspection found no blocking residual pollution; Phase 2X can remain internal and guarded.'
     return 'Keep production integration blocked until DOCX residual structure warnings are resolved.'
+
+
+def _reviewed_filtering_readiness_evidence(
+        header_footer_review_report: dict,
+        raw_object_mapping_report: dict,
+        filtered_parse_experiment_report: dict,
+        table_visual_approval_gate_report: dict,
+        body_table_geometry_delta_safety_report: dict,
+        filtered_docx_comparison_report: dict,
+        docx_residual_structure_report: dict,
+        verification_status: dict,
+        evidence_overrides: dict) -> dict:
+    header_report = header_footer_review_report or {}
+    header_summary = header_report.get('summary') or {}
+    mapping_summary = (raw_object_mapping_report or {}).get('summary') or {}
+    parse_report = filtered_parse_experiment_report or {}
+    parse_summary = parse_report.get('summary') or {}
+    gate_summary = (table_visual_approval_gate_report or {}).get('summary') or {}
+    table_geometry_summary = (
+        body_table_geometry_delta_safety_report or {}).get('summary') or {}
+    docx_report = filtered_docx_comparison_report or {}
+    docx_summary = docx_report.get('summary') or {}
+    docx_files = docx_report.get('docx_files') or {}
+    residual_report = docx_residual_structure_report or {}
+    residual_summary = residual_report.get('summary') or {}
+    verification = dict(verification_status or {})
+
+    expected_removed_count = _first_present(
+        mapping_summary.get('expected_would_remove_count'),
+        parse_summary.get('removed_raw_block_count'),
+        docx_summary.get('removed_approved_header_footer_page_number_count'),
+        header_summary.get('would_remove_block_count'))
+    actual_removed_count = _first_present(
+        parse_summary.get('removed_raw_block_count'),
+        docx_summary.get('removed_approved_header_footer_page_number_count'),
+        header_summary.get('removed_block_count'),
+        mapping_summary.get('mapped_raw_object_count'))
+
+    baseline_body_blocks = _first_present(
+        parse_summary.get('baseline_body_text_block_count'),
+        docx_summary.get('baseline_body_text_block_count'))
+    filtered_body_blocks = _first_present(
+        parse_summary.get('filtered_body_text_block_count'),
+        docx_summary.get('filtered_body_text_block_count'))
+    baseline_images = _first_present(
+        parse_summary.get('baseline_image_count'),
+        docx_summary.get('baseline_image_count'))
+    filtered_images = _first_present(
+        parse_summary.get('filtered_image_count'),
+        docx_summary.get('filtered_image_count'))
+    baseline_sections = _first_present(
+        parse_summary.get('baseline_section_count'),
+        docx_summary.get('baseline_section_count'))
+    filtered_sections = _first_present(
+        parse_summary.get('filtered_section_count'),
+        docx_summary.get('filtered_section_count'))
+
+    evidence = {
+        'header_footer_review_approval_passed': _readiness_bool(_first_present(
+            header_report.get('approved_candidate_count', None),
+            header_summary.get('approved_candidate_count', None),
+            mapping_summary.get('approved_candidate_count', None))) or False,
+        'approved_candidate_count': _readiness_int(_first_present(
+            header_report.get('approved_candidate_count', None),
+            header_summary.get('approved_candidate_count', None),
+            mapping_summary.get('approved_candidate_count', 0))),
+        'blocked_candidate_count': _readiness_int(_first_present(
+            header_report.get('blocked_candidate_count', None),
+            header_summary.get('blocked_candidate_count', None),
+            mapping_summary.get('blocked_candidate_count', 0))),
+        'table_visual_approval_gate_passed': (
+            (table_visual_approval_gate_report or {}).get('gate_status') == 'passed' or
+            gate_summary.get('gate_status') == 'passed'),
+        'table_visual_approval_gate_status': (
+            (table_visual_approval_gate_report or {}).get('gate_status') or
+            gate_summary.get('gate_status') or ''),
+        'table_visual_expected_review_item_count': _readiness_int(
+            gate_summary.get('expected_review_item_count', 0)),
+        'table_visual_parsed_review_item_count': _readiness_int(
+            gate_summary.get('parsed_review_item_count', 0)),
+        'table_visual_approve_count': _readiness_int(gate_summary.get('approve_count', 0)),
+        'table_visual_reject_count': _readiness_int(gate_summary.get('reject_count', 0)),
+        'table_visual_unsure_count': _readiness_int(gate_summary.get('unsure_count', 0)),
+        'table_visual_missing_decision_count': _readiness_int(
+            gate_summary.get('missing_decision_count', 0)),
+        'expected_removed_count': _readiness_int(expected_removed_count),
+        'actual_removed_count': _readiness_int(actual_removed_count),
+        'expected_removal_count_matches_actual': (
+            expected_removed_count is not None and
+            actual_removed_count is not None and
+            _readiness_int(expected_removed_count) == _readiness_int(actual_removed_count) and
+            _readiness_int(actual_removed_count) > 0),
+        'body_region_removed_count': _readiness_int(_first_present(
+            parse_summary.get('body_region_removed_count'),
+            docx_summary.get('body_region_removed_count'),
+            mapping_summary.get('body_region_matched_for_removal_count'),
+            0)),
+        'rejected_unsure_layout_placeholder_removed_count': _readiness_int(_first_present(
+            parse_summary.get('rejected_unsure_layout_placeholder_removed_count'),
+            docx_summary.get('rejected_unsure_layout_placeholder_removed_count'),
+            mapping_summary.get(
+                'rejected_unsure_layout_placeholder_matched_for_removal_count'),
+            0)),
+        'raw_mapping_exact_match_count': _readiness_int(
+            mapping_summary.get('exact_match_count', 0)),
+        'raw_mapping_fuzzy_match_count': _readiness_int(
+            mapping_summary.get('fuzzy_match_count', 0)),
+        'raw_mapping_ambiguous_match_count': _readiness_int(
+            mapping_summary.get('ambiguous_match_count', 0)),
+        'raw_mapping_missing_match_count': _readiness_int(
+            mapping_summary.get('missing_match_count', 0)),
+        'raw_mapping_unsafe_match_count': _readiness_int(
+            mapping_summary.get('unsafe_match_count', 0)),
+        'raw_mapping_all_expected_blocks_mapped_once': bool(
+            mapping_summary.get('all_expected_blocks_mapped_once', False)),
+        'baseline_body_text_block_count': _readiness_int(baseline_body_blocks),
+        'filtered_body_text_block_count': _readiness_int(filtered_body_blocks),
+        'body_textblock_count_preserved': (
+            baseline_body_blocks is not None and
+            filtered_body_blocks is not None and
+            _readiness_int(baseline_body_blocks) == _readiness_int(filtered_body_blocks)),
+        'baseline_image_count': _readiness_int(baseline_images),
+        'filtered_image_count': _readiness_int(filtered_images),
+        'image_count_preserved': (
+            baseline_images is not None and
+            filtered_images is not None and
+            _readiness_int(baseline_images) == _readiness_int(filtered_images)),
+        'baseline_section_count': _readiness_int(baseline_sections),
+        'filtered_section_count': _readiness_int(filtered_sections),
+        'section_count_preserved': (
+            baseline_sections is not None and
+            filtered_sections is not None and
+            _readiness_int(baseline_sections) == _readiness_int(filtered_sections)),
+        'known_table_delta_approved': _known_table_delta_approved(
+            docx_summary,
+            parse_summary,
+            gate_summary,
+            table_geometry_summary),
+        'unexpected_parse_warning_count': _unexpected_parse_warning_count(
+            parse_report.get('safety_warnings', []) or [],
+            _known_table_delta_approved(
+                docx_summary,
+                parse_summary,
+                gate_summary,
+                table_geometry_summary)),
+        'baseline_docx_exists_non_empty': _docx_file_ready(
+            (docx_files.get('baseline') or {})),
+        'filtered_docx_exists_non_empty': _docx_file_ready(
+            (docx_files.get('filtered') or {})),
+        'normal_conversion_after_experiment_passed': bool(
+            docx_summary.get('normal_conversion_still_works', False)),
+        'docx_state_restored_or_reloaded': bool(
+            docx_summary.get('state_restored_or_reloaded', False)),
+        'true_residual_header_footer_pollution_count': _readiness_int(
+            residual_summary.get('true_residual_header_footer_pollution_count', 0)),
+        'body_text_loss_warning_count': _readiness_int(
+            residual_summary.get('body_text_loss_warning_count', 0)),
+        'table_text_loss_warning_count': _readiness_int(
+            residual_summary.get('table_text_loss_warning_count', 0)),
+        'docx_residual_classification': residual_summary.get('classification', ''),
+        'docx_residual_safe': _docx_residual_safe_for_readiness(
+            residual_summary,
+            residual_report.get('safety_warnings', []) or []),
+        'layout_analyzer_tests_passed': bool(verification.get(
+            'layout_analyzer_tests_passed', False)),
+        'py_compile_passed': bool(verification.get('py_compile_passed', False)),
+        'unittest_passed': bool(verification.get('unittest_passed', False)),
+        'conversion_tests_passed': bool(verification.get(
+            'conversion_tests_passed', False)),
+        'git_diff_check_passed': bool(verification.get('git_diff_check_passed', False)),
+        'local_artifacts_ignored': bool(verification.get('local_artifacts_ignored', False)),
+        'local_sample_dependency': bool(verification.get(
+            'local_sample_dependency',
+            True)),
+        'committed_synthetic_fixture_available': bool(verification.get(
+            'committed_synthetic_fixture_available',
+            False)),
+        'committed_end_to_end_regression_fixture_available': bool(verification.get(
+            'committed_end_to_end_regression_fixture_available',
+            False)),
+        'production_default_integration_enabled': bool(verification.get(
+            'production_default_integration_enabled',
+            False)),
+        'public_cli_enabled': bool(verification.get('public_cli_enabled', False)),
+    }
+    evidence['test_status_all_passed'] = all(
+        evidence.get(key) for key in (
+            'layout_analyzer_tests_passed',
+            'py_compile_passed',
+            'unittest_passed',
+            'conversion_tests_passed',
+            'git_diff_check_passed',
+            'local_artifacts_ignored',
+        ))
+
+    for key, value in (evidence_overrides or {}).items():
+        evidence[key] = value
+    evidence['test_status_all_passed'] = all(
+        evidence.get(key) for key in (
+            'layout_analyzer_tests_passed',
+            'py_compile_passed',
+            'unittest_passed',
+            'conversion_tests_passed',
+            'git_diff_check_passed',
+            'local_artifacts_ignored',
+        ))
+    return evidence
+
+
+def _reviewed_filtering_readiness_blocking_reasons(evidence: dict) -> list:
+    reasons = []
+    _add_readiness_reason(
+        reasons,
+        evidence.get('header_footer_review_approval_passed'),
+        'header_footer_review_approval_missing',
+        'Header/footer review approvals are missing or empty.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('table_visual_approval_gate_passed'),
+        'table_visual_approval_gate_not_passed',
+        'Table visual approval gate has not passed.',
+        status=evidence.get('table_visual_approval_gate_status'))
+    _add_readiness_reason(
+        reasons,
+        evidence.get('expected_removal_count_matches_actual'),
+        'reviewed_removal_count_mismatch',
+        'Expected removal count does not match actual reviewed removal count.',
+        expected=evidence.get('expected_removed_count'),
+        observed=evidence.get('actual_removed_count'))
+    for key, reason_type, message in (
+            ('body_region_removed_count',
+             'body_region_removed',
+             'Reviewed filtering would remove body-region content.'),
+            ('rejected_unsure_layout_placeholder_removed_count',
+             'blocked_or_placeholder_removed',
+             'Rejected, unsure, or layout-placeholder content would be removed.'),
+            ('raw_mapping_ambiguous_match_count',
+             'raw_mapping_ambiguous_matches',
+             'Raw-object mapping has ambiguous matches.'),
+            ('raw_mapping_missing_match_count',
+             'raw_mapping_missing_matches',
+             'Raw-object mapping has missing matches.'),
+            ('raw_mapping_unsafe_match_count',
+             'raw_mapping_unsafe_matches',
+             'Raw-object mapping has unsafe matches.')):
+        if _readiness_int(evidence.get(key, 0)):
+            reasons.append({
+                'type': reason_type,
+                'message': message,
+                'count': _readiness_int(evidence.get(key, 0)),
+            })
+
+    _add_readiness_reason(
+        reasons,
+        evidence.get('raw_mapping_all_expected_blocks_mapped_once'),
+        'raw_mapping_not_one_to_one',
+        'Not every reviewed removal maps to exactly one raw-page object.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('body_textblock_count_preserved'),
+        'body_textblock_count_changed',
+        'Filtered parse changed body TextBlock count.',
+        baseline=evidence.get('baseline_body_text_block_count'),
+        filtered=evidence.get('filtered_body_text_block_count'))
+    _add_readiness_reason(
+        reasons,
+        evidence.get('image_count_preserved'),
+        'image_count_changed',
+        'Filtered parse changed image count.',
+        baseline=evidence.get('baseline_image_count'),
+        filtered=evidence.get('filtered_image_count'))
+    _add_readiness_reason(
+        reasons,
+        evidence.get('section_count_preserved'),
+        'section_count_changed',
+        'Filtered parse changed section count.',
+        baseline=evidence.get('baseline_section_count'),
+        filtered=evidence.get('filtered_section_count'))
+    _add_readiness_reason(
+        reasons,
+        evidence.get('known_table_delta_approved'),
+        'known_table_delta_not_approved',
+        'Known table-count delta is not approved or structurally explained.')
+    if _readiness_int(evidence.get('unexpected_parse_warning_count', 0)):
+        reasons.append({
+            'type': 'unexpected_parse_warnings_present',
+            'count': _readiness_int(evidence.get('unexpected_parse_warning_count', 0)),
+        })
+    _add_readiness_reason(
+        reasons,
+        evidence.get('baseline_docx_exists_non_empty'),
+        'baseline_docx_missing_or_empty',
+        'Baseline DOCX is missing or empty.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('filtered_docx_exists_non_empty'),
+        'filtered_docx_missing_or_empty',
+        'Filtered DOCX is missing or empty.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('normal_conversion_after_experiment_passed'),
+        'normal_conversion_after_experiment_failed',
+        'Normal conversion check after the experiment did not pass.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('docx_state_restored_or_reloaded'),
+        'docx_experiment_state_not_restored',
+        'Converter/page state was not confirmed restored or reloaded.')
+    _add_readiness_reason(
+        reasons,
+        evidence.get('docx_residual_safe'),
+        'docx_residual_not_safe',
+        'DOCX residual structure report is not safe.',
+        classification=evidence.get('docx_residual_classification'))
+    for key, reason_type, message in (
+            ('true_residual_header_footer_pollution_count',
+             'true_residual_header_footer_pollution_present',
+             'Filtered DOCX still contains true header/footer pollution.'),
+            ('body_text_loss_warning_count',
+             'body_text_loss_warnings_present',
+             'Filtered DOCX has body text loss warnings.'),
+            ('table_text_loss_warning_count',
+             'table_text_loss_warnings_present',
+             'Filtered DOCX has table text loss warnings.')):
+        if _readiness_int(evidence.get(key, 0)):
+            reasons.append({
+                'type': reason_type,
+                'message': message,
+                'count': _readiness_int(evidence.get(key, 0)),
+            })
+
+    for key, reason_type in (
+            ('layout_analyzer_tests_passed', 'layout_analyzer_tests_not_passed'),
+            ('py_compile_passed', 'py_compile_not_passed'),
+            ('unittest_passed', 'unittest_not_passed'),
+            ('conversion_tests_passed', 'conversion_tests_not_passed'),
+            ('git_diff_check_passed', 'git_diff_check_not_passed'),
+            ('local_artifacts_ignored', 'local_artifacts_not_confirmed_ignored')):
+        _add_readiness_reason(
+            reasons,
+            evidence.get(key),
+            reason_type,
+            f'{key} is not confirmed.')
+    return reasons
+
+
+def _reviewed_filtering_non_blocking_risks(evidence: dict) -> list:
+    risks = []
+    if evidence.get('local_sample_dependency', True):
+        risks.append({
+            'type': 'local_sample_dependency',
+            'message': 'Readiness evidence still depends on ignored local sample artifacts.',
+        })
+    if not evidence.get('committed_synthetic_fixture_available', False):
+        risks.append({
+            'type': 'committed_synthetic_fixture_missing',
+            'message': 'Synthetic fixtures are planned but not yet committed.',
+        })
+    if not evidence.get('committed_end_to_end_regression_fixture_available', False):
+        risks.append({
+            'type': 'committed_end_to_end_regression_fixture_missing',
+            'message': 'No committed end-to-end regression fixture exists yet.',
+        })
+    if not evidence.get('production_default_integration_enabled', False):
+        risks.append({
+            'type': 'production_default_integration_still_disabled',
+            'message': 'This is expected; default production integration remains blocked.',
+        })
+    if not evidence.get('public_cli_enabled', False):
+        risks.append({
+            'type': 'public_cli_still_disabled',
+            'message': 'This is expected; no public CLI behavior is exposed yet.',
+        })
+    return risks
+
+
+def _reviewed_filtering_fixture_coverage() -> list:
+    return [
+        {
+            'fixture': 'repeated_header_footer_page_numbers',
+            'purpose': 'Covers all-page repeated headers, footers, and page numbers.',
+        },
+        {
+            'fixture': 'first_page_different_header',
+            'purpose': 'Covers title-page/header exceptions.',
+        },
+        {
+            'fixture': 'odd_even_headers',
+            'purpose': 'Covers alternating section/page header text.',
+        },
+        {
+            'fixture': 'footer_close_to_body_text',
+            'purpose': 'Covers narrow body/footer separation risk.',
+        },
+        {
+            'fixture': 'body_table_near_footer',
+            'purpose': 'Covers body table preservation near bottom artifacts.',
+        },
+        {
+            'fixture': 'callout_textbox_table_like_content',
+            'purpose': 'Covers non-table layout boxes that can look table-like.',
+        },
+        {
+            'fixture': 'paragraph_crossing_page_boundary',
+            'purpose': 'Covers cross-page paragraph continuation evidence.',
+        },
+        {
+            'fixture': 'hyphenated_cross_page_continuation',
+            'purpose': 'Covers hyphenated line/page-break continuation.',
+        },
+        {
+            'fixture': 'list_items_and_headings',
+            'purpose': 'Covers list/heading boundaries that must not over-merge.',
+        },
+        {
+            'fixture': 'no_header_no_footer_negative_control',
+            'purpose': 'Covers documents where no exclusion should occur.',
+        },
+    ]
+
+
+def _reviewed_filtering_readiness_recommendation(
+        readiness_status: str,
+        blocking_reasons: list,
+        non_blocking_risks: list) -> str:
+    if readiness_status == 'ready_for_internal_opt_in_integration_experiment':
+        return (
+            'Ready for the next internal opt-in integration experiment only; '
+            'production default integration remains blocked until synthetic '
+            'fixtures and committed regressions exist.')
+    reason_types = ', '.join(reason.get('type', '') for reason in blocking_reasons or [])
+    return f'Keep production integration blocked; resolve readiness blockers: {reason_types}.'
+
+
+def _add_readiness_reason(
+        reasons: list,
+        condition,
+        reason_type: str,
+        message: str,
+        **details):
+    if condition:
+        return
+    reason = {
+        'type': reason_type,
+        'message': message,
+    }
+    reason.update({key: value for key, value in details.items() if value is not None})
+    reasons.append(reason)
+
+
+def _first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _readiness_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _readiness_bool(value) -> bool:
+    if isinstance(value, str):
+        return normalize_text(value).lower() in {'true', 'yes', 'passed'}
+    return bool(value)
+
+
+def _known_table_delta_approved(
+        docx_summary: dict,
+        parse_summary: dict,
+        gate_summary: dict,
+        table_geometry_summary: dict) -> bool:
+    baseline_table_count = _first_present(
+        parse_summary.get('baseline_table_count'),
+        docx_summary.get('baseline_table_count'))
+    filtered_table_count = _first_present(
+        parse_summary.get('filtered_table_count'),
+        docx_summary.get('filtered_table_count'))
+    if (
+            baseline_table_count is not None and
+            filtered_table_count is not None and
+            _readiness_int(baseline_table_count) == _readiness_int(filtered_table_count)):
+        return True
+
+    gate_passed = gate_summary.get('gate_status') == 'passed'
+    row_col_cell_preserved = (
+        _readiness_int(table_geometry_summary.get('changed_row_column_cell_count', 0)) == 0 and
+        _readiness_int(table_geometry_summary.get(
+            'possible_body_table_structure_change_count', 0)) == 0 and
+        _readiness_int(table_geometry_summary.get('possible_cell_loss_count', 0)) == 0)
+    text_preserved = (
+        _readiness_int(table_geometry_summary.get('text_cell_signature_changed_count', 0)) == 0)
+    if table_geometry_summary:
+        return gate_passed and row_col_cell_preserved and text_preserved
+    return gate_passed
+
+
+def _unexpected_parse_warning_count(warnings: list, known_table_delta_approved: bool) -> int:
+    unexpected = []
+    for warning in warnings or []:
+        warning_type = warning.get('type') if isinstance(warning, dict) else str(warning)
+        if known_table_delta_approved and warning_type == 'table_count_changed':
+            continue
+        unexpected.append(warning)
+    return len(unexpected)
+
+
+def _docx_file_ready(status: dict) -> bool:
+    return bool(status.get('exists')) and not bool(status.get('empty'))
+
+
+def _docx_residual_safe_for_readiness(summary: dict, warnings: list) -> bool:
+    return (
+        summary.get('classification') == 'safe' and
+        not _readiness_int(summary.get('true_residual_header_footer_pollution_count', 0)) and
+        not _readiness_int(summary.get('body_text_loss_warning_count', 0)) and
+        not _readiness_int(summary.get('table_text_loss_warning_count', 0)) and
+        _filtered_docx_residual_safe_for_phase_2x(summary, warnings))
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
