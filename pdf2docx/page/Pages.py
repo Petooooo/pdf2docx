@@ -509,7 +509,10 @@ class Pages(BaseCollection):
 
         for page, raw_page, raw_object_page in zip(pages, raw_pages, raw_object_pages):
             page_report = Pages._filtered_parse_raw_page_metrics(raw_object_page)
-            parsed_metrics = Pages._filtered_parse_page_metrics(raw_page, **settings)
+            parsed_metrics = Pages._filtered_parse_page_metrics(
+                raw_page,
+                page_index=page.id,
+                **settings)
             page_report.update(parsed_metrics)
             if parsed_metrics.get('parse_metrics_available'):
                 parse_available = True
@@ -532,6 +535,11 @@ class Pages(BaseCollection):
             'table_count': sum(page.get('table_count', 0) for page in page_reports),
             'image_count': sum(page.get('image_count', 0) for page in page_reports),
             'section_count': sum(page.get('section_count', 0) for page in page_reports),
+            'tables': [
+                table
+                for page in page_reports
+                for table in page.get('tables', []) or []
+            ],
             'pages': page_reports,
             'warnings': warnings,
         }
@@ -556,7 +564,7 @@ class Pages(BaseCollection):
 
 
     @staticmethod
-    def _filtered_parse_page_metrics(raw_page, **settings):
+    def _filtered_parse_page_metrics(raw_page, page_index:int=None, **settings):
         metrics = {
             'parse_metrics_available': False,
             'parsed_text_block_count': 0,
@@ -565,6 +573,7 @@ class Pages(BaseCollection):
             'table_count': 0,
             'image_count': 0,
             'section_count': 0,
+            'tables': [],
             'warnings': [],
         }
         if not hasattr(raw_page, 'calculate_margin') or not hasattr(raw_page, 'parse_section'):
@@ -587,7 +596,10 @@ class Pages(BaseCollection):
             sections = raw_page.parse_section(**settings) or []
             for section in sections:
                 section.parse(**settings)
-            metrics.update(Pages._parsed_sections_metrics(sections, raw_page.height))
+            metrics.update(Pages._parsed_sections_metrics(
+                sections,
+                raw_page.height,
+                page_index=page_index))
             metrics['parse_metrics_available'] = True
         except Exception as exc:
             metrics['warnings'].append({
@@ -641,7 +653,7 @@ class Pages(BaseCollection):
 
 
     @staticmethod
-    def _parsed_sections_metrics(sections:list, page_height:float):
+    def _parsed_sections_metrics(sections:list, page_height:float, page_index:int=None):
         metrics = {
             'parsed_text_block_count': 0,
             'body_text_block_count': 0,
@@ -649,10 +661,16 @@ class Pages(BaseCollection):
             'table_count': 0,
             'image_count': 0,
             'section_count': len(sections or []),
+            'tables': [],
         }
         for block in Pages._walk_parsed_blocks(sections):
             if getattr(block, 'is_table_block', False):
                 metrics['table_count'] += 1
+                metrics['tables'].append(Pages._parsed_table_record(
+                    block,
+                    page_height,
+                    page_index=page_index,
+                    table_index=len(metrics['tables'])))
                 continue
             if getattr(block, 'is_image_block', False):
                 metrics['image_count'] += 1
@@ -662,6 +680,54 @@ class Pages(BaseCollection):
                 if classify_y_band(Pages._json_bbox(getattr(block, 'bbox', None)), page_height) == REGION_BODY:
                     metrics['body_text_block_count'] += 1
         return metrics
+
+
+    @staticmethod
+    def _parsed_table_record(table, page_height:float, page_index:int=None, table_index:int=0):
+        rows = list(table)
+        cells = [
+            cell
+            for row in rows
+            for cell in row
+        ]
+        bbox = Pages._json_bbox(getattr(table, 'bbox', None))
+        return {
+            'table_id': f'page-{page_index}-table-{table_index}',
+            'page_index': page_index,
+            'page_number': page_index + 1 if page_index is not None else None,
+            'table_index': table_index,
+            'bbox': bbox,
+            'region': classify_y_band(bbox, page_height) if page_height else '',
+            'row_count': getattr(table, 'num_rows', len(rows)),
+            'column_count': getattr(table, 'num_cols', 0),
+            'cell_count': len(cells),
+            'non_empty_cell_count': sum(1 for cell in cells if bool(cell)),
+            'table_type': (
+                'stream' if getattr(table, 'is_stream_table_block', False) else
+                'lattice' if getattr(table, 'is_lattice_table_block', False) else
+                ''),
+            'text_preview': Pages._table_text_preview(table),
+        }
+
+
+    @staticmethod
+    def _table_text_preview(table, max_length:int=80):
+        try:
+            rows = table.text
+        except Exception:
+            return ''
+
+        parts = []
+        for row in rows or []:
+            if isinstance(row, (list, tuple)):
+                parts.extend(str(item or '') for item in row)
+            else:
+                parts.append(str(row or ''))
+        text = ' '.join(part.strip() for part in parts if part and part.strip())
+        text = ' '.join(text.split())
+        if len(text) <= max_length:
+            return text
+        return text[:max_length-3].rstrip() + '...'
 
 
     @staticmethod

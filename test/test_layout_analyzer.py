@@ -41,6 +41,7 @@ build_paragraph_production_comparison_report = LayoutAnalyzer.build_paragraph_pr
 build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragraph_reconstruction_validation_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
+build_table_delta_investigation_report = LayoutAnalyzer.build_table_delta_investigation_report
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
@@ -2885,6 +2886,138 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIsNone(report)
         self.assertIsNone(pages._document_parse_filtered_parse_experiment_report)
 
+    def test_table_delta_report_detects_baseline_only_tables(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('base-top', 0, REGION_TOP, [50, 20, 300, 44]),
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+        ])
+
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Header', REGION_TOP, [50, 20, 300, 44], ROLE_HEADER),
+            ])],
+            enabled=True)
+
+        self.assertEqual(report['summary']['baseline_only_table_count'], 1)
+        self.assertEqual(report['baseline_only_tables'][0]['classification'], 'likely_header_footer_false_positive')
+
+    def test_table_delta_classifies_boundary_overlap_as_likely_pollution_removed(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('base-bottom', 0, REGION_BOTTOM, [50, 940, 300, 980]),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[_removed_objects_page([
+                _removed_raw_object('Approved Footer', REGION_BOTTOM, [50, 942, 300, 978], ROLE_FOOTER),
+            ])],
+            enabled=True)
+
+        self.assertEqual(report['summary']['likely_header_footer_false_positive_table_count'], 1)
+        self.assertEqual(report['summary']['suspicious_body_table_loss_count'], 0)
+        self.assertTrue(report['recommendation']['safe_to_attempt_phase_2r'])
+
+    def test_table_delta_body_region_loss_triggers_warning(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+        ])
+        filtered = _parse_metrics_with_tables([])
+
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=[],
+            enabled=True)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertIn('body_region_table_disappeared', warning_types)
+        self.assertEqual(report['summary']['suspicious_body_table_loss_count'], 1)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2r'])
+
+    def test_table_delta_changed_common_geometry_triggers_warning(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460], rows=2, cols=2),
+        ])
+        filtered = _parse_metrics_with_tables([
+            _table_record('body-table', 0, REGION_BODY, [51, 400, 520, 470], rows=3, cols=2),
+        ])
+
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            enabled=True)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertEqual(report['summary']['changed_common_table_count'], 1)
+        self.assertIn('common_table_changed', warning_types)
+
+    def test_table_delta_unchanged_table_counts_have_no_warning(self):
+        table = _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460])
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=_parse_metrics_with_tables([table]),
+            filtered_parse_metrics=_parse_metrics_with_tables([table]),
+            enabled=True)
+
+        self.assertEqual(report['summary']['table_count_delta'], 0)
+        self.assertEqual(report['safety_warnings'], [])
+        self.assertEqual(report['summary']['classification'], 'no_delta')
+
+    def test_table_delta_filtered_only_tables_are_reported(self):
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=_parse_metrics_with_tables([]),
+            filtered_parse_metrics=_parse_metrics_with_tables([
+                _table_record('new-table', 0, REGION_BODY, [50, 400, 520, 460]),
+            ]),
+            enabled=True)
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertEqual(report['summary']['filtered_only_table_count'], 1)
+        self.assertIn('filtered_only_table_detected', warning_types)
+
+    def test_table_delta_report_does_not_mutate_inputs(self):
+        baseline = _parse_metrics_with_tables([
+            _table_record('base-top', 0, REGION_TOP, [50, 20, 300, 44]),
+        ])
+        filtered = _parse_metrics_with_tables([])
+        removed = [_removed_objects_page([
+            _removed_raw_object('Approved Header', REGION_TOP, [50, 20, 300, 44], ROLE_HEADER),
+        ])]
+        before = json.dumps({
+            'baseline': baseline,
+            'filtered': filtered,
+            'removed': removed,
+        }, sort_keys=True)
+
+        build_table_delta_investigation_report(
+            baseline_parse_metrics=baseline,
+            filtered_parse_metrics=filtered,
+            removed_objects_by_page=removed,
+            enabled=True)
+
+        after = json.dumps({
+            'baseline': baseline,
+            'filtered': filtered,
+            'removed': removed,
+        }, sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_table_delta_disabled_mode_is_clear(self):
+        report = build_table_delta_investigation_report(
+            baseline_parse_metrics=_parse_metrics_with_tables([
+                _table_record('body-table', 0, REGION_BODY, [50, 400, 520, 460]),
+            ]))
+
+        self.assertFalse(report['enabled'])
+        self.assertEqual(report['summary']['baseline_only_table_count'], 0)
+        self.assertFalse(report['recommendation']['safe_to_attempt_phase_2r'])
+
 
 def _page(page_index, blocks):
     return {
@@ -3370,6 +3503,68 @@ def _parse_metrics(
         'section_count': sections,
         'pages': [],
         'warnings': [],
+    }
+
+
+def _parse_metrics_with_tables(tables):
+    return {
+        'parse_metrics_available': True,
+        'raw_block_count': 0,
+        'body_raw_block_count': 0,
+        'parsed_text_block_count': 0,
+        'body_text_block_count': 0,
+        'paragraph_like_text_block_count': 0,
+        'table_count': len(tables),
+        'image_count': 0,
+        'section_count': 1,
+        'tables': [dict(table) for table in tables],
+        'pages': [{
+            'page_index': 0,
+            'page_number': 1,
+            'tables': [dict(table) for table in tables],
+        }],
+        'warnings': [],
+    }
+
+
+def _table_record(table_id, page_index, region, bbox, rows=2, cols=2, cells=None):
+    cells = cells if cells is not None else rows * cols
+    return {
+        'table_id': table_id,
+        'page_index': page_index,
+        'page_number': page_index + 1,
+        'table_index': 0,
+        'bbox': list(bbox),
+        'region': region,
+        'row_count': rows,
+        'column_count': cols,
+        'cell_count': cells,
+        'non_empty_cell_count': cells,
+        'table_type': 'stream',
+        'text_preview': 'short table preview',
+    }
+
+
+def _removed_objects_page(objects, page_index=0):
+    return {
+        'page_index': page_index,
+        'page_number': page_index + 1,
+        'removed_count': len(objects),
+        'objects': objects,
+    }
+
+
+def _removed_raw_object(text, region, bbox, role):
+    return {
+        'raw_object_id': f'raw-{text}',
+        'page_index': 0,
+        'block_index': 0,
+        'candidate_id': f'candidate-{text}',
+        'proposed_role': role,
+        'region': region,
+        'bbox': list(bbox),
+        'text': text,
+        'text_preview': text,
     }
 
 

@@ -2234,3 +2234,126 @@ Result: confirmed local PDF/report files, `.venv/`, generated caches, and conver
 ### Phase 2Q recommendation
 
 Phase 2Q is safe to attempt only as another explicitly opt-in, non-default experiment. The next phase should investigate the table-count delta and compare parse outputs more deeply before any persistent production filtering path is enabled.
+
+## Phase 2Q
+
+Date: 2026-06-01
+
+### Scope
+
+Phase 2Q added an internal/report-only table-count delta investigation helper. The helper compares baseline and filtered parse table summaries from the opt-in filtered parse experiment, classifies baseline-only, filtered-only, and changed common tables, and checks whether baseline-only tables overlap approved header/footer/page-number removals.
+
+Production conversion behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- Reviewed filtering remains opt-in and non-default.
+- No table parsing behavior was changed.
+- No DOCX header/footer generation was added.
+- No production paragraph merge was added.
+- No production body filtering was enabled.
+
+### Table parsing context
+
+The existing production pipeline detects tables inside `Layout.parse()` before paragraph grouping:
+
+- `Layout._parse_table()` calls `TablesConstructor.lattice_tables()` for explicit bordered tables.
+- `Layout._parse_table()` calls `TablesConstructor.stream_tables()` for borderless/layout-derived tables.
+- `Blocks.collect_stream_lines()` identifies possible stream-table line groups from row/flow-layout signals.
+- `Blocks.assign_to_tables()` replaces assigned line/table content with `TableBlock` objects.
+- `TableBlock.store()` represents table geometry through bbox, rows, cells, and nested cell blocks.
+
+Phase 2Q did not modify any of that behavior; it only records table summaries in the opt-in parse metrics.
+
+### Local report
+
+Generated ignored local-only file:
+
+```text
+local_reports/table-delta-investigation-report.md
+```
+
+The report was not staged or committed. The local sample PDF, layout report, review pack, mapping report, guarded apply/restore report, filtered parse report, and generated table delta report remained ignored.
+
+### Sample summary
+
+- Baseline table count: 139.
+- Filtered table count: 127.
+- Table-count delta: -12.
+- Baseline-only table count: 12.
+- Filtered-only table count: 0.
+- Changed common table count: 11.
+- Body-region baseline-only table count: 1.
+- Top/bottom baseline-only table count: 11.
+- Tables overlapping removed header/footer/page-number candidates: 12.
+- Suspicious body table loss count: 1.
+- Likely header/footer false-positive table count: 11.
+- Table changes limited to top/bottom: no.
+- Table changes affect body region: yes.
+- Classification: `unsafe`.
+
+Interpretation:
+
+- 11 of 12 baseline-only tables are bottom-region 1x3 stream-table-like structures overlapping approved removals, so they are likely header/footer/page-number pollution removed by the experiment.
+- 1 baseline-only table is classified as body-region, even though it overlaps removed candidates; this is not safe to dismiss without fixture-level inspection.
+- 11 common tables changed bbox after filtering, including body-region changes on pages 5, 8, and 10.
+- The table delta therefore remains a blocking warning for production integration.
+
+Safety warnings:
+
+- `body_region_table_disappeared`: 1.
+- `common_table_changed`: 11.
+- `not_all_baseline_only_tables_explained_by_removed_candidates`: 11 explained out of 12 baseline-only tables.
+
+### Tests added
+
+- Table delta report detects baseline-only tables.
+- Top/bottom baseline-only tables overlapping approved removals are classified as likely pollution removed.
+- Body-region baseline-only tables trigger a safety warning.
+- Changed common table geometry triggers a warning.
+- Unchanged table counts produce no delta warning.
+- Filtered-only tables are reported clearly.
+- Input baseline/filtered parse outputs are not mutated.
+- Disabled/default behavior remains unchanged.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 143 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 143 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: confirmed local PDF/report files, `.venv/`, generated caches, and conversion test outputs remain ignored. No local sample or generated report was staged.
+
+### Phase 2R recommendation
+
+Phase 2R is not safe as a production integration step yet. The next phase should remain opt-in/report-only and inspect the body-region baseline-only table plus changed common body tables before any persistent filtering behavior is attempted.

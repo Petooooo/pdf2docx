@@ -1171,6 +1171,79 @@ def build_document_parse_filtered_parse_experiment_report(
     }
 
 
+def build_table_delta_investigation_report(
+        filtered_parse_experiment_report: dict = None,
+        baseline_parse_metrics: dict = None,
+        filtered_parse_metrics: dict = None,
+        removed_objects_by_page: list = None,
+        enabled: bool = False) -> dict:
+    '''Investigate table-count deltas from a filtered parse experiment.'''
+    experiment_report = filtered_parse_experiment_report or {}
+    baseline_metrics = _copy_parse_metrics(
+        baseline_parse_metrics or experiment_report.get('baseline_parse_metrics') or {})
+    filtered_metrics = _copy_parse_metrics(
+        filtered_parse_metrics or experiment_report.get('filtered_parse_metrics') or {})
+    removed_by_page = _copy_removed_objects_by_page(
+        removed_objects_by_page or experiment_report.get('removed_objects_by_page') or [])
+
+    baseline_tables = _table_delta_records(baseline_metrics)
+    filtered_tables = _table_delta_records(filtered_metrics)
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'table_delta_investigation_report_only',
+            'insertion_point': 'document_parse',
+            'summary': _table_delta_disabled_summary(baseline_tables, filtered_tables),
+            'baseline_only_tables': [],
+            'filtered_only_tables': [],
+            'changed_common_tables': [],
+            'baseline_only_tables_by_page': [],
+            'baseline_only_tables_by_region': {},
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_to_attempt_phase_2r': False,
+                'reason': 'Table delta investigation is disabled.',
+            },
+        }
+
+    comparison = _compare_table_records(baseline_tables, filtered_tables)
+    removed_objects = [
+        raw_object
+        for page in removed_by_page
+        for raw_object in page.get('objects', []) or []
+    ]
+    baseline_only = [
+        _classify_baseline_only_table(table, removed_objects)
+        for table in comparison['baseline_only_tables']
+    ]
+    filtered_only = comparison['filtered_only_tables']
+    changed_common = comparison['changed_common_tables']
+    summary = _table_delta_summary(
+        baseline_tables,
+        filtered_tables,
+        baseline_only,
+        filtered_only,
+        changed_common)
+    warnings = _table_delta_warnings(summary, baseline_only, filtered_only, changed_common)
+
+    return {
+        'enabled': True,
+        'policy': 'table_delta_investigation_report_only',
+        'insertion_point': 'document_parse',
+        'summary': summary,
+        'baseline_only_tables': baseline_only,
+        'filtered_only_tables': filtered_only,
+        'changed_common_tables': changed_common,
+        'baseline_only_tables_by_page': _table_delta_by_page(baseline_only),
+        'baseline_only_tables_by_region': _table_delta_by_region(baseline_only),
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_to_attempt_phase_2r': _table_delta_safe_for_phase_2r(summary, warnings),
+            'reason': _table_delta_recommendation(summary, warnings),
+        },
+    }
+
+
 def build_paragraph_integrity_report(
         page_summaries: list,
         body_filtering_diff_report: dict = None,
@@ -3291,12 +3364,46 @@ def _copy_parse_metrics(metrics: dict) -> dict:
     if not metrics:
         return {}
     copied = dict(metrics)
+    copied['tables'] = [
+        dict(table) for table in metrics.get('tables', []) or []
+    ]
     copied['pages'] = [
-        dict(page) for page in metrics.get('pages', []) or []
+        _copy_parse_metrics_page(page) for page in metrics.get('pages', []) or []
     ]
     copied['warnings'] = [
         dict(warning) for warning in metrics.get('warnings', []) or []
     ]
+    return copied
+
+
+def _copy_parse_metrics_page(page: dict) -> dict:
+    copied = dict(page)
+    copied['tables'] = [
+        dict(table) for table in page.get('tables', []) or []
+    ]
+    copied['warnings'] = [
+        dict(warning) for warning in page.get('warnings', []) or []
+    ]
+    return copied
+
+
+def _copy_removed_objects_by_page(removed_objects_by_page: list) -> list:
+    copied = []
+    for page in removed_objects_by_page or []:
+        page_index = page.get('page_index')
+        page_number = page.get('page_number')
+        objects = []
+        for raw_object in page.get('objects', []) or []:
+            copied_object = dict(raw_object)
+            copied_object.setdefault('page_index', page_index)
+            copied_object.setdefault('page_number', page_number)
+            objects.append(copied_object)
+        copied.append({
+            'page_index': page_index,
+            'page_number': page_number,
+            'removed_count': page.get('removed_count', len(objects)),
+            'objects': objects,
+        })
     return copied
 
 
@@ -3311,6 +3418,7 @@ def _filtered_parse_empty_metrics(raw_count: int) -> dict:
         'table_count': 0,
         'image_count': 0,
         'section_count': 0,
+        'tables': [],
         'pages': [],
         'warnings': [],
     }
@@ -3589,6 +3697,349 @@ def _filtered_parse_recommendation(summary: dict, warnings: list) -> str:
             return 'Filtered parse experiment preserved reviewed/body safety invariants, but non-blocking parse metric changes still need manual review before Phase 2Q.'
         return 'Filtered parse experiment preserved reviewed/body safety invariants; Phase 2Q can remain opt-in and guarded.'
     return 'Do not connect reviewed filtering to default parsing yet; resolve filtered-parse warnings first.'
+
+
+def _table_delta_records(parse_metrics: dict) -> list:
+    metrics = parse_metrics or {}
+    tables = [dict(table) for table in metrics.get('tables', []) or []]
+    if not tables:
+        for page in metrics.get('pages', []) or []:
+            for table in page.get('tables', []) or []:
+                record = dict(table)
+                record.setdefault('page_index', page.get('page_index'))
+                record.setdefault('page_number', page.get('page_number'))
+                tables.append(record)
+
+    records = []
+    for index, table in enumerate(tables):
+        record = dict(table)
+        record['bbox'] = _json_bbox(record.get('bbox'))
+        record.setdefault('table_id', f'table-{index}')
+        record.setdefault('table_index', index)
+        record.setdefault('region', REGION_BODY)
+        record.setdefault('row_count', 0)
+        record.setdefault('column_count', 0)
+        record.setdefault('cell_count', 0)
+        record.setdefault('text_preview', '')
+        record['body_region_intersection'] = record.get('region') == REGION_BODY
+        records.append(record)
+    return records
+
+
+def _table_delta_disabled_summary(baseline_tables: list, filtered_tables: list) -> dict:
+    return {
+        'baseline_table_count': len(baseline_tables),
+        'filtered_table_count': len(filtered_tables),
+        'table_count_delta': len(filtered_tables) - len(baseline_tables),
+        'baseline_only_table_count': 0,
+        'filtered_only_table_count': 0,
+        'changed_common_table_count': 0,
+        'body_region_baseline_only_table_count': 0,
+        'top_bottom_baseline_only_table_count': 0,
+        'tables_overlapping_removed_candidates_count': 0,
+        'suspicious_body_table_loss_count': 0,
+        'likely_header_footer_false_positive_table_count': 0,
+        'table_changes_limited_to_top_bottom': True,
+        'table_changes_affect_body_region': False,
+        'classification': 'disabled',
+    }
+
+
+def _compare_table_records(baseline_tables: list, filtered_tables: list) -> dict:
+    used_filtered = set()
+    changed_common = []
+    baseline_only = []
+
+    for baseline in baseline_tables or []:
+        match_index, match_kind = _best_table_match(baseline, filtered_tables, used_filtered)
+        if match_index is None:
+            baseline_only.append(dict(baseline))
+            continue
+
+        used_filtered.add(match_index)
+        filtered = filtered_tables[match_index]
+        changes = _table_record_changes(baseline, filtered, match_kind)
+        if changes:
+            changed_common.append({
+                'baseline_table': dict(baseline),
+                'filtered_table': dict(filtered),
+                'match_kind': match_kind,
+                'changes': changes,
+                'region': baseline.get('region', ''),
+                'page_index': baseline.get('page_index'),
+                'page_number': baseline.get('page_number'),
+                'classification': _changed_table_classification(baseline, changes),
+            })
+
+    filtered_only = [
+        dict(table)
+        for index, table in enumerate(filtered_tables or [])
+        if index not in used_filtered
+    ]
+    return {
+        'baseline_only_tables': baseline_only,
+        'filtered_only_tables': filtered_only,
+        'changed_common_tables': changed_common,
+    }
+
+
+def _best_table_match(baseline: dict, filtered_tables: list, used_filtered: set) -> tuple:
+    best_index = None
+    best_score = 0.0
+    for index, filtered in enumerate(filtered_tables or []):
+        if index in used_filtered:
+            continue
+        if baseline.get('page_index') != filtered.get('page_index'):
+            continue
+
+        bbox_delta = _bbox_max_delta(baseline.get('bbox'), filtered.get('bbox'))
+        overlap = _bbox_overlap_ratio(baseline.get('bbox'), filtered.get('bbox'))
+        same_shape = (
+            int(baseline.get('row_count') or 0) == int(filtered.get('row_count') or 0) and
+            int(baseline.get('column_count') or 0) == int(filtered.get('column_count') or 0) and
+            int(baseline.get('cell_count') or 0) == int(filtered.get('cell_count') or 0))
+
+        if bbox_delta <= 1.0 and same_shape:
+            return index, 'exact'
+        if overlap >= 0.75:
+            score = overlap
+        elif _bbox_gap(baseline.get('bbox'), filtered.get('bbox')) <= 3.0 and same_shape:
+            score = 0.65
+        else:
+            continue
+
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    if best_index is None:
+        return None, ''
+    return best_index, 'fuzzy_overlap'
+
+
+def _table_record_changes(baseline: dict, filtered: dict, match_kind: str) -> list:
+    changes = []
+    if match_kind != 'exact' and _bbox_max_delta(baseline.get('bbox'), filtered.get('bbox')) > 1.0:
+        changes.append('bbox_changed')
+    for key, label in (
+            ('row_count', 'row_count_changed'),
+            ('column_count', 'column_count_changed'),
+            ('cell_count', 'cell_count_changed')):
+        if int(baseline.get(key) or 0) != int(filtered.get(key) or 0):
+            changes.append(label)
+    return changes
+
+
+def _changed_table_classification(table: dict, changes: list) -> str:
+    if table.get('region') == REGION_BODY:
+        return 'unsafe_body_table_changed'
+    if changes:
+        return 'suspicious_boundary_table_changed'
+    return 'unchanged'
+
+
+def _classify_baseline_only_table(table: dict, removed_objects: list) -> dict:
+    record = dict(table)
+    overlap = _removed_candidate_overlap(table, removed_objects)
+    region = table.get('region', '')
+    if region == REGION_BODY:
+        classification = 'unsafe_body_table_loss'
+        interpretation = 'Body-region table disappeared after filtering.'
+    elif region in {REGION_TOP, REGION_BOTTOM} and overlap.get('overlap_count'):
+        classification = 'likely_header_footer_false_positive'
+        interpretation = 'Boundary-region baseline-only table overlaps or sits near approved removed header/footer/page-number objects.'
+    elif region in {REGION_TOP, REGION_BOTTOM}:
+        classification = 'ambiguous_boundary_table_loss'
+        interpretation = 'Boundary-region baseline-only table did not clearly overlap approved removals.'
+    else:
+        classification = 'ambiguous_table_loss'
+        interpretation = 'Table disappeared after filtering, but its region is unclear.'
+
+    record.update({
+        'removed_candidate_overlap': overlap,
+        'classification': classification,
+        'interpretation': interpretation,
+    })
+    return record
+
+
+def _removed_candidate_overlap(table: dict, removed_objects: list) -> dict:
+    matches = []
+    table_bbox = table.get('bbox')
+    for removed in removed_objects or []:
+        if table.get('page_index') != removed.get('page_index'):
+            continue
+        overlap = _bbox_overlap_ratio(table_bbox, removed.get('bbox'))
+        gap = _bbox_gap(table_bbox, removed.get('bbox'))
+        if overlap <= 0.0 and gap > 12.0:
+            continue
+        matches.append({
+            'candidate_id': removed.get('candidate_id', ''),
+            'proposed_role': removed.get('proposed_role', ''),
+            'region': removed.get('region', ''),
+            'overlap_ratio': round(overlap, 3),
+            'bbox_gap': round(gap, 2),
+            'text_preview': removed.get('text_preview', '') or _preview_text(removed, max_length=80),
+        })
+
+    roles = Counter(match.get('proposed_role', '') for match in matches)
+    return {
+        'overlap_count': len(matches),
+        'roles': dict(sorted(roles.items())),
+        'matches': matches,
+    }
+
+
+def _bbox_gap(first, second) -> float:
+    first = _json_bbox(first)
+    second = _json_bbox(second)
+    dx = max(float(second[0]) - float(first[2]), float(first[0]) - float(second[2]), 0.0)
+    dy = max(float(second[1]) - float(first[3]), float(first[1]) - float(second[3]), 0.0)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _table_delta_summary(
+        baseline_tables: list,
+        filtered_tables: list,
+        baseline_only: list,
+        filtered_only: list,
+        changed_common: list) -> dict:
+    baseline_only_regions = Counter(table.get('region', '') for table in baseline_only or [])
+    overlap_count = sum(
+        1 for table in baseline_only or []
+        if table.get('removed_candidate_overlap', {}).get('overlap_count', 0))
+    body_loss = [
+        table for table in baseline_only or []
+        if table.get('region') == REGION_BODY
+    ]
+    likely_pollution = [
+        table for table in baseline_only or []
+        if table.get('classification') == 'likely_header_footer_false_positive'
+    ]
+    changed_body = [
+        table for table in changed_common or []
+        if table.get('region') == REGION_BODY
+    ]
+    changes_affect_body = bool(body_loss or changed_body)
+    top_bottom_loss = sum(
+        count for region, count in baseline_only_regions.items()
+        if region in {REGION_TOP, REGION_BOTTOM})
+    if changes_affect_body:
+        classification = 'unsafe'
+    elif filtered_only or changed_common:
+        classification = 'suspicious'
+    elif not baseline_only:
+        classification = 'no_delta'
+    elif len(likely_pollution) == len(baseline_only or []):
+        classification = 'expected'
+    elif baseline_only:
+        classification = 'ambiguous'
+
+    return {
+        'baseline_table_count': len(baseline_tables or []),
+        'filtered_table_count': len(filtered_tables or []),
+        'table_count_delta': len(filtered_tables or []) - len(baseline_tables or []),
+        'baseline_only_table_count': len(baseline_only or []),
+        'filtered_only_table_count': len(filtered_only or []),
+        'changed_common_table_count': len(changed_common or []),
+        'body_region_baseline_only_table_count': len(body_loss),
+        'top_bottom_baseline_only_table_count': top_bottom_loss,
+        'tables_overlapping_removed_candidates_count': overlap_count,
+        'suspicious_body_table_loss_count': len(body_loss),
+        'likely_header_footer_false_positive_table_count': len(likely_pollution),
+        'table_changes_limited_to_top_bottom': (
+            not changes_affect_body and
+            len(baseline_only or []) == top_bottom_loss),
+        'table_changes_affect_body_region': changes_affect_body,
+        'classification': classification,
+    }
+
+
+def _table_delta_warnings(
+        summary: dict,
+        baseline_only: list,
+        filtered_only: list,
+        changed_common: list) -> list:
+    warnings = []
+    body_loss = [
+        table for table in baseline_only or []
+        if table.get('region') == REGION_BODY
+    ]
+    if body_loss:
+        warnings.append({
+            'type': 'body_region_table_disappeared',
+            'count': len(body_loss),
+        })
+    ambiguous = [
+        table for table in baseline_only or []
+        if table.get('classification') in {
+            'ambiguous_boundary_table_loss',
+            'ambiguous_table_loss',
+        }
+    ]
+    if ambiguous:
+        warnings.append({
+            'type': 'ambiguous_table_delta',
+            'count': len(ambiguous),
+        })
+    if filtered_only:
+        warnings.append({
+            'type': 'filtered_only_table_detected',
+            'count': len(filtered_only),
+        })
+    if changed_common:
+        warnings.append({
+            'type': 'common_table_changed',
+            'count': len(changed_common),
+        })
+    if (
+            summary.get('baseline_only_table_count') and
+            summary.get('likely_header_footer_false_positive_table_count') !=
+            summary.get('baseline_only_table_count')):
+        warnings.append({
+            'type': 'not_all_baseline_only_tables_explained_by_removed_candidates',
+            'explained': summary.get('likely_header_footer_false_positive_table_count'),
+            'baseline_only': summary.get('baseline_only_table_count'),
+        })
+    return warnings
+
+
+def _table_delta_by_page(tables: list) -> list:
+    pages = defaultdict(lambda: {'page_index': None, 'page_number': None, 'table_count': 0})
+    for table in tables or []:
+        page_index = table.get('page_index')
+        pages[page_index]['page_index'] = page_index
+        pages[page_index]['page_number'] = table.get('page_number')
+        pages[page_index]['table_count'] += 1
+    return sorted(pages.values(), key=lambda item: item.get('page_number') or 0)
+
+
+def _table_delta_by_region(tables: list) -> dict:
+    return dict(sorted(Counter(table.get('region', '') for table in tables or []).items()))
+
+
+def _table_delta_safe_for_phase_2r(summary: dict, warnings: list) -> bool:
+    warning_types = {warning.get('type') for warning in warnings or []}
+    blocking = {
+        'body_region_table_disappeared',
+        'ambiguous_table_delta',
+        'filtered_only_table_detected',
+        'common_table_changed',
+        'not_all_baseline_only_tables_explained_by_removed_candidates',
+    }
+    return (
+        summary.get('classification') in {'expected', 'no_delta'} and
+        not warning_types.intersection(blocking))
+
+
+def _table_delta_recommendation(summary: dict, warnings: list) -> str:
+    if _table_delta_safe_for_phase_2r(summary, warnings):
+        if summary.get('classification') == 'expected':
+            return 'Table delta is limited to boundary-region tables explained by approved removals; Phase 2R can remain opt-in and guarded.'
+        return 'No table delta was detected; Phase 2R can remain opt-in and guarded.'
+    if summary.get('table_changes_affect_body_region'):
+        return 'Do not integrate production filtering yet; body-region table changes require inspection.'
+    return 'Keep Phase 2R blocked or investigative until ambiguous/changed table deltas are reviewed.'
 
 
 def _raw_object_page_fingerprint(raw_object_pages: list) -> list:
