@@ -5083,6 +5083,205 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertFalse(report['applied'])
         self.assertEqual(report['summary']['header_paragraphs_written'], 0)
 
+    def test_internal_filtered_body_docx_header_footer_output_repeated_fixture(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-body-with-header-footer.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_with_header_footer_parts(
+                pdf_path,
+                decisions,
+                layout,
+                tmp)
+
+            self.assertTrue(report['plan']['enabled'])
+            self.assertTrue(report['apply_report']['applied'])
+            self.assertTrue(report['comparison']['recommendation']['safe_for_internal_filtered_docx'])
+            self.assertEqual(report['plan']['summary']['header_text_count'], 1)
+            self.assertEqual(report['plan']['summary']['footer_text_count'], 1)
+            self.assertEqual(report['plan']['summary']['page_number_placeholder_count'], 1)
+            self.assertIn('SYNTHETIC REPORT HEADER', report['openxml']['header_xml'])
+            self.assertIn('SYNTHETIC REPORT FOOTER', report['openxml']['footer_xml'])
+            self.assertIn('&lt;PAGE_NUMBER&gt;', report['openxml']['footer_xml'])
+            self.assertNotIn('SYNTHETIC REPORT HEADER', report['openxml']['body_xml'])
+            self.assertNotIn('SYNTHETIC REPORT FOOTER', report['openxml']['body_xml'])
+            self.assertNotIn('Page 1 of 4', report['openxml']['body_xml'])
+            self.assertEqual(
+                report['comparison']['summary']['true_residual_header_footer_pollution_count'],
+                0)
+            self.assertTrue(
+                report['comparison']['summary']['body_text_signature_preserved'])
+            self.assertTrue(
+                report['comparison']['summary']['generated_docx_artifacts_temp_only'])
+            self.assertEqual(
+                report['apply_report']['summary']['page_number_field_generation'],
+                'deferred_placeholder_only')
+            self.assertFalse(report['default_metrics']['header_footer_xml']['has_header_text'])
+
+    def test_internal_docx_header_footer_output_preserves_body_callout_content(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'callout-preserved-with-header-footer.pdf'
+            _write_synthetic_pdf(pdf_path, 'callout_text_box_near_edges')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_with_header_footer_parts(
+                pdf_path,
+                decisions,
+                layout,
+                tmp)
+            body_xml = report['openxml']['body_xml']
+            header_footer_xml = (
+                report['openxml']['header_xml'] +
+                report['openxml']['footer_xml'])
+
+            self.assertIn('Callout panel body content', body_xml)
+            self.assertIn('Table like callout row alpha', body_xml)
+            self.assertNotIn('Callout panel body content', header_footer_xml)
+            self.assertNotIn('Table like callout row alpha', header_footer_xml)
+            self.assertEqual(_removed_region_count(report['filtering_report'], REGION_BODY), 0)
+            self.assertTrue(
+                report['comparison']['summary']['body_text_signature_preserved'])
+            self.assertEqual(
+                report['comparison']['summary']['body_text_loss_warning_count'],
+                0)
+
+    def test_internal_docx_header_footer_output_excludes_blocked_candidates(self):
+        _require_docx_header_footer_support(self)
+        page_summaries = [{
+            'page_index': 0,
+            'text_blocks': [
+                _mapping_summary_block(
+                    0,
+                    _summary_fingerprint('Approved Header', REGION_TOP),
+                    REGION_TOP,
+                    'Approved Header'),
+                _mapping_summary_block(
+                    1,
+                    _summary_fingerprint('Rejected Footer', REGION_BOTTOM),
+                    REGION_BOTTOM,
+                    'Rejected Footer'),
+                _mapping_summary_block(
+                    2,
+                    _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                    REGION_BOTTOM,
+                    'Unsure Footer'),
+                _mapping_summary_block(
+                    3,
+                    _summary_fingerprint('Body Heading', REGION_BODY),
+                    REGION_BODY,
+                    'Body Heading'),
+                _mapping_summary_block(
+                    4,
+                    _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                    REGION_TOP,
+                    IMAGE_PLACEHOLDER),
+            ],
+        }]
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'approved-header',
+                    _summary_fingerprint('Approved Header', REGION_TOP),
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'rejected-footer',
+                    _summary_fingerprint('Rejected Footer', REGION_BOTTOM),
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BOTTOM]),
+                _dry_run_candidate(
+                    'unsure-footer',
+                    _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BOTTOM]),
+                _dry_run_candidate(
+                    'body-heading',
+                    _summary_fingerprint('Body Heading', REGION_BODY),
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BODY]),
+                _dry_run_candidate(
+                    'placeholder',
+                    _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                    ROLE_LAYOUT_PLACEHOLDER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision(
+                    'approved-header',
+                    _summary_fingerprint('Approved Header', REGION_TOP),
+                    'approve_exclude'),
+                _review_decision(
+                    'rejected-footer',
+                    _summary_fingerprint('Rejected Footer', REGION_BOTTOM),
+                    'reject_exclude'),
+                _review_decision(
+                    'unsure-footer',
+                    _summary_fingerprint('Unsure Footer', REGION_BOTTOM),
+                    'unsure'),
+                _review_decision(
+                    'body-heading',
+                    _summary_fingerprint('Body Heading', REGION_BODY),
+                    'approve_exclude'),
+                _review_decision(
+                    'placeholder',
+                    _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP),
+                    'approve_exclude'),
+            ],
+        }
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'blocked-candidates.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+            header_footer_xml = openxml['header_xml'] + openxml['footer_xml']
+
+        self.assertFalse(apply_report['applied'])
+        self.assertEqual(apply_report['summary']['header_paragraphs_written'], 0)
+        self.assertNotIn('Approved Header', header_footer_xml)
+        self.assertNotIn('Rejected Footer', header_footer_xml)
+        self.assertNotIn('Unsure Footer', header_footer_xml)
+        self.assertNotIn('Body Heading', header_footer_xml)
+        self.assertNotIn(IMAGE_PLACEHOLDER, header_footer_xml)
+        self.assertIn(
+            'header_footer_plan_not_safe_to_apply',
+            {warning['type'] for warning in apply_report['safety_warnings']})
+        self.assertFalse(
+            plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
+        self.assertIn(
+            'body_region_candidate_not_represented',
+            {warning['type'] for warning in plan['safety_warnings']})
+
     def test_local_corpus_smoke_summary_handles_multiple_samples(self):
         reports = [
             _local_corpus_docx_smoke_sample_report(
@@ -6686,6 +6885,74 @@ def _run_synthetic_filtered_docx_comparison(
         default_after_metrics=default_after['metrics'])
 
 
+def _run_synthetic_filtered_docx_with_header_footer_parts(
+        pdf_path,
+        review_decisions,
+        layout,
+        temp_root):
+    baseline_path = Path(temp_root) / 'baseline-body.docx'
+    filtered_body_path = Path(temp_root) / 'filtered-body.docx'
+    final_path = Path(temp_root) / 'filtered-body-with-header-footer.docx'
+    default_after_path = Path(temp_root) / 'default-after-body.docx'
+
+    baseline = _convert_synthetic_pdf_to_docx(pdf_path, baseline_path)
+    filtered_body = _convert_synthetic_pdf_to_docx(
+        pdf_path,
+        filtered_body_path,
+        review_decisions=review_decisions)
+    default_after = _convert_synthetic_pdf_to_docx(pdf_path, default_after_path)
+    filtering_report = _synthetic_filtering_report(layout, review_decisions)
+    plan = build_docx_header_footer_generation_plan(
+        layout.get('pages', []),
+        layout.get('header_footer_exclusion_dry_run', {}),
+        review_decisions,
+        enabled=True)
+
+    document = DocxDocument(str(filtered_body_path))
+    apply_report = docx_utils.apply_header_footer_text_plan(
+        document,
+        plan,
+        enabled=True)
+    document.save(str(final_path))
+
+    final_metrics = _read_docx_file_metrics(final_path)
+    openxml = _read_docx_openxml_parts(final_path)
+    default_openxml = _read_docx_openxml_parts(default_after_path)
+    default_metrics = dict(default_after['metrics'])
+    default_metrics['header_footer_xml'] = {
+        'has_header_text': bool(default_openxml['header_xml'].strip()),
+        'has_footer_text': bool(default_openxml['footer_xml'].strip()),
+    }
+    comparison = _synthetic_docx_comparison_report_from_metrics(
+        baseline['metrics'],
+        final_metrics,
+        expected_body_texts=_body_text_fragments(layout),
+        removed_texts=_removed_text_fragments(filtering_report),
+        baseline_path=str(baseline_path),
+        filtered_path=str(final_path),
+        temp_root=str(temp_root),
+        internal_filtered_parse_report=filtered_body['internal_filtered_parse_report'],
+        default_after_metrics=default_after['metrics'])
+
+    return {
+        'baseline_metrics': baseline['metrics'],
+        'filtered_body_metrics': filtered_body['metrics'],
+        'final_metrics': final_metrics,
+        'default_metrics': default_metrics,
+        'filtering_report': filtering_report,
+        'plan': plan,
+        'apply_report': apply_report,
+        'openxml': openxml,
+        'comparison': comparison,
+        'paths': {
+            'baseline_docx_path': str(baseline_path),
+            'filtered_body_docx_path': str(filtered_body_path),
+            'final_docx_path': str(final_path),
+            'default_after_docx_path': str(default_after_path),
+        },
+    }
+
+
 def _convert_synthetic_pdf_to_docx(
         pdf_path,
         docx_path,
@@ -6754,6 +7021,33 @@ def _read_docx_file_metrics(docx_path):
         'all_text': normalize_text(' '.join(paragraph_texts + table_texts)).lower(),
     })
     return metrics
+
+
+def _read_docx_openxml_parts(docx_path):
+    parts = {
+        'part_names': [],
+        'body_xml': '',
+        'header_xml': '',
+        'footer_xml': '',
+    }
+    path = Path(docx_path)
+    if not path.exists() or not zipfile.is_zipfile(str(path)):
+        return parts
+
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        parts['part_names'] = names
+        if 'word/document.xml' in names:
+            parts['body_xml'] = archive.read('word/document.xml').decode('utf-8')
+        parts['header_xml'] = ''.join(
+            archive.read(name).decode('utf-8')
+            for name in names
+            if name.startswith('word/header') and name.endswith('.xml'))
+        parts['footer_xml'] = ''.join(
+            archive.read(name).decode('utf-8')
+            for name in names
+            if name.startswith('word/footer') and name.endswith('.xml'))
+    return parts
 
 
 def _synthetic_docx_comparison_report_from_metrics(

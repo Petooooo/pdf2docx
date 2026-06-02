@@ -378,3 +378,49 @@ Safety interpretation:
 Phase 4B should stay internal and should decide how a private, opt-in DOCX
 generation experiment can consume this plan without changing default
 conversion behavior.
+
+## Phase 4B Internal Filtered Body + DOCX Header/Footer Experiment
+
+Phase 4B connects the Phase 3 internal filtered parse path and the Phase 4A
+DOCX header/footer text writer only inside committed synthetic tests. It is
+still not wired into normal conversion.
+
+Validated internal experiment:
+
+- A synthetic repeated header/footer/page-number PDF is converted through the
+  private filtered parse path.
+- Approved repeated header/footer/page-number candidates are removed from the
+  DOCX body.
+- A simple DOCX header/footer plan is built from the same explicit approvals.
+- The plan is explicitly applied to the temporary DOCX with
+  `apply_header_footer_text_plan()`.
+- `word/header*.xml` contains the approved header text.
+- `word/footer*.xml` contains the approved footer text and diagnostic
+  `<PAGE_NUMBER>` placeholder.
+- `word/document.xml` no longer contains the approved repeated header/footer
+  body residuals.
+- Body text signatures remain preserved.
+
+Additional synthetic body-protection coverage verifies that callout/table-like
+body text remains in the DOCX body and is not written to Word header/footer
+parts.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Simple text header/footer generation remains internal-only and explicitly
+  invoked by tests.
+- The internal DOCX writer now fail-closes when a plan contains safety
+  warnings or is not recommended for the internal experiment.
+- Rejected, unsure, layout-placeholder, and body-region candidates do not
+  appear in DOCX header/footer parts.
+- Page-number behavior remains placeholder-only; real Word field insertion is
+  still deferred.
+- Section-specific, first-page, odd/even, image/logo, complex layout, and
+  paragraph-continuation behavior remain future work.
+
+Phase 4C should remain internal. The next safe direction is to decide whether
+to broaden simple text header/footer output across more synthetic scenarios or
+to design the next private section/page-number experiment without exposing a
+public option.

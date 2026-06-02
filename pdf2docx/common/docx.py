@@ -104,6 +104,17 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
 
     plan_sections = list((plan or {}).get('sections', []) or [])
     warnings = []
+    plan_safety_warnings = list((plan or {}).get('safety_warnings', []) or [])
+    recommendation = (plan or {}).get('recommendation') or {}
+    if plan_safety_warnings:
+        warnings.append({
+            'type': 'header_footer_plan_has_safety_warnings',
+            'count': len(plan_safety_warnings),
+        })
+    if (
+            'safe_for_internal_docx_header_footer_experiment' in recommendation and
+            not recommendation.get('safe_for_internal_docx_header_footer_experiment')):
+        warnings.append({'type': 'header_footer_plan_not_safe_to_apply'})
     if not sections:
         warnings.append({'type': 'docx_document_has_no_sections'})
     if not plan_sections:
@@ -133,6 +144,7 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
             'page_number_field_generation': 'deferred_placeholder_only',
         },
         'safety_warnings': warnings,
+        'plan_safety_warnings': plan_safety_warnings,
     }
 
 

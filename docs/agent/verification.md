@@ -4534,3 +4534,132 @@ Phase 4B should remain internal and private. The next safe direction is to
 prototype how an explicitly enabled DOCX generation experiment can consume the
 header/footer plan while keeping default conversion and public CLI/API behavior
 unchanged.
+
+## Phase 4B
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 4B added committed synthetic coverage for an internal combined
+experiment: reviewed filtering removes approved repeated boundary content from
+the DOCX body, then the Phase 4A simple text plan writer places approved
+header/footer content into DOCX header/footer parts.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Synthetic fixtures used
+
+- `repeated_header_footer`
+- `callout_text_box_near_edges`
+
+### Header/footer output validation
+
+The repeated header/footer fixture generated a temporary filtered DOCX, then
+explicitly applied the simple DOCX header/footer plan.
+
+Result:
+
+- Header/footer plan generation succeeded.
+- Planned header text count: 1.
+- Planned footer text count: 1.
+- Planned page-number placeholder count: 1.
+- `word/header*.xml` contained the approved header text.
+- `word/footer*.xml` contained the approved footer text.
+- `word/footer*.xml` contained the diagnostic `<PAGE_NUMBER>` placeholder.
+- `word/document.xml` did not contain the approved repeated header/footer body
+  residuals.
+- Body residual header/footer pollution count: 0.
+- Body text signature was preserved.
+
+Page-number behavior remains placeholder-only. Real Word page-number field
+generation was deferred.
+
+### Protection and fail-closed behavior
+
+- Rejected and unsure candidates were not written to header/footer parts.
+- Layout-placeholder candidates were not written to header/footer parts.
+- Body-region candidates were not written to header/footer parts.
+- Unsafe header/footer plans now fail closed in
+  `apply_header_footer_text_plan()` instead of partially applying safe-looking
+  entries.
+- Callout/table-like body content remained in `word/document.xml` and did not
+  appear in DOCX header/footer XML.
+
+No Phase 4B local report was generated; generated DOCX files were temporary
+test outputs only.
+
+### Tests added
+
+- Combined internal filtered body + DOCX header/footer generation works on a
+  synthetic repeated header/footer fixture.
+- DOCX header XML contains approved header text.
+- DOCX footer XML contains approved footer text and page-number placeholder.
+- DOCX body XML no longer contains approved repeated header/footer residuals.
+- Body text signature is preserved.
+- Body callout/table-like content is preserved in the body.
+- Rejected, unsure, layout-placeholder, and body-region candidates do not
+  appear in DOCX header/footer parts.
+- Unsafe plans fail closed before writing header/footer parts.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "docx_header_footer or header_footer_text_plan or filtered_body_docx_header_footer_output"
+```
+
+Result: passed. 8 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 272 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 272 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4B code/test
+and documentation files were modified.
+
+### Phase 4B recommendation
+
+Phase 4C should remain internal and private. The next safe direction is either
+to broaden the simple text header/footer experiment across more committed
+synthetic scenarios or to design the next private section/page-number
+experiment while keeping default conversion and public CLI/API behavior closed.
