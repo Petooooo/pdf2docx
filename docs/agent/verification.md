@@ -4663,3 +4663,126 @@ Phase 4C should remain internal and private. The next safe direction is either
 to broaden the simple text header/footer experiment across more committed
 synthetic scenarios or to design the next private section/page-number
 experiment while keeping default conversion and public CLI/API behavior closed.
+
+## Phase 4C
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 4C added an internal DOCX header/footer policy layer for classifying
+review-approved header/footer candidates before any future section-aware DOCX
+writing. This remains internal, diagnostic, and disabled by default.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Policy types supported
+
+The internal plan now includes `header_footer_policy` with these conservative
+classifications:
+
+- `default`
+- `first_page`
+- `odd_even`
+- `section_scoped`
+- `unsupported`
+
+Classification results from committed synthetic tests:
+
+- Default repeated candidates classified as `default`.
+- First-page-different candidates classified as `first_page`.
+- Odd/even alternating candidates classified as `odd_even`.
+- Contiguous page-range candidates classified as `section_scoped`.
+- Ambiguous patterns classified as `unsupported`.
+
+Only `default` is safe for the current simple internal writer. `first_page`,
+`odd_even`, `section_scoped`, and `unsupported` policies fail closed before
+DOCX writing.
+
+### Protection and limitations
+
+- Rejected and unsure candidates do not enter semantic header/footer policies.
+- Raw `would_exclude` without approval does not enter the policy.
+- Body-region candidates are excluded and fail closed.
+- Layout-placeholder candidates are excluded from semantic policy.
+- Page-number behavior remains `placeholder_only`.
+- Robust Word page-number field generation was not implemented.
+- Actual first-page/odd-even temp DOCX writing was deferred.
+- Production section-specific mapping remains future work.
+- Images/logos, complex layout, and paragraph continuation remain future work.
+
+No Phase 4C local report was generated; no local DOCX artifacts were generated
+outside test temporary directories.
+
+### Tests added
+
+- Default repeated header/footer candidates produce a `default` policy.
+- First-page-different candidates produce a `first_page` policy.
+- Odd/even candidates produce an `odd_even` policy.
+- Contiguous page-range candidates produce a `section_scoped` policy.
+- Ambiguous candidates produce an `unsupported` policy.
+- Rejected, unsure, raw, body-region, and layout-placeholder candidates are
+  excluded from semantic policies.
+- Unsupported policies fail closed before DOCX writing.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "header_footer_policy or docx_header_footer_generation_plan or header_footer_text_plan or filtered_body_docx_header_footer_output"
+```
+
+Result: passed. 13 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 279 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 279 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4C code/test
+and documentation files were modified.
+
+### Phase 4C recommendation
+
+Phase 4D should remain internal and private. The next safe direction is to
+prototype first-page or odd/even DOCX writing only in temporary synthetic tests,
+or to improve section-aware diagnostics further before any production
+integration is considered.

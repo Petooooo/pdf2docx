@@ -106,6 +106,18 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
     warnings = []
     plan_safety_warnings = list((plan or {}).get('safety_warnings', []) or [])
     recommendation = (plan or {}).get('recommendation') or {}
+    header_footer_policy = (plan or {}).get('header_footer_policy') or {}
+    policy_type = header_footer_policy.get('policy_type')
+    if policy_type and policy_type != 'default':
+        warnings.append({
+            'type': 'header_footer_policy_not_supported_for_simple_writer',
+            'policy_type': policy_type,
+        })
+    if header_footer_policy.get('fail_closed'):
+        warnings.append({
+            'type': 'header_footer_policy_fail_closed',
+            'policy_type': policy_type or 'unknown',
+        })
     if plan_safety_warnings:
         warnings.append({
             'type': 'header_footer_plan_has_safety_warnings',

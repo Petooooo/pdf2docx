@@ -424,3 +424,42 @@ Phase 4C should remain internal. The next safe direction is to decide whether
 to broaden simple text header/footer output across more synthetic scenarios or
 to design the next private section/page-number experiment without exposing a
 public option.
+
+## Phase 4C Internal Header/Footer Policy Layer
+
+Phase 4C adds an internal policy classification layer on top of the
+JSON-serializable DOCX header/footer plan. The policy remains diagnostic and is
+not wired into normal conversion.
+
+Policy types represented:
+
+- `default`: the same approved header/footer/page-number pattern applies across
+  the document section.
+- `first_page`: the first page differs and the remaining pages share a stable
+  default pattern.
+- `odd_even`: odd and even pages have stable alternating patterns.
+- `section_scoped`: stable contiguous page ranges suggest future
+  section-specific header/footer mapping.
+- `unsupported`: the approved candidate pattern is ambiguous, incomplete, or
+  otherwise not safe to write.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Only the `default` policy is considered safe for the current simple internal
+  writer.
+- `first_page`, `odd_even`, and `section_scoped` policies are classified for
+  diagnostics but fail closed before DOCX writing.
+- Unsupported or ambiguous policies fail closed.
+- Rejected, unsure, raw `would_exclude`, review-only, body-region, and
+  layout-placeholder candidates do not enter semantic header/footer policies.
+- Page-number behavior remains placeholder-only; robust Word field insertion is
+  still deferred.
+- Actual first-page/odd-even DOCX writing was deferred.
+- Production section mapping remains future work.
+- Images/logos, complex layout, and paragraph continuation remain out of scope.
+
+Phase 4D should remain internal and should either prototype safe first-page or
+odd/even DOCX writing in temporary synthetic tests, or continue improving
+policy diagnostics before any production integration is considered.

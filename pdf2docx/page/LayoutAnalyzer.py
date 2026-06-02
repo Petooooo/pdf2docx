@@ -3383,6 +3383,8 @@ def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tupl
             'reason': reason,
             'affected_pages': list(candidate.get('affected_pages', []) or []),
             'regions': list(candidate.get('regions', []) or []),
+            'support_count': _readiness_int(candidate.get('support_count', 0)),
+            'page_count': _readiness_int(candidate.get('page_count', 0)),
         }
         if allowed:
             approved.append(item)
@@ -3503,6 +3505,8 @@ def _docx_header_footer_generation_plan_result(
         entries: list,
         unrepresentable: list,
         warnings: list) -> dict:
+    policy = _docx_header_footer_policy(entries)
+    warnings = list(warnings or []) + list(policy.get('warnings', []) or [])
     section_plan = _docx_header_footer_section_plan(entries)
     summary = {
         'enabled': bool(enabled),
@@ -3522,6 +3526,10 @@ def _docx_header_footer_generation_plan_result(
         'section_scope': 'document',
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
+        'header_footer_policy_type': policy.get('policy_type', 'unsupported'),
+        'header_footer_policy_safety_status': policy.get('safety_status', 'blocked'),
+        'header_footer_policy_fail_closed': bool(policy.get('fail_closed', True)),
+        'section_policy_count': len(policy.get('section_policies', []) or []),
         'public_cli_exposed': False,
         'production_default_enabled': False,
         'default_conversion_changed': False,
@@ -3533,6 +3541,7 @@ def _docx_header_footer_generation_plan_result(
         'summary': summary,
         'entries': entries,
         'sections': [section_plan],
+        'header_footer_policy': policy,
         'blocked_candidates': blocked,
         'unrepresentable_approved_candidates': unrepresentable,
         'safety_warnings': warnings,
@@ -3544,13 +3553,247 @@ def _docx_header_footer_generation_plan_result(
             'Paragraph continuation merging remains out of scope.',
         ],
         'recommendation': {
-            'safe_for_internal_docx_header_footer_experiment': bool(enabled and not warnings),
+            'safe_for_internal_docx_header_footer_experiment': bool(
+                enabled and not warnings and not policy.get('fail_closed', True)),
             'reason': (
                 'Approved semantic header/footer candidates can be represented as simple DOCX text plans.'
-                if enabled and not warnings else
+                if enabled and not warnings and not policy.get('fail_closed', True) else
                 'Keep DOCX header/footer generation disabled until unrepresentable approved candidates are resolved.'
             ),
         },
+    }
+
+
+def _docx_header_footer_policy(entries: list) -> dict:
+    entries = list(entries or [])
+    page_count = _docx_header_footer_policy_page_count(entries)
+    base = {
+        'policy_type': 'unsupported',
+        'section_index': 0,
+        'section_scope': 'document',
+        'default_header_text': '',
+        'default_footer_text': '',
+        'first_page_header_text': '',
+        'first_page_footer_text': '',
+        'odd_header_text': '',
+        'odd_footer_text': '',
+        'even_header_text': '',
+        'even_footer_text': '',
+        'page_number_behavior': 'placeholder_only',
+        'section_policies': [],
+        'warnings': [],
+        'unsupported_features': [
+            'word_page_number_field_generation',
+            'image_or_logo_header_footer_migration',
+            'paragraph_continuation_merge',
+        ],
+        'needs_section_mapping': False,
+        'fail_closed': True,
+        'safety_status': 'blocked',
+    }
+    if not entries:
+        base['warnings'].append({'type': 'no_representable_header_footer_entries'})
+        return base
+    if page_count <= 0:
+        base['warnings'].append({'type': 'missing_page_scope_for_header_footer_policy'})
+        return base
+
+    page_signatures = _docx_header_footer_page_signatures(entries, page_count)
+    missing_pages = [
+        index for index, signature in enumerate(page_signatures)
+        if _docx_header_footer_signature_empty(signature)
+    ]
+    if missing_pages:
+        base['warnings'].append({
+            'type': 'incomplete_header_footer_page_coverage',
+            'page_indices': missing_pages,
+        })
+        return base
+
+    first_signature = page_signatures[0]
+    if all(signature == first_signature for signature in page_signatures):
+        base.update(_docx_header_footer_default_policy(first_signature))
+        return base
+
+    if page_count > 1:
+        remaining = page_signatures[1:]
+        if remaining and all(signature == remaining[0] for signature in remaining):
+            base.update(_docx_header_footer_first_page_policy(
+                first_signature,
+                remaining[0]))
+            return base
+
+    odd_signatures = page_signatures[0::2]
+    even_signatures = page_signatures[1::2]
+    if (
+            odd_signatures and even_signatures and
+            all(signature == odd_signatures[0] for signature in odd_signatures) and
+            all(signature == even_signatures[0] for signature in even_signatures) and
+            odd_signatures[0] != even_signatures[0]):
+        base.update(_docx_header_footer_odd_even_policy(
+            odd_signatures[0],
+            even_signatures[0]))
+        return base
+
+    ranges = _docx_header_footer_signature_ranges(page_signatures)
+    if len(ranges) > 1 and all(item['page_count'] > 1 for item in ranges):
+        base.update(_docx_header_footer_section_scoped_policy(ranges))
+        return base
+
+    base['warnings'].append({
+        'type': 'ambiguous_header_footer_policy',
+        'message': (
+            'Approved candidates do not form stable default, first-page, '
+            'odd/even, or contiguous section-scoped groups.'),
+    })
+    base['unsupported_features'].append('ambiguous_header_footer_candidate_pattern')
+    return base
+
+
+def _docx_header_footer_policy_page_count(entries: list) -> int:
+    page_count = 0
+    for entry in entries or []:
+        page_count = max(page_count, _readiness_int(entry.get('page_count', 0)))
+        affected = [_readiness_int(page) for page in entry.get('affected_pages', []) or []]
+        if affected:
+            page_count = max(page_count, max(affected) + 1)
+    return page_count
+
+
+def _docx_header_footer_page_signatures(entries: list, page_count: int) -> list:
+    signatures = [
+        {'header': [], 'footer': [], 'page_number': []}
+        for _ in range(page_count)
+    ]
+    for entry in entries or []:
+        role = entry.get('role')
+        text = normalize_text(entry.get('text', ''))
+        if not text:
+            continue
+        key = (
+            'header' if role == ROLE_HEADER else
+            'footer' if role == ROLE_FOOTER else
+            'page_number' if role == ROLE_PAGE_NUMBER else
+            '')
+        if not key:
+            continue
+        for page_index in entry.get('affected_pages', []) or []:
+            page_index = _readiness_int(page_index)
+            if 0 <= page_index < page_count and text not in signatures[page_index][key]:
+                signatures[page_index][key].append(text)
+
+    return [_docx_header_footer_freeze_signature(signature) for signature in signatures]
+
+
+def _docx_header_footer_freeze_signature(signature: dict) -> dict:
+    return {
+        'header': tuple(signature.get('header', []) or []),
+        'footer': tuple(signature.get('footer', []) or []),
+        'page_number': tuple(signature.get('page_number', []) or []),
+    }
+
+
+def _docx_header_footer_signature_empty(signature: dict) -> bool:
+    return not any(signature.get(key) for key in ('header', 'footer', 'page_number'))
+
+
+def _docx_header_footer_signature_text(signature: dict, key: str) -> str:
+    return ' | '.join(signature.get(key, []) or [])
+
+
+def _docx_header_footer_default_policy(signature: dict) -> dict:
+    return {
+        'policy_type': 'default',
+        'default_header_text': _docx_header_footer_signature_text(signature, 'header'),
+        'default_footer_text': _docx_header_footer_signature_text(signature, 'footer'),
+        'page_number_behavior': 'placeholder_only',
+        'warnings': [],
+        'unsupported_features': [
+            'word_page_number_field_generation',
+            'image_or_logo_header_footer_migration',
+            'paragraph_continuation_merge',
+        ],
+        'fail_closed': False,
+        'safety_status': 'safe_for_simple_default_writer',
+    }
+
+
+def _docx_header_footer_first_page_policy(first_signature: dict, default_signature: dict) -> dict:
+    return {
+        'policy_type': 'first_page',
+        'default_header_text': _docx_header_footer_signature_text(default_signature, 'header'),
+        'default_footer_text': _docx_header_footer_signature_text(default_signature, 'footer'),
+        'first_page_header_text': _docx_header_footer_signature_text(first_signature, 'header'),
+        'first_page_footer_text': _docx_header_footer_signature_text(first_signature, 'footer'),
+        'page_number_behavior': 'placeholder_only',
+        'warnings': [{'type': 'first_page_docx_header_footer_writing_deferred'}],
+        'unsupported_features': [
+            'first_page_docx_header_footer_writing',
+            'word_page_number_field_generation',
+            'image_or_logo_header_footer_migration',
+            'paragraph_continuation_merge',
+        ],
+        'fail_closed': True,
+        'safety_status': 'diagnostic_only',
+    }
+
+
+def _docx_header_footer_odd_even_policy(odd_signature: dict, even_signature: dict) -> dict:
+    return {
+        'policy_type': 'odd_even',
+        'odd_header_text': _docx_header_footer_signature_text(odd_signature, 'header'),
+        'odd_footer_text': _docx_header_footer_signature_text(odd_signature, 'footer'),
+        'even_header_text': _docx_header_footer_signature_text(even_signature, 'header'),
+        'even_footer_text': _docx_header_footer_signature_text(even_signature, 'footer'),
+        'page_number_behavior': 'placeholder_only',
+        'warnings': [{'type': 'odd_even_docx_header_footer_writing_deferred'}],
+        'unsupported_features': [
+            'odd_even_docx_header_footer_writing',
+            'word_page_number_field_generation',
+            'image_or_logo_header_footer_migration',
+            'paragraph_continuation_merge',
+        ],
+        'fail_closed': True,
+        'safety_status': 'diagnostic_only',
+    }
+
+
+def _docx_header_footer_signature_ranges(signatures: list) -> list:
+    ranges = []
+    start = 0
+    while start < len(signatures):
+        signature = signatures[start]
+        end = start
+        while end + 1 < len(signatures) and signatures[end + 1] == signature:
+            end += 1
+        ranges.append({
+            'section_scope': 'page_range',
+            'start_page_index': start,
+            'end_page_index': end,
+            'page_count': end - start + 1,
+            'header_text': _docx_header_footer_signature_text(signature, 'header'),
+            'footer_text': _docx_header_footer_signature_text(signature, 'footer'),
+            'page_number_text': _docx_header_footer_signature_text(signature, 'page_number'),
+        })
+        start = end + 1
+    return ranges
+
+
+def _docx_header_footer_section_scoped_policy(ranges: list) -> dict:
+    return {
+        'policy_type': 'section_scoped',
+        'section_policies': ranges,
+        'page_number_behavior': 'placeholder_only',
+        'warnings': [{'type': 'section_scoped_docx_header_footer_mapping_deferred'}],
+        'unsupported_features': [
+            'production_section_mapping',
+            'word_page_number_field_generation',
+            'image_or_logo_header_footer_migration',
+            'paragraph_continuation_merge',
+        ],
+        'needs_section_mapping': True,
+        'fail_closed': True,
+        'safety_status': 'diagnostic_only',
     }
 
 

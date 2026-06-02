@@ -4955,6 +4955,231 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertFalse(decoded['summary']['public_cli_exposed'])
             self.assertFalse(decoded['summary']['production_default_enabled'])
 
+    def test_docx_header_footer_policy_classifies_default_repeated_candidates(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-default-policy.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True)
+            policy = plan['header_footer_policy']
+
+            self.assertEqual(policy['policy_type'], 'default')
+            self.assertEqual(policy['safety_status'], 'safe_for_simple_default_writer')
+            self.assertFalse(policy['fail_closed'])
+            self.assertEqual(policy['page_number_behavior'], 'placeholder_only')
+            self.assertEqual(plan['summary']['header_footer_policy_type'], 'default')
+            self.assertTrue(
+                plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
+
+    def test_docx_header_footer_policy_classifies_first_page_variation(self):
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic First Page Header',
+                'Synthetic Default Header',
+                'Synthetic Default Header',
+                'Synthetic Default Header',
+            ])
+        policy = plan['header_footer_policy']
+
+        self.assertEqual(policy['policy_type'], 'first_page')
+        self.assertEqual(policy['first_page_header_text'], 'Synthetic First Page Header')
+        self.assertEqual(policy['default_header_text'], 'Synthetic Default Header')
+        self.assertTrue(policy['fail_closed'])
+        self.assertIn(
+            'first_page_docx_header_footer_writing_deferred',
+            {warning['type'] for warning in plan['safety_warnings']})
+
+    def test_docx_header_footer_policy_classifies_odd_even_variation(self):
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic Odd Header',
+                'Synthetic Even Header',
+                'Synthetic Odd Header',
+                'Synthetic Even Header',
+                'Synthetic Odd Header',
+            ])
+        policy = plan['header_footer_policy']
+
+        self.assertEqual(policy['policy_type'], 'odd_even')
+        self.assertEqual(policy['odd_header_text'], 'Synthetic Odd Header')
+        self.assertEqual(policy['even_header_text'], 'Synthetic Even Header')
+        self.assertTrue(policy['fail_closed'])
+        self.assertIn(
+            'odd_even_docx_header_footer_writing_deferred',
+            {warning['type'] for warning in plan['safety_warnings']})
+
+    def test_docx_header_footer_policy_classifies_contiguous_section_ranges(self):
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic Section A Header',
+                'Synthetic Section A Header',
+                'Synthetic Section B Header',
+                'Synthetic Section B Header',
+            ])
+        policy = plan['header_footer_policy']
+
+        self.assertEqual(policy['policy_type'], 'section_scoped')
+        self.assertTrue(policy['needs_section_mapping'])
+        self.assertEqual(len(policy['section_policies']), 2)
+        self.assertEqual(plan['summary']['section_policy_count'], 2)
+        self.assertIn(
+            'section_scoped_docx_header_footer_mapping_deferred',
+            {warning['type'] for warning in plan['safety_warnings']})
+
+    def test_docx_header_footer_policy_classifies_ambiguous_as_unsupported(self):
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic Header A',
+                'Synthetic Header B',
+                'Synthetic Header A',
+                'Synthetic Header C',
+            ])
+        policy = plan['header_footer_policy']
+
+        self.assertEqual(policy['policy_type'], 'unsupported')
+        self.assertEqual(policy['safety_status'], 'blocked')
+        self.assertTrue(policy['fail_closed'])
+        self.assertIn(
+            'ambiguous_header_footer_policy',
+            {warning['type'] for warning in plan['safety_warnings']})
+
+    def test_docx_header_footer_policy_excludes_unapproved_and_protected_candidates(self):
+        body_fingerprint = _summary_fingerprint('Body Heading', REGION_BODY)
+        placeholder_fingerprint = _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP)
+        page_summaries = [{
+            'page_index': 0,
+            'text_blocks': [
+                _mapping_summary_block(
+                    0,
+                    _summary_fingerprint('Raw Header', REGION_TOP),
+                    REGION_TOP,
+                    'Raw Header'),
+                _mapping_summary_block(
+                    1,
+                    _summary_fingerprint('Rejected Header', REGION_TOP),
+                    REGION_TOP,
+                    'Rejected Header'),
+                _mapping_summary_block(
+                    2,
+                    _summary_fingerprint('Unsure Header', REGION_TOP),
+                    REGION_TOP,
+                    'Unsure Header'),
+                _mapping_summary_block(3, body_fingerprint, REGION_BODY, 'Body Heading'),
+                _mapping_summary_block(4, placeholder_fingerprint, REGION_TOP, IMAGE_PLACEHOLDER),
+            ],
+        }]
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'raw-header',
+                    _summary_fingerprint('Raw Header', REGION_TOP),
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'rejected-header',
+                    _summary_fingerprint('Rejected Header', REGION_TOP),
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'unsure-header',
+                    _summary_fingerprint('Unsure Header', REGION_TOP),
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'body-heading',
+                    body_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BODY]),
+                _dry_run_candidate(
+                    'placeholder',
+                    placeholder_fingerprint,
+                    ROLE_LAYOUT_PLACEHOLDER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision(
+                    'rejected-header',
+                    _summary_fingerprint('Rejected Header', REGION_TOP),
+                    'reject_exclude'),
+                _review_decision(
+                    'unsure-header',
+                    _summary_fingerprint('Unsure Header', REGION_TOP),
+                    'unsure'),
+                _review_decision('body-heading', body_fingerprint, 'approve_exclude'),
+                _review_decision('placeholder', placeholder_fingerprint, 'approve_exclude'),
+            ],
+        }
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True)
+
+        self.assertEqual(plan['summary']['representable_entry_count'], 0)
+        self.assertEqual(plan['header_footer_policy']['policy_type'], 'unsupported')
+        self.assertTrue(plan['header_footer_policy']['fail_closed'])
+        self.assertTrue(all(
+            candidate['manual_decision'] != 'approve_exclude'
+            for candidate in plan['blocked_candidates']
+            if candidate['candidate_id'] in {
+                'raw-header',
+                'rejected-header',
+                'unsure-header',
+            }))
+        self.assertTrue(any(
+            candidate['candidate_id'] == 'placeholder' and
+            candidate['reason'] == 'layout_placeholder_not_filterable'
+            for candidate in plan['blocked_candidates']))
+        self.assertIn(
+            'body_region_candidate_not_represented',
+            {warning['type'] for warning in plan['safety_warnings']})
+
+    def test_docx_header_footer_policy_fails_closed_before_unsupported_writing(self):
+        _require_docx_header_footer_support(self)
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic First Page Header',
+                'Synthetic Default Header',
+                'Synthetic Default Header',
+            ])
+        document = DocxDocument()
+
+        report = docx_utils.apply_header_footer_text_plan(
+            document,
+            plan,
+            enabled=True)
+
+        self.assertFalse(report['applied'])
+        self.assertEqual(report['summary']['header_paragraphs_written'], 0)
+        self.assertIn(
+            'header_footer_policy_not_supported_for_simple_writer',
+            {warning['type'] for warning in report['safety_warnings']})
+        self.assertIn(
+            'header_footer_policy_fail_closed',
+            {warning['type'] for warning in report['safety_warnings']})
+
     def test_docx_header_footer_generation_plan_uses_only_explicit_approvals(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -6883,6 +7108,68 @@ def _run_synthetic_filtered_docx_comparison(
         temp_root=str(temp_root),
         internal_filtered_parse_report=filtered['internal_filtered_parse_report'],
         default_after_metrics=default_after['metrics'])
+
+
+def _docx_header_footer_policy_plan_for_page_texts(headers=None, footers=None):
+    headers = list(headers or [])
+    footers = list(footers or [])
+    page_count = max(len(headers), len(footers))
+    page_summaries = []
+    candidate_groups = {}
+
+    for page_index in range(page_count):
+        blocks = []
+        block_index = 0
+        if page_index < len(headers) and headers[page_index]:
+            text = headers[page_index]
+            fingerprint = _summary_fingerprint(text, REGION_TOP)
+            blocks.append(_mapping_summary_block(
+                block_index,
+                fingerprint,
+                REGION_TOP,
+                text))
+            candidate_groups.setdefault(
+                (ROLE_HEADER, REGION_TOP, text, fingerprint),
+                []).append(page_index)
+            block_index += 1
+        if page_index < len(footers) and footers[page_index]:
+            text = footers[page_index]
+            fingerprint = _summary_fingerprint(text, REGION_BOTTOM)
+            blocks.append(_mapping_summary_block(
+                block_index,
+                fingerprint,
+                REGION_BOTTOM,
+                text))
+            candidate_groups.setdefault(
+                (ROLE_FOOTER, REGION_BOTTOM, text, fingerprint),
+                []).append(page_index)
+        page_summaries.append({
+            'page_index': page_index,
+            'text_blocks': blocks,
+        })
+
+    candidates = []
+    decisions = []
+    for index, ((role, region, text, fingerprint), pages) in enumerate(
+            sorted(candidate_groups.items(), key=lambda item: item[0])):
+        candidate_id = f'policy-{role}-{index}'
+        candidates.append(_dry_run_candidate(
+            candidate_id,
+            fingerprint,
+            role,
+            ACTION_WOULD_EXCLUDE,
+            pages,
+            [region]))
+        decisions.append(_review_decision(
+            candidate_id,
+            fingerprint,
+            'approve_exclude'))
+
+    return build_docx_header_footer_generation_plan(
+        page_summaries,
+        {'candidates': candidates},
+        {'decisions': decisions},
+        enabled=True)
 
 
 def _run_synthetic_filtered_docx_with_header_footer_parts(
