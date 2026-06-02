@@ -463,3 +463,44 @@ Safety interpretation:
 Phase 4D should remain internal and should either prototype safe first-page or
 odd/even DOCX writing in temporary synthetic tests, or continue improving
 policy diagnostics before any production integration is considered.
+
+## Phase 4D Default-Policy Migration Smoke
+
+Phase 4D adds an internal single-section default-policy migration smoke test.
+It exercises the closest current approximation of the future reviewed
+header/footer feature while keeping all behavior private and non-default.
+
+Validated internal smoke path:
+
+- A synthetic repeated header/footer/page-number PDF is converted through the
+  private filtered parse path.
+- Explicitly approved default header/footer/page-number candidates are removed
+  from the DOCX body.
+- The generated plan is required to classify as `default`.
+- The default plan is applied to temporary DOCX header/footer parts with the
+  internal writer.
+- DOCX body XML no longer contains approved header/footer residuals.
+- DOCX header XML contains the approved header text.
+- DOCX footer XML contains the approved footer text.
+- DOCX footer XML contains the diagnostic `<PAGE_NUMBER>` placeholder.
+- Body text signatures remain preserved.
+- Callout/table-like body text remains in the body and is not moved to
+  header/footer parts.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Only `default` policy is allowed for the internal writer.
+- `first_page`, `odd_even`, `section_scoped`, and `unsupported` policies remain
+  fail-closed before DOCX writing.
+- Page-number behavior remains placeholder-only; robust Word field insertion is
+  still deferred.
+- Body text signature preservation remains mandatory.
+- Body text loss, table text loss, and true residual header/footer pollution
+  remain fail-closed conditions.
+- This is still not production/default integration.
+
+Phase 4E should remain internal. The next safe direction is to prototype
+first-page or odd/even DOCX writing only in temporary synthetic tests, or to
+keep improving policy diagnostics before production integration is considered.

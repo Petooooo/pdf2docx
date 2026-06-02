@@ -5507,6 +5507,129 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'body_region_candidate_not_represented',
             {warning['type'] for warning in plan['safety_warnings']})
 
+    def test_internal_default_policy_header_footer_migration_smoke_passes(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-migration-smoke.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp)
+            summary = smoke['summary']
+
+            self.assertTrue(summary['smoke_passed'])
+            self.assertEqual(summary['policy_type'], 'default')
+            self.assertTrue(summary['docx_header_xml_contains_approved_header'])
+            self.assertTrue(summary['docx_footer_xml_contains_approved_footer'])
+            self.assertTrue(summary['docx_footer_xml_contains_page_placeholder'])
+            self.assertTrue(summary['approved_residuals_absent_from_body_xml'])
+            self.assertEqual(summary['body_residual_header_footer_pollution_count'], 0)
+            self.assertTrue(summary['body_text_signature_preserved'])
+            self.assertEqual(summary['body_text_loss_warning_count'], 0)
+            self.assertEqual(summary['table_text_loss_warning_count'], 0)
+            self.assertEqual(summary['page_number_behavior'], 'placeholder_only')
+            self.assertEqual(summary['page_number_field_generation'], 'deferred_placeholder_only')
+            self.assertFalse(smoke['safety_warnings'])
+            self.assertIn(
+                'synthetic report header',
+                smoke['default_metrics']['all_text'])
+            self.assertFalse(smoke['default_metrics']['header_footer_xml']['has_header_text'])
+
+    def test_internal_default_policy_migration_preserves_callout_body_content(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-callout-smoke.pdf'
+            _write_synthetic_pdf(pdf_path, 'callout_text_box_near_edges')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp)
+            body_xml = smoke['openxml']['body_xml']
+            header_footer_xml = (
+                smoke['openxml']['header_xml'] +
+                smoke['openxml']['footer_xml'])
+
+            self.assertTrue(smoke['summary']['smoke_passed'])
+            self.assertIn('Callout panel body content', body_xml)
+            self.assertIn('Table like callout row alpha', body_xml)
+            self.assertNotIn('Callout panel body content', header_footer_xml)
+            self.assertNotIn('Table like callout row alpha', header_footer_xml)
+            self.assertEqual(_removed_region_count(smoke['filtering_report'], REGION_BODY), 0)
+
+    def test_internal_default_policy_migration_blocks_non_default_policies(self):
+        _require_docx_header_footer_support(self)
+        cases = [
+            (
+                'first_page',
+                _docx_header_footer_policy_plan_for_page_texts(headers=[
+                    'Synthetic First Page Header',
+                    'Synthetic Default Header',
+                    'Synthetic Default Header',
+                ])),
+            (
+                'odd_even',
+                _docx_header_footer_policy_plan_for_page_texts(headers=[
+                    'Synthetic Odd Header',
+                    'Synthetic Even Header',
+                    'Synthetic Odd Header',
+                    'Synthetic Even Header',
+                ])),
+            (
+                'section_scoped',
+                _docx_header_footer_policy_plan_for_page_texts(headers=[
+                    'Synthetic Section A Header',
+                    'Synthetic Section A Header',
+                    'Synthetic Section B Header',
+                    'Synthetic Section B Header',
+                ])),
+            (
+                'unsupported',
+                _docx_header_footer_policy_plan_for_page_texts(headers=[
+                    'Synthetic Header A',
+                    'Synthetic Header B',
+                    'Synthetic Header A',
+                    'Synthetic Header C',
+                ])),
+        ]
+
+        for expected_policy, plan in cases:
+            with self.subTest(expected_policy=expected_policy):
+                document = DocxDocument()
+                report = docx_utils.apply_header_footer_text_plan(
+                    document,
+                    plan,
+                    enabled=True)
+                warning_types = {
+                    warning['type']
+                    for warning in report['safety_warnings']
+                }
+
+                self.assertEqual(
+                    plan['header_footer_policy']['policy_type'],
+                    expected_policy)
+                self.assertFalse(report['applied'])
+                self.assertEqual(report['summary']['header_paragraphs_written'], 0)
+                self.assertEqual(report['summary']['footer_paragraphs_written'], 0)
+                self.assertIn(
+                    'header_footer_policy_not_supported_for_simple_writer',
+                    warning_types)
+                self.assertIn(
+                    'header_footer_policy_fail_closed',
+                    warning_types)
+
     def test_local_corpus_smoke_summary_handles_multiple_samples(self):
         reports = [
             _local_corpus_docx_smoke_sample_report(
@@ -7238,6 +7361,99 @@ def _run_synthetic_filtered_docx_with_header_footer_parts(
             'default_after_docx_path': str(default_after_path),
         },
     }
+
+
+def _run_synthetic_default_policy_header_footer_migration_smoke(
+        pdf_path,
+        review_decisions,
+        layout,
+        temp_root):
+    report = _run_synthetic_filtered_docx_with_header_footer_parts(
+        pdf_path,
+        review_decisions,
+        layout,
+        temp_root)
+    plan = report['plan']
+    policy = plan.get('header_footer_policy') or {}
+    comparison_summary = report['comparison']['summary']
+    openxml = report['openxml']
+    header_xml = openxml['header_xml']
+    footer_xml = openxml['footer_xml']
+    body_xml = openxml['body_xml']
+
+    header_texts = [
+        text for text in (policy.get('default_header_text') or '').split(' | ')
+        if text
+    ]
+    footer_texts = [
+        text for text in (policy.get('default_footer_text') or '').split(' | ')
+        if text
+    ]
+    removed_texts = _removed_text_fragments(report['filtering_report'])
+    approved_residuals_in_body = [
+        text for text in removed_texts
+        if text and text in normalize_text(body_xml).lower()
+    ]
+    header_present = all(text in header_xml for text in header_texts)
+    footer_present = all(text in footer_xml for text in footer_texts)
+    page_placeholder_present = '&lt;PAGE_NUMBER&gt;' in footer_xml
+
+    safety_warnings = []
+    if policy.get('policy_type') != 'default':
+        safety_warnings.append({
+            'type': 'non_default_policy_not_allowed_for_phase4d_smoke',
+            'policy_type': policy.get('policy_type', ''),
+        })
+    if not report['apply_report'].get('applied'):
+        safety_warnings.append({'type': 'docx_header_footer_plan_not_applied'})
+    if not header_present:
+        safety_warnings.append({'type': 'approved_header_text_missing_from_docx_header'})
+    if not footer_present:
+        safety_warnings.append({'type': 'approved_footer_text_missing_from_docx_footer'})
+    if not page_placeholder_present:
+        safety_warnings.append({'type': 'page_number_placeholder_missing_from_docx_footer'})
+    if approved_residuals_in_body:
+        safety_warnings.append({
+            'type': 'approved_header_footer_residuals_remaining_in_body_xml',
+            'count': len(approved_residuals_in_body),
+        })
+    for warning_type, count_key in (
+            ('body_text_loss', 'body_text_loss_warning_count'),
+            ('table_text_loss', 'table_text_loss_warning_count'),
+            ('true_residual_header_footer_pollution', 'true_residual_header_footer_pollution_count')):
+        count = int(comparison_summary.get(count_key, 0) or 0)
+        if count:
+            safety_warnings.append({'type': warning_type, 'count': count})
+
+    summary = {
+        'policy_type': policy.get('policy_type', ''),
+        'policy_safety_status': policy.get('safety_status', ''),
+        'docx_header_xml_contains_approved_header': header_present,
+        'docx_footer_xml_contains_approved_footer': footer_present,
+        'docx_footer_xml_contains_page_placeholder': page_placeholder_present,
+        'approved_residuals_absent_from_body_xml': not approved_residuals_in_body,
+        'body_residual_header_footer_pollution_count': int(
+            comparison_summary.get('true_residual_header_footer_pollution_count', 0)),
+        'body_text_signature_preserved': bool(
+            comparison_summary.get('body_text_signature_preserved')),
+        'body_text_loss_warning_count': int(
+            comparison_summary.get('body_text_loss_warning_count', 0)),
+        'table_text_loss_warning_count': int(
+            comparison_summary.get('table_text_loss_warning_count', 0)),
+        'page_number_behavior': policy.get('page_number_behavior', ''),
+        'page_number_field_generation': (
+            report['apply_report']['summary'].get('page_number_field_generation', '')),
+        'generated_docx_artifacts_temp_only': bool(
+            comparison_summary.get('generated_docx_artifacts_temp_only')),
+        'smoke_passed': not safety_warnings,
+    }
+    result = dict(report)
+    result.update({
+        'summary': summary,
+        'safety_warnings': safety_warnings,
+        'approved_residuals_in_body_xml': approved_residuals_in_body,
+    })
+    return result
 
 
 def _convert_synthetic_pdf_to_docx(

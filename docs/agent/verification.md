@@ -4786,3 +4786,131 @@ Phase 4D should remain internal and private. The next safe direction is to
 prototype first-page or odd/even DOCX writing only in temporary synthetic tests,
 or to improve section-aware diagnostics further before any production
 integration is considered.
+
+## Phase 4D
+
+Date: 2026-06-03
+
+### Scope
+
+Phase 4D added an internal single-section `default` policy migration smoke
+helper and tests. This remains test-only and does not wire header/footer
+generation into normal conversion.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Synthetic fixtures used
+
+- `repeated_header_footer`
+- `callout_text_box_near_edges`
+
+### Default policy migration smoke result
+
+The smoke helper generated temporary baseline/default-after/filtered DOCX files
+from the repeated-header synthetic fixture, applied only explicit review
+approvals, required the plan policy to be `default`, and then wrote the plan to
+DOCX header/footer parts.
+
+Result:
+
+- Default policy migration smoke passed.
+- DOCX body XML did not contain approved header/footer residuals.
+- DOCX header XML contained the approved header text.
+- DOCX footer XML contained the approved footer text.
+- DOCX footer XML contained the diagnostic `<PAGE_NUMBER>` placeholder.
+- Body residual header/footer pollution count: 0.
+- Body text signature was preserved.
+- Body text loss warning count: 0.
+- Table text loss warning count: 0.
+- Page-number behavior: `placeholder_only`.
+- Page-number field generation: deferred placeholder only.
+
+The callout/body-protection smoke confirmed that callout/table-like body text
+remained in DOCX body XML and did not appear in DOCX header/footer XML.
+
+### Blocked non-default policies
+
+The writer remained fail-closed for:
+
+- `first_page`
+- `odd_even`
+- `section_scoped`
+- `unsupported`
+
+Each non-default policy produced fail-closed warnings before DOCX writing. No
+header/footer paragraphs were written for those policies.
+
+No Phase 4D local report was generated; generated DOCX/PDF files were temporary
+test outputs only.
+
+### Tests added
+
+- Default-policy migration smoke passes for a synthetic repeated
+  header/footer/page-number fixture.
+- Default-policy migration preserves callout/table-like body content.
+- First-page policy remains blocked before DOCX writing.
+- Odd/even policy remains blocked before DOCX writing.
+- Section-scoped policy remains blocked before DOCX writing.
+- Unsupported policy remains blocked before DOCX writing.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "default_policy_header_footer_migration_smoke or default_policy_migration or header_footer_policy or filtered_body_docx_header_footer_output"
+```
+
+Result: passed. 11 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 282 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 282 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4D test and
+documentation files were modified.
+
+### Phase 4D recommendation
+
+Phase 4E should remain internal and private. The next safe direction is to
+prototype first-page or odd/even DOCX writing only in temporary synthetic tests,
+or continue improving section-aware policy diagnostics before any production
+integration is considered.
