@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import zipfile
 import unittest
@@ -5815,6 +5816,79 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'generated_docx_path_not_local_only',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_docx_body_signature_mismatch_classifies_serialization_mismatch(self):
+        report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('alpha beta gamma'),
+            _body_signature_metric('alpha beta gamma'),
+            strict_missing_fragments=['alpha   beta gamma'],
+            removed_texts=[])
+
+        self.assertFalse(report['summary']['strict_exact_fragment_gate_passed'])
+        self.assertTrue(report['summary']['normalized_body_signature_gate_passed'])
+        self.assertEqual(
+            report['summary']['final_classification'],
+            'docx_serialization_mismatch')
+        self.assertFalse(report['safety_warnings'])
+
+    def test_docx_body_signature_mismatch_explains_approved_migration(self):
+        report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha approved report footer page 1'),
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=['approved report footer', 'page 1'],
+            removed_texts=['approved report footer', 'page 1'],
+            header_footer_xml='approved report footer page 1')
+
+        self.assertTrue(report['summary']['normalized_body_signature_gate_passed'])
+        self.assertEqual(report['summary']['true_body_text_loss_count'], 0)
+        self.assertGreater(
+            report['summary']['approved_migration_explained_missing_text_count'],
+            0)
+        self.assertEqual(
+            report['summary']['final_classification'],
+            'approved_header_footer_removed_from_body')
+
+    def test_docx_body_signature_mismatch_fail_closes_true_body_loss(self):
+        report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha lost body sentence'),
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=['lost body sentence'],
+            removed_texts=['approved footer'])
+
+        self.assertFalse(report['summary']['normalized_body_signature_gate_passed'])
+        self.assertGreater(report['summary']['true_body_text_loss_count'], 0)
+        self.assertEqual(report['summary']['final_classification'], 'true_body_text_loss')
+        self.assertIn(
+            'true_body_text_loss',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_docx_body_signature_mismatch_fail_closes_table_callout_list_loss(self):
+        report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body table row alpha callout panel item one'),
+            _body_signature_metric('body table row alpha'),
+            strict_missing_fragments=['callout panel item one'],
+            removed_texts=[],
+            table_watch_texts=['body table row alpha'],
+            callout_watch_texts=['callout panel'],
+            list_watch_texts=['item one'])
+
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+        self.assertIn('callout_text_loss', warning_types)
+        self.assertIn('list_text_loss', warning_types)
+        self.assertEqual(report['summary']['table_text_loss_count'], 0)
+        self.assertEqual(report['summary']['final_classification'], 'true_body_text_loss')
+
+    def test_docx_body_signature_mismatch_records_missing_evidence(self):
+        report = _docx_body_signature_mismatch_investigation_report(
+            {},
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=[],
+            removed_texts=[])
+
+        self.assertEqual(report['summary']['final_classification'], 'insufficient_evidence')
+        self.assertIn(
+            'missing_docx_body_signature_evidence',
+            {warning['type'] for warning in report['safety_warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -8128,6 +8202,254 @@ def _local_corpus_default_policy_migration_summary_report(sample_reports):
                 if not blocked else
                 'Resolve blocked local default-policy migration smoke samples first.'),
         },
+    }
+
+
+def _docx_body_signature_mismatch_investigation_report(
+        baseline_docx_metrics,
+        migrated_docx_metrics,
+        strict_missing_fragments=None,
+        removed_texts=None,
+        header_footer_xml='',
+        raw_body_signature_preserved=None,
+        table_watch_texts=None,
+        callout_watch_texts=None,
+        list_watch_texts=None,
+        enabled=True):
+    baseline_docx_metrics = baseline_docx_metrics or {}
+    migrated_docx_metrics = migrated_docx_metrics or {}
+    strict_missing_fragments = [
+        normalize_text(text).lower()
+        for text in strict_missing_fragments or []
+        if normalize_text(text)
+    ]
+    removed_texts = [
+        normalize_text(text).lower()
+        for text in removed_texts or []
+        if normalize_text(text)
+    ]
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'docx_body_signature_mismatch_investigation_report_only',
+            'summary': {
+                'strict_exact_fragment_gate_passed': not strict_missing_fragments,
+                'normalized_body_signature_gate_passed': False,
+                'final_classification': 'disabled',
+            },
+            'safety_warnings': [],
+            'recommendation': {
+                'safe_for_phase_4g': False,
+                'reason': 'DOCX body-signature mismatch investigation is disabled.',
+            },
+        }
+
+    baseline_text = baseline_docx_metrics.get('all_text', '')
+    migrated_text = migrated_docx_metrics.get('all_text', '')
+    baseline_evidence = bool(
+        baseline_docx_metrics.get('exists') and
+        baseline_docx_metrics.get('size') and
+        normalize_text(baseline_text))
+    migrated_evidence = bool(
+        migrated_docx_metrics.get('exists') and
+        migrated_docx_metrics.get('size') and
+        normalize_text(migrated_text))
+
+    removed_signature_texts = removed_texts + [normalize_text(' '.join(removed_texts))]
+    baseline_tokens = _signature_token_counter([baseline_text])
+    migrated_tokens = _signature_token_counter([migrated_text])
+    removed_tokens = _signature_token_counter(removed_signature_texts)
+    baseline_bigrams = _signature_ngram_counter([baseline_text], 2)
+    migrated_bigrams = _signature_ngram_counter([migrated_text], 2)
+    removed_bigrams = _signature_ngram_counter(removed_signature_texts, 2)
+
+    missing_tokens = _positive_counter_difference(baseline_tokens, migrated_tokens)
+    missing_bigrams = _positive_counter_difference(baseline_bigrams, migrated_bigrams)
+    approved_token_missing = _counter_intersection(missing_tokens, removed_tokens)
+    approved_bigram_missing = _approved_or_boundary_ngram_counter(
+        missing_bigrams,
+        removed_bigrams,
+        removed_tokens)
+    unexplained_tokens = _positive_counter_difference(missing_tokens, approved_token_missing)
+    unexplained_bigrams = _positive_counter_difference(missing_bigrams, approved_bigram_missing)
+
+    approved_strings_removed_from_body = [
+        text for text in removed_texts
+        if text and text not in normalize_text(migrated_text).lower()
+    ]
+    header_footer_signature = normalize_text(header_footer_xml).lower()
+    approved_strings_moved_to_header_footer = [
+        text for text in approved_strings_removed_from_body
+        if _all_signature_tokens_present(text, header_footer_signature)
+    ]
+
+    table_text_loss = _missing_watch_texts(table_watch_texts, migrated_text)
+    callout_text_loss = _missing_watch_texts(callout_watch_texts, migrated_text)
+    list_text_loss = _missing_watch_texts(list_watch_texts, migrated_text)
+    true_body_text_loss_count = (
+        sum(unexplained_tokens.values()) +
+        sum(unexplained_bigrams.values()))
+    normalized_gate_passed = (
+        baseline_evidence and
+        migrated_evidence and
+        true_body_text_loss_count == 0 and
+        not table_text_loss and
+        not callout_text_loss and
+        not list_text_loss)
+    strict_gate_passed = not strict_missing_fragments
+
+    safety_warnings = []
+    if not baseline_evidence or not migrated_evidence:
+        safety_warnings.append({'type': 'missing_docx_body_signature_evidence'})
+    if true_body_text_loss_count:
+        safety_warnings.append({
+            'type': 'true_body_text_loss',
+            'count': true_body_text_loss_count,
+        })
+    if table_text_loss:
+        safety_warnings.append({'type': 'table_text_loss', 'count': len(table_text_loss)})
+    if callout_text_loss:
+        safety_warnings.append({'type': 'callout_text_loss', 'count': len(callout_text_loss)})
+    if list_text_loss:
+        safety_warnings.append({'type': 'list_text_loss', 'count': len(list_text_loss)})
+    if raw_body_signature_preserved is False:
+        safety_warnings.append({'type': 'raw_body_signature_not_preserved'})
+
+    serialization_mismatch_count = (
+        len(strict_missing_fragments)
+        if not strict_gate_passed and normalized_gate_passed else 0)
+    if not baseline_evidence or not migrated_evidence:
+        classification = 'insufficient_evidence'
+    elif true_body_text_loss_count or table_text_loss or callout_text_loss or list_text_loss:
+        classification = 'true_body_text_loss'
+    elif approved_strings_removed_from_body and normalized_gate_passed:
+        classification = 'approved_header_footer_removed_from_body'
+    elif serialization_mismatch_count:
+        classification = 'docx_serialization_mismatch'
+    elif strict_gate_passed and normalized_gate_passed:
+        classification = 'normalized_signature_preserved'
+    else:
+        classification = 'normalization_difference'
+
+    return {
+        'enabled': True,
+        'policy': 'docx_body_signature_mismatch_investigation_report_only',
+        'summary': {
+            'strict_exact_fragment_gate_passed': strict_gate_passed,
+            'strict_missing_fragment_count': len(strict_missing_fragments),
+            'normalized_body_signature_gate_passed': normalized_gate_passed,
+            'baseline_token_count': sum(baseline_tokens.values()),
+            'migrated_token_count': sum(migrated_tokens.values()),
+            'approved_migration_explained_missing_text_count': (
+                sum(approved_token_missing.values()) +
+                sum(approved_bigram_missing.values())),
+            'approved_strings_removed_from_body_count': len(
+                approved_strings_removed_from_body),
+            'approved_strings_moved_to_header_footer_count': len(
+                approved_strings_moved_to_header_footer),
+            'serialization_normalization_mismatch_count': serialization_mismatch_count,
+            'true_body_text_loss_count': true_body_text_loss_count,
+            'table_text_loss_count': len(table_text_loss),
+            'callout_text_loss_count': len(callout_text_loss),
+            'list_text_loss_count': len(list_text_loss),
+            'raw_body_signature_preserved': raw_body_signature_preserved,
+            'final_classification': classification,
+        },
+        'missing_evidence': {
+            'unexplained_token_count': sum(unexplained_tokens.values()),
+            'unexplained_bigram_count': sum(unexplained_bigrams.values()),
+            'table_text_loss_count': len(table_text_loss),
+            'callout_text_loss_count': len(callout_text_loss),
+            'list_text_loss_count': len(list_text_loss),
+        },
+        'safety_warnings': safety_warnings,
+        'recommendation': {
+            'safe_for_phase_4g': (
+                normalized_gate_passed and
+                classification in {
+                    'approved_header_footer_removed_from_body',
+                    'docx_serialization_mismatch',
+                    'normalized_signature_preserved',
+                }),
+            'reason': (
+                'Normalized DOCX body signature evidence explains the strict gate mismatch.'
+                if normalized_gate_passed and not safety_warnings else
+                'Keep local migration fail-closed until missing body text evidence is resolved.'),
+        },
+    }
+
+
+def _signature_tokens(text):
+    return re.findall(r'[a-z0-9]+', normalize_text(text or '').lower())
+
+
+def _signature_token_counter(texts):
+    counter = Counter()
+    for text in texts or []:
+        counter.update(_signature_tokens(text))
+    return counter
+
+
+def _signature_ngram_counter(texts, size):
+    counter = Counter()
+    for text in texts or []:
+        tokens = _signature_tokens(text)
+        counter.update(
+            ' '.join(tokens[index:index + size])
+            for index in range(0, max(0, len(tokens) - size + 1)))
+    return counter
+
+
+def _positive_counter_difference(left, right):
+    result = Counter(left or {})
+    result.subtract(Counter(right or {}))
+    return Counter({key: value for key, value in result.items() if value > 0})
+
+
+def _counter_intersection(left, right):
+    return Counter({
+        key: min(left.get(key, 0), right.get(key, 0))
+        for key in set(left or {}) & set(right or {})
+        if min(left.get(key, 0), right.get(key, 0)) > 0
+    })
+
+
+def _approved_or_boundary_ngram_counter(missing_ngrams, removed_ngrams, removed_tokens):
+    approved = _counter_intersection(missing_ngrams, removed_ngrams)
+    removed_token_set = set(removed_tokens or {})
+    for ngram, count in (missing_ngrams or {}).items():
+        if ngram in approved:
+            continue
+        if any(token in removed_token_set for token in ngram.split()):
+            approved[ngram] = count
+    return approved
+
+
+def _all_signature_tokens_present(needle, haystack):
+    haystack_tokens = _signature_token_counter([haystack])
+    return all(
+        haystack_tokens.get(token, 0) >= count
+        for token, count in _signature_token_counter([needle]).items())
+
+
+def _missing_watch_texts(watch_texts, migrated_text):
+    migrated_signature = normalize_text(migrated_text).lower()
+    return [
+        normalize_text(text).lower()
+        for text in watch_texts or []
+        if normalize_text(text) and
+        not _all_signature_tokens_present(text, migrated_signature)
+    ]
+
+
+def _body_signature_metric(text, exists=True, size=1200):
+    return {
+        'exists': bool(exists),
+        'size': size if exists else 0,
+        'all_text': normalize_text(text).lower(),
+        'paragraph_count': 1 if text else 0,
+        'table_count': 0,
     }
 
 

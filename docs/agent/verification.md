@@ -5033,3 +5033,129 @@ Phase 4F should remain internal. The next safe direction is to reconcile the
 local corpus strict DOCX body-signature gate with the previously passing raw
 body-region signature evidence before adding first-page, odd/even, section, or
 production migration behavior.
+
+## Phase 4F
+
+Date: 2026-06-03
+
+### Scope
+
+Phase 4F added a local/test-only DOCX body-signature mismatch investigation
+helper. It does not wire header/footer migration into normal conversion and
+does not change the internal writer policy.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Local mismatch investigation
+
+Samples investigated:
+
+- `input.pdf`
+- `input3.pdf`
+
+Skipped:
+
+- `input6_large.pdf`: bounded subset only and still `unsupported` from Phase
+  4E, so full 756-page migration and DOCX generation remained skipped.
+
+Results:
+
+- Strict exact body-signature gate failed for 2 samples.
+- Normalized token/ngram body-signature gate passed for 2 samples.
+- Approved migration-explained missing text count: 0.
+- Serialization/normalization mismatch count: 12.
+- True body text loss count: 0.
+- Table text loss count: 0.
+- Callout text loss count: 0.
+- List text loss count: 0.
+- Residual header/footer pollution count: 0.
+- Raw body-region signature preservation: true for both investigated samples.
+
+Classification:
+
+- `input.pdf`: `docx_serialization_mismatch`
+- `input3.pdf`: `docx_serialization_mismatch`
+
+The Phase 4E blocker was classified as a verification/signature-normalization
+issue, not observed real body text loss. Normalized body signature validation
+is safe to use as a supplemental local corpus gate only with fail-closed checks
+for true body text loss, table/callout/list loss, residual header/footer
+pollution, and missing evidence.
+
+Generated ignored local report:
+
+- `local_reports/phase4f-docx-body-signature-mismatch-report.md`
+
+### Tests added
+
+- Exact fragment mismatch can be classified as DOCX serialization mismatch
+  when normalized text is preserved.
+- Approved header/footer strings removed from body are not counted as body text
+  loss.
+- True body text loss remains fail-closed.
+- Table/callout/list text loss remains fail-closed.
+- Missing evidence remains blocked.
+- Strict exact gate and normalized gate results are recorded separately.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "docx_body_signature_mismatch or local_corpus_default_policy_migration"
+```
+
+Result: passed. 10 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 292 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 292 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated local DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4F test and
+documentation files were modified.
+
+### Phase 4F recommendation
+
+Phase 4G should remain internal. The next safe direction is to refine the local
+corpus validation gate so it uses normalized body-signature evidence as a
+supplement to strict exact-fragment diagnostics, while retaining fail-closed
+behavior for true body text loss, table/callout/list loss, residual
+header/footer pollution, and missing evidence.

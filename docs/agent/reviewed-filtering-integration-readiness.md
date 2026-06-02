@@ -550,3 +550,48 @@ Phase 4F should remain internal. The next safe direction is to reconcile the
 local corpus DOCX body-signature validation with the already-passing raw
 body-region signature evidence before adding first-page, odd/even, or
 production migration behavior.
+
+## Phase 4F DOCX Body-Signature Mismatch Investigation
+
+Phase 4F investigates the Phase 4E local corpus blocker. It adds a
+local/test-only mismatch investigation helper that compares strict
+PDF-fragment-to-DOCX matching against normalized token/ngram DOCX body
+signatures.
+
+Local corpus investigation:
+
+- `input.pdf` and `input3.pdf` were investigated.
+- `input6_large.pdf` remained skipped because Phase 4E classified the bounded
+  subset policy as `unsupported`; full 756-page migration remains out of scope.
+- The strict exact-fragment gate failed for both eligible samples.
+- The normalized token/ngram DOCX body-signature gate passed for both eligible
+  samples.
+- Raw filtered-parse body-region signatures were preserved.
+- True body text loss count was 0.
+- Table, callout, and list text loss counts were 0.
+- Residual header/footer pollution count was 0.
+
+Interpretation:
+
+- The Phase 4E blocker is currently classified as a verification/signature
+  normalization issue, not observed real body text loss.
+- Normalized body signature validation appears safe to use as a supplemental
+  local corpus gate, provided fail-closed checks for true body text loss, table
+  text loss, residual header/footer pollution, and missing evidence remain.
+- The strict exact-fragment gate should not be used alone for local corpus
+  DOCX migration smoke validation because PDF layout fragments and DOCX
+  serialized body text are not guaranteed to match exactly.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Migration remains internal-only.
+- Page-number behavior remains placeholder-only; page-number field generation
+  remains future work.
+- This is still not production/default integration.
+
+Phase 4G should remain internal and should refine the local corpus validation
+gate to combine strict diagnostics with normalized body-signature evidence,
+without enabling broader migration, page-number handling, public API, or
+default behavior.
