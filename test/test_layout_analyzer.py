@@ -4673,6 +4673,84 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertTrue(report['summary']['body_text_signature_preserved'])
             self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
 
+    def test_internal_filtered_docx_preserves_callout_text_box_content(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-callout.pdf'
+            _write_synthetic_pdf(pdf_path, 'callout_text_box_near_edges')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            filtered_text = report['filtered_docx_metrics']['all_text']
+
+            self.assertIn('callout panel body content', filtered_text)
+            self.assertIn('table like callout row alpha', filtered_text)
+            self.assertEqual(_removed_text_match_count(
+                _synthetic_filtering_report(layout, decisions),
+                'callout panel body content'), 0)
+            self.assertEqual(report['summary']['body_text_loss_warning_count'], 0)
+            self.assertTrue(report['summary']['body_text_signature_preserved'])
+            self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
+    def test_internal_filtered_docx_preserves_list_items_and_headings(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-list-heading.pdf'
+            _write_synthetic_pdf(pdf_path, 'list_heading_boundaries')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            filtered_text = report['filtered_docx_metrics']['all_text']
+
+            self.assertIn('synthetic section heading 1 remains body text', filtered_text)
+            self.assertIn('- list item alpha 1 remains in body', filtered_text)
+            self.assertIn('1. numbered item beta 1 remains in body', filtered_text)
+            self.assertEqual(report['summary']['body_text_loss_warning_count'], 0)
+            self.assertTrue(report['summary']['body_text_signature_preserved'])
+            self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
+    def test_internal_filtered_docx_reports_table_geometry_stress_without_text_loss(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'filtered-docx-table-geometry.pdf'
+            _write_synthetic_pdf(pdf_path, 'table_geometry_delta_stress')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            report = _run_synthetic_filtered_docx_comparison(
+                pdf_path,
+                decisions,
+                layout,
+                Path(tmp))
+            summary = report['summary']
+            filtered_text = report['filtered_docx_metrics']['all_text']
+
+            self.assertIn('geometry table header', filtered_text)
+            self.assertIn('geometry table cell alpha', filtered_text)
+            self.assertIn('geometry table cell beta', filtered_text)
+            self.assertEqual(summary['table_text_loss_warning_count'], 0)
+            self.assertTrue(summary['table_text_signature_preserved'])
+            self.assertIn(
+                summary['table_count_delta_classification'],
+                {'unchanged', 'reported_no_table_text_loss'})
+            self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
     def test_internal_filtered_docx_negative_control_preserves_body_content(self):
         _require_synthetic_docx_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -4769,6 +4847,84 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(report['summary']['body_text_loss_warning_count'], 1)
         self.assertIn(
             'body_text_loss',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_synthetic_docx_comparison_reports_table_count_delta_without_text_loss(self):
+        baseline = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 2,
+            'table_count': 2,
+            'table_texts': ['Geometry table cell alpha'],
+            'all_text': 'body text remains geometry table cell alpha synthetic footer',
+        }
+        filtered = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 2,
+            'table_count': 1,
+            'table_texts': ['Geometry table cell alpha'],
+            'all_text': 'body text remains geometry table cell alpha',
+        }
+        report = _synthetic_docx_comparison_report_from_metrics(
+            baseline,
+            filtered,
+            expected_body_texts=['body text remains', 'geometry table cell alpha'],
+            removed_texts=['synthetic footer'],
+            baseline_path='/tmp/baseline.docx',
+            filtered_path='/tmp/filtered.docx',
+            temp_root='/tmp',
+            internal_filtered_parse_report={
+                'applied_to_parse': True,
+                'summary': {'removed_raw_block_count': 1},
+                'safety_warnings': [],
+            },
+            default_after_metrics=baseline)
+
+        self.assertTrue(report['summary']['table_text_signature_preserved'])
+        self.assertEqual(report['summary']['docx_table_count_delta'], -1)
+        self.assertEqual(
+            report['summary']['table_count_delta_classification'],
+            'reported_no_table_text_loss')
+        self.assertTrue(report['recommendation']['safe_for_internal_filtered_docx'])
+
+    def test_synthetic_docx_comparison_fail_closes_on_table_text_loss(self):
+        baseline = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 2,
+            'table_count': 1,
+            'table_texts': ['Geometry table cell alpha'],
+            'all_text': 'body text remains geometry table cell alpha',
+        }
+        filtered = {
+            'exists': True,
+            'size': 100,
+            'paragraph_count': 2,
+            'table_count': 1,
+            'table_texts': [],
+            'all_text': 'body text remains',
+        }
+        report = _synthetic_docx_comparison_report_from_metrics(
+            baseline,
+            filtered,
+            expected_body_texts=['body text remains', 'geometry table cell alpha'],
+            removed_texts=[],
+            baseline_path='/tmp/baseline.docx',
+            filtered_path='/tmp/filtered.docx',
+            temp_root='/tmp',
+            internal_filtered_parse_report={
+                'applied_to_parse': True,
+                'summary': {'removed_raw_block_count': 1},
+                'safety_warnings': [],
+            },
+            default_after_metrics=baseline)
+
+        self.assertFalse(report['summary']['table_text_signature_preserved'])
+        self.assertEqual(report['summary']['table_text_loss_warning_count'], 1)
+        self.assertFalse(report['recommendation']['safe_for_internal_filtered_docx'])
+        self.assertIn(
+            'table_text_loss',
             {warning['type'] for warning in report['safety_warnings']})
 
     def test_local_corpus_smoke_summary_handles_multiple_samples(self):
@@ -4985,6 +5141,25 @@ class TestLayoutAnalyzer(unittest.TestCase):
                 for candidate in top_candidates))
             self.assertEqual(filtering['approved_candidate_count'], 0)
             self.assertEqual(filtering['summary']['removed_block_count'], 0)
+
+    def test_synthetic_odd_even_body_heading_interaction_remains_review_gated(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'odd-even-body-heading.pdf'
+            _write_synthetic_pdf(pdf_path, 'odd_even_body_heading_interaction')
+
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            body_validation = _synthetic_body_text_validation(layout, filtering)
+
+            self.assertEqual(_removed_region_count(filtering, REGION_BODY), 0)
+            self.assertEqual(
+                _removed_text_match_count(filtering, 'Synthetic odd header body heading'),
+                0)
+            self.assertTrue(body_validation['body_text_signature_preserved'])
 
     def test_synthetic_paragraph_continuity_preserves_body_text_signature(self):
         _require_synthetic_pdf_support(self)
@@ -6047,6 +6222,49 @@ def _write_synthetic_pdf(path, scenario):
                 _synthetic_body_table(page, page_index)
                 _synthetic_footer(page, 'SYNTHETIC TABLE FOOTER')
                 _synthetic_page_number(page, page_index + 1, 3)
+        elif scenario == 'callout_text_box_near_edges':
+            for page_index in range(3):
+                page = _synthetic_page(doc)
+                _synthetic_header(page, 'SYNTHETIC CALLOUT HEADER')
+                _synthetic_body_line(
+                    page,
+                    132,
+                    f'Callout scenario body introduction {page_index + 1}.')
+                _synthetic_callout_box(page, page_index)
+                _synthetic_footer(page, 'SYNTHETIC CALLOUT FOOTER')
+                _synthetic_page_number(page, page_index + 1, 3)
+        elif scenario == 'list_heading_boundaries':
+            for page_index in range(4):
+                page = _synthetic_page(doc)
+                _synthetic_header(page, 'SYNTHETIC LIST HEADER')
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic section heading {page_index + 1} remains body text')
+                _synthetic_body_line(
+                    page,
+                    178,
+                    f'- List item alpha {page_index + 1} remains in body')
+                _synthetic_body_line(
+                    page,
+                    204,
+                    f'1. Numbered item beta {page_index + 1} remains in body')
+                _synthetic_body_line(
+                    page,
+                    232,
+                    f'Closing list paragraph {page_index + 1} remains body text.')
+                _synthetic_footer(page, 'SYNTHETIC LIST FOOTER')
+                _synthetic_page_number(page, page_index + 1, 4)
+        elif scenario == 'table_geometry_delta_stress':
+            for page_index in range(3):
+                page = _synthetic_page(doc)
+                _synthetic_body_line(
+                    page,
+                    122,
+                    f'Synthetic geometry body introduction {page_index + 1}.')
+                _synthetic_geometry_stress_table(page, page_index)
+                _synthetic_footer(page, 'SYNTHETIC GEOMETRY FOOTER')
+                _synthetic_page_number(page, page_index + 1, 3)
         elif scenario == 'no_header_footer':
             for page_index in range(3):
                 page = _synthetic_page(doc)
@@ -6072,6 +6290,26 @@ def _write_synthetic_pdf(path, scenario):
                     page,
                     150,
                     f'Synthetic body page {page_index + 1} with varied headers.')
+        elif scenario == 'odd_even_body_heading_interaction':
+            for page_index in range(5):
+                page = _synthetic_page(doc)
+                if page_index == 0:
+                    header = 'SYNTHETIC FIRST PAGE HEADER'
+                elif (page_index + 1) % 2:
+                    header = 'SYNTHETIC ODD HEADER'
+                else:
+                    header = 'SYNTHETIC EVEN HEADER'
+                _synthetic_header(page, header)
+                _synthetic_body_line(
+                    page,
+                    152,
+                    f'{header.title()} body heading {page_index + 1} must remain')
+                _synthetic_body_line(
+                    page,
+                    184,
+                    f'Body paragraph below varied heading {page_index + 1} remains.')
+                _synthetic_footer(page, 'SYNTHETIC VARIED FOOTER')
+                _synthetic_page_number(page, page_index + 1, 5)
         elif scenario == 'paragraph_continuity':
             page = _synthetic_page(doc)
             _synthetic_header(page, 'SYNTHETIC CONTINUITY HEADER')
@@ -6131,6 +6369,31 @@ def _synthetic_body_table(page, page_index):
     _synthetic_body_line(page, 612, 'Body Table Header')
     _synthetic_body_line(page, 636, f'Body table cell alpha {page_index + 1}')
     _synthetic_body_line(page, 660, f'Body table cell beta {page_index + 1}')
+
+
+def _synthetic_callout_box(page, page_index):
+    x0, y0, x1, y1 = 72, 582, 470, 656
+    page.draw_rect(fitz.Rect(x0, y0, x1, y1), width=0.5)
+    page.draw_line((x0, y0 + 25), (x1, y0 + 25), width=0.5)
+    _synthetic_body_line(
+        page,
+        602,
+        f'Callout panel body content {page_index + 1} must remain.')
+    _synthetic_body_line(
+        page,
+        630,
+        f'Table like callout row alpha {page_index + 1} must remain.')
+
+
+def _synthetic_geometry_stress_table(page, page_index):
+    x0, y0, x1, y1 = 54, 574, 462, 646
+    page.draw_rect(fitz.Rect(x0, y0, x1, y1), width=0.5)
+    page.draw_line((x0, y0 + 24), (x1, y0 + 24), width=0.5)
+    page.draw_line((x0, y0 + 48), (x1, y0 + 48), width=0.5)
+    page.draw_line((210, y0), (210, y1), width=0.5)
+    _synthetic_body_line(page, 590, 'Geometry Table Header')
+    _synthetic_body_line(page, 614, f'Geometry table cell alpha {page_index + 1}')
+    _synthetic_body_line(page, 638, f'Geometry table cell beta {page_index + 1}')
 
 
 def _parse_synthetic_layout(pdf_path):
@@ -6364,10 +6627,24 @@ def _synthetic_docx_comparison_report_from_metrics(
         text for text in residual_removed
         if text not in body_fragment_set
     ]
-    missing_table_text = [
+    baseline_table_texts = [
+        normalize_text(text).lower()
+        for text in baseline_metrics.get('table_texts', []) or []
+        if normalize_text(text)
+    ]
+    filtered_table_texts = [
+        normalize_text(text).lower()
+        for text in filtered_metrics.get('table_texts', []) or []
+        if normalize_text(text)
+    ]
+    missing_table_signature_texts = [
+        text for text in baseline_table_texts
+        if text and text not in filtered_table_texts
+    ]
+    missing_table_text = sorted(set([
         text for text in missing_body
         if 'body table' in text
-    ]
+    ] + missing_table_signature_texts))
     docx_artifacts_temp_only = (
         _path_inside_root(baseline_path, temp_root) and
         _path_inside_root(filtered_path, temp_root))
@@ -6436,6 +6713,7 @@ def _synthetic_docx_comparison_report_from_metrics(
         'true_residual_header_footer_pollution_count': len(true_residual),
         'body_text_signature_preserved': not missing_body,
         'body_text_loss_warning_count': len(missing_body),
+        'table_text_signature_preserved': not missing_table_text,
         'table_text_loss_warning_count': len(missing_table_text),
         'body_text_block_delta': body_text_block_delta,
         'body_text_block_delta_classification': (

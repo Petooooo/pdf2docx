@@ -4269,3 +4269,145 @@ Phase 3E should remain internal and non-default. The next useful direction is
 to broaden committed synthetic coverage for callout/text-box content,
 list/heading boundaries, and table-geometry delta scenarios before any public
 opt-in or production-default integration is considered.
+
+## Phase 3E
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 3E broadened committed synthetic regression coverage for the remaining
+thin reviewed-filtering scenarios before any DOCX header/footer part generation
+or public opt-in design.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- No Word section header/footer parts were generated.
+- No content was moved into DOCX headers/footers.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Synthetic scenarios added
+
+Generated PDF scenarios added to the committed test helper:
+
+- `callout_text_box_near_edges`
+- `list_heading_boundaries`
+- `table_geometry_delta_stress`
+- `odd_even_body_heading_interaction`
+
+The generated PDFs and DOCX files are created only in temporary test
+directories and are not committed.
+
+### Synthetic results
+
+Callout/text-box preservation:
+
+- Body callout text remained present after approved header/footer/page-number
+  filtering.
+- Table-like callout row text remained present.
+- No callout body text was removed as header/footer content.
+- Body text signature was preserved.
+
+List/heading preservation:
+
+- Body headings remained present after approved filtering.
+- Bullet-list and numbered-list text remained present.
+- Heading/list boundaries were not treated as removable header/footer content.
+- Body text signature was preserved.
+
+Synthetic table-geometry stress:
+
+- Body table text remained present after approved footer/page-number filtering.
+- Table text signature was preserved.
+- Table count deltas are reported through diagnostics and classified as
+  non-blocking only when table text loss is zero.
+- Synthetic table text loss now triggers fail-closed warnings.
+
+First-page/odd-even interaction:
+
+- Varied first-page and odd/even header candidates remain review-gated.
+- Body headings that resemble header text were not removed.
+- Body text signature was preserved.
+
+Fail-closed behavior:
+
+- Body text loss remains unsafe.
+- Table text loss remains unsafe.
+- True residual header/footer pollution remains unsafe.
+- Raw `would_exclude` without explicit approval still removes nothing.
+- Rejected and unsure decisions remain blocked.
+- Body-region and layout-placeholder candidates remain protected.
+
+No Phase 3E local report was generated; all synthetic artifacts were temporary
+test outputs only.
+
+### Tests added
+
+- Filtered DOCX comparison preserves callout/text-box body content.
+- Filtered DOCX comparison preserves heading, bullet-list, and numbered-list
+  content.
+- Filtered DOCX comparison preserves table text signature under a synthetic
+  table-geometry stress fixture.
+- Table count delta with preserved table text signature is reported as a
+  diagnostic.
+- Table text loss fails closed.
+- Odd/even body-heading interaction remains review-gated and preserves body
+  text.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "callout or list_items or table_geometry or odd_even_body or table_count_delta or table_text_loss"
+```
+
+Result: passed. 24 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 264 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 264 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 3E test/docs
+files were modified.
+
+### Phase 3E recommendation
+
+Phase 4A can start only as another internal/private design step for DOCX
+header/footer part generation. Keep default conversion unchanged and keep
+public CLI/API closed until header/footer part generation has its own tests and
+approval gate.

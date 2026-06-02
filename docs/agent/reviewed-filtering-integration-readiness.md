@@ -288,3 +288,49 @@ Safety interpretation:
 Phase 3E should remain internal and should focus on broadening committed
 synthetic regressions for callout/text-box, list/heading, and table-geometry
 delta cases before any public opt-in design is considered.
+
+## Phase 3E Synthetic Regression Broadening
+
+Phase 3E broadens committed synthetic coverage for the remaining weak scenarios
+identified before any Phase 4 header/footer DOCX generation work. The coverage
+still uses generated PDFs and temporary DOCX outputs at test runtime; no
+generated PDF or DOCX binaries are committed.
+
+New committed synthetic coverage:
+
+- Callout/text-box-like body panels near page edges.
+- Table-like callout text that must remain body content.
+- Heading, bullet-list, and numbered-list body boundaries.
+- Synthetic table-geometry stress near footer/page-number candidates.
+- First-page/odd-even header variation with body headings that resemble header
+  text.
+- Table-count delta diagnostics when table text signature is preserved.
+- Fail-closed table text loss diagnostics.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Reviewed filtering still runs only through the private internal config path.
+- Explicit review approval remains mandatory.
+- Raw `would_exclude` labels alone remain insufficient.
+- Body-region and layout-placeholder protection remain hard requirements.
+- Body text signature preservation remains the primary safety criterion.
+- Body TextBlock, table count, or table boundary shifts remain diagnostics when
+  body/table text signatures are preserved.
+- Body text loss, table text loss, and true residual header/footer pollution
+  remain fail-closed conditions.
+
+Remaining gaps before Phase 4:
+
+- No Word section header/footer parts are generated yet.
+- No content is migrated into DOCX headers or footers yet.
+- No cross-page paragraph merge is implemented.
+- No public opt-in design has been exposed.
+- More real-world local corpus validation may still be useful, but committed
+  synthetic coverage is no longer limited to the original repeated-header and
+  body-table fixtures.
+
+Phase 4A can start only as another internal/private design step for DOCX
+header/footer part generation. Default conversion and public CLI/API behavior
+should remain closed until that work has its own regression evidence.
