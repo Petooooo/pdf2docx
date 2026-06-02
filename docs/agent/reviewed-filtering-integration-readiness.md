@@ -334,3 +334,47 @@ Remaining gaps before Phase 4:
 Phase 4A can start only as another internal/private design step for DOCX
 header/footer part generation. Default conversion and public CLI/API behavior
 should remain closed until that work has its own regression evidence.
+
+## Phase 4A Internal DOCX Header/Footer Foundation
+
+Phase 4A adds the first internal foundation for representing reviewed
+header/footer candidates as future Word header/footer content. This is still
+not wired into normal conversion.
+
+Design added:
+
+- A JSON-serializable DOCX header/footer generation plan helper.
+- The plan accepts only explicit `approve_exclude` header/footer/page-number
+  candidates.
+- Rejected, unsure, review-only, layout-placeholder, and body-region candidates
+  are excluded or fail closed.
+- Semantic repeated header/footer text is represented as simple planned text.
+- Page numbers are represented only as a diagnostic `<PAGE_NUMBER>`
+  placeholder.
+- Section scope is recorded as document-level only.
+- First-page and odd/even behavior are explicitly deferred.
+- Images, logos, complex layout, and paragraph continuation are explicitly out
+  of scope.
+
+Internal DOCX proof:
+
+- A small internal `python-docx` helper can apply the simple text plan to a
+  provided `Document` object when explicitly enabled.
+- Tests verify that a temporary DOCX contains `word/header*.xml` and
+  `word/footer*.xml` parts with the planned simple text.
+- This helper is not called by `Converter.convert()` or the public CLI.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- DOCX header/footer generation remains disabled by default.
+- No content is migrated into Word header/footer parts during normal
+  conversion.
+- Page-number field generation is deferred until it can be represented with a
+  real Word field safely.
+- Section-specific, first-page, and odd/even mapping remain future work.
+
+Phase 4B should stay internal and should decide how a private, opt-in DOCX
+generation experiment can consume this plan without changing default
+conversion behavior.

@@ -32,6 +32,7 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_reviewed_filtering_internal_config = LayoutAnalyzer.build_reviewed_filtering_internal_config
 build_reviewed_filtering_internal_config_report = LayoutAnalyzer.build_reviewed_filtering_internal_config_report
+build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
@@ -77,10 +78,12 @@ except Exception:
 try:
     import fitz
     from pdf2docx import Converter
+    from pdf2docx.common import docx as docx_utils
     from docx import Document as DocxDocument
 except Exception:
     fitz = None
     Converter = None
+    docx_utils = None
     DocxDocument = None
 
 
@@ -4927,6 +4930,159 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'table_text_loss',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_docx_header_footer_generation_plan_is_serializable(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-plan.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True)
+            decoded = json.loads(json.dumps(plan))
+
+            self.assertTrue(decoded['enabled'])
+            self.assertEqual(decoded['summary']['header_text_count'], 1)
+            self.assertEqual(decoded['summary']['footer_text_count'], 1)
+            self.assertEqual(decoded['summary']['page_number_placeholder_count'], 1)
+            self.assertEqual(decoded['summary']['page_number_field_generation'], 'deferred_placeholder_only')
+            self.assertFalse(decoded['summary']['public_cli_exposed'])
+            self.assertFalse(decoded['summary']['production_default_enabled'])
+
+    def test_docx_header_footer_generation_plan_uses_only_explicit_approvals(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-plan-review-gated.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER})
+
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True)
+            section = plan['sections'][0]
+
+            self.assertEqual(plan['summary']['header_text_count'], 1)
+            self.assertEqual(plan['summary']['footer_text_count'], 0)
+            self.assertEqual(plan['summary']['page_number_placeholder_count'], 0)
+            self.assertTrue(section['header_texts'])
+            self.assertFalse(section['footer_texts'])
+            self.assertFalse(section['page_number_placeholders'])
+            self.assertTrue(all(
+                candidate['manual_decision'] != 'approve_exclude'
+                for candidate in plan['blocked_candidates']))
+
+    def test_docx_header_footer_generation_plan_blocks_body_and_layout_placeholders(self):
+        body_fingerprint = _summary_fingerprint('Approved Body Heading', REGION_BODY)
+        placeholder_fingerprint = _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP)
+        page_summaries = [{
+            'page_index': 0,
+            'text_blocks': [
+                _mapping_summary_block(0, body_fingerprint, REGION_BODY, 'Approved Body Heading'),
+                _mapping_summary_block(1, placeholder_fingerprint, REGION_TOP, IMAGE_PLACEHOLDER),
+            ],
+        }]
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'body-candidate',
+                    body_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BODY]),
+                _dry_run_candidate(
+                    'placeholder-candidate',
+                    placeholder_fingerprint,
+                    ROLE_LAYOUT_PLACEHOLDER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision('body-candidate', body_fingerprint, 'approve_exclude'),
+                _review_decision('placeholder-candidate', placeholder_fingerprint, 'approve_exclude'),
+            ],
+        }
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True)
+        warning_types = {warning['type'] for warning in plan['safety_warnings']}
+
+        self.assertEqual(plan['summary']['representable_entry_count'], 0)
+        self.assertEqual(plan['summary']['unrepresentable_approved_candidate_count'], 1)
+        self.assertEqual(plan['summary']['blocked_candidate_count'], 1)
+        self.assertIn('body_region_candidate_not_represented', warning_types)
+        self.assertEqual(
+            plan['blocked_candidates'][0]['reason'],
+            'layout_placeholder_not_filterable')
+        self.assertFalse(
+            plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
+
+    def test_internal_docx_header_footer_text_plan_writes_temp_docx_parts(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-write.pdf'
+            docx_path = Path(tmp) / 'header-footer.docx'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True)
+
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            with zipfile.ZipFile(docx_path) as archive:
+                names = set(archive.namelist())
+                header_xml = archive.read('word/header1.xml').decode('utf-8')
+                footer_xml = archive.read('word/footer1.xml').decode('utf-8')
+
+            self.assertTrue(report['applied'])
+            self.assertIn('word/header1.xml', names)
+            self.assertIn('word/footer1.xml', names)
+            self.assertIn('SYNTHETIC REPORT HEADER', header_xml)
+            self.assertIn('SYNTHETIC REPORT FOOTER', footer_xml)
+            self.assertIn('&lt;PAGE_NUMBER&gt;', footer_xml)
+            self.assertEqual(
+                report['summary']['page_number_field_generation'],
+                'deferred_placeholder_only')
+
+    def test_internal_docx_header_footer_text_plan_disabled_by_default(self):
+        _require_docx_header_footer_support(self)
+        document = DocxDocument()
+        report = docx_utils.apply_header_footer_text_plan(
+            document,
+            {'sections': [{'header_texts': ['Internal Header']}]},
+            enabled=False)
+
+        self.assertFalse(report['enabled'])
+        self.assertFalse(report['applied'])
+        self.assertEqual(report['summary']['header_paragraphs_written'], 0)
+
     def test_local_corpus_smoke_summary_handles_multiple_samples(self):
         reports = [
             _local_corpus_docx_smoke_sample_report(
@@ -6193,6 +6349,11 @@ def _require_synthetic_docx_support(testcase):
     _require_synthetic_pdf_support(testcase)
     if DocxDocument is None:
         testcase.skipTest('Synthetic DOCX comparison tests require python-docx.')
+
+
+def _require_docx_header_footer_support(testcase):
+    if DocxDocument is None or docx_utils is None:
+        testcase.skipTest('DOCX header/footer tests require python-docx helpers.')
 
 
 def _write_synthetic_pdf(path, scenario):

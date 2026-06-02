@@ -81,6 +81,80 @@ def delete_paragraph(paragraph):
     paragraph._p = paragraph._element = None
 
 
+def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -> dict:
+    '''Apply a simple internal header/footer text plan to a python-docx document.
+
+    This helper is not called by the normal conversion path. It supports only
+    plain text header/footer content and diagnostic page-number placeholders.
+    '''
+    sections = list(getattr(document, 'sections', []) or [])
+    if not enabled:
+        return {
+            'enabled': False,
+            'applied': False,
+            'policy': 'internal_docx_header_footer_text_plan_only',
+            'summary': {
+                'section_count': len(sections),
+                'header_paragraphs_written': 0,
+                'footer_paragraphs_written': 0,
+                'page_number_field_generation': 'deferred_placeholder_only',
+            },
+            'safety_warnings': [],
+        }
+
+    plan_sections = list((plan or {}).get('sections', []) or [])
+    warnings = []
+    if not sections:
+        warnings.append({'type': 'docx_document_has_no_sections'})
+    if not plan_sections:
+        warnings.append({'type': 'header_footer_plan_has_no_sections'})
+
+    header_count = 0
+    footer_count = 0
+    if sections and plan_sections and not warnings:
+        section = sections[0]
+        section_plan = plan_sections[0]
+        header_texts = _header_footer_plan_texts(section_plan, 'header_texts')
+        footer_texts = _header_footer_plan_texts(section_plan, 'footer_texts')
+        footer_texts.extend(
+            _header_footer_plan_texts(section_plan, 'page_number_placeholders'))
+        header_count = _replace_header_footer_part_text(section.header, header_texts)
+        footer_count = _replace_header_footer_part_text(section.footer, footer_texts)
+
+    return {
+        'enabled': True,
+        'applied': not warnings,
+        'policy': 'internal_docx_header_footer_text_plan_only',
+        'summary': {
+            'section_count': len(sections),
+            'plan_section_count': len(plan_sections),
+            'header_paragraphs_written': header_count,
+            'footer_paragraphs_written': footer_count,
+            'page_number_field_generation': 'deferred_placeholder_only',
+        },
+        'safety_warnings': warnings,
+    }
+
+
+def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
+    values = []
+    for value in section_plan.get(key, []) or []:
+        text = str(value).strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _replace_header_footer_part_text(part, texts: list) -> int:
+    paragraphs = list(part.paragraphs)
+    written = 0
+    for index, text in enumerate(texts or []):
+        paragraph = paragraphs[index] if index < len(paragraphs) else part.add_paragraph()
+        paragraph.text = text
+        written += 1
+    return written
+
+
 def reset_paragraph_format(p, line_spacing:float=1.05):
     '''Reset paragraph format, especially line spacing.
 

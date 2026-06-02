@@ -2896,7 +2896,7 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_an
 Result: passed. 184 tests ran successfully.
 
 ```bash
-TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/common/docx.py pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
 ```
 
 Result: passed.
@@ -4411,3 +4411,126 @@ Phase 4A can start only as another internal/private design step for DOCX
 header/footer part generation. Keep default conversion unchanged and keep
 public CLI/API closed until header/footer part generation has its own tests and
 approval gate.
+
+## Phase 4A
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 4A added a minimal internal foundation for future DOCX header/footer part
+generation from reviewed header/footer candidates. This remains internal,
+disabled by default, and not wired into normal conversion.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content was moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Helper/design added
+
+- `build_docx_header_footer_generation_plan()` in `LayoutAnalyzer.py` builds a
+  JSON-serializable, plan-only representation of reviewed candidates.
+- The plan includes simple semantic header text, simple semantic footer text,
+  and page-number placeholders.
+- Rejected and unsure decisions are not included.
+- Layout-placeholder candidates are not represented as semantic header/footer
+  text.
+- Body-region candidates fail closed and are not represented.
+- Page-number field generation is deferred and represented as
+  `<PAGE_NUMBER>` placeholder text only.
+- Section scope is document-level only.
+- First-page and odd/even behavior are deferred.
+- Images/logos and complex layout remain out of scope.
+
+`apply_header_footer_text_plan()` in `pdf2docx/common/docx.py` can write the
+simple internal plan to a provided `python-docx` `Document` object only when
+explicitly enabled. It is not called by `Converter.convert()`.
+
+### Temp DOCX validation
+
+A focused test created a temporary DOCX with `python-docx`, applied the simple
+internal header/footer text plan, saved the file under a temporary directory,
+and inspected the resulting ZIP/OpenXML package.
+
+Result:
+
+- `word/header1.xml` was present.
+- `word/footer1.xml` was present.
+- Planned header text was present in the header part.
+- Planned footer text was present in the footer part.
+- Page-number placeholder text was present in the footer part.
+- Real Word page-number field generation was not implemented.
+
+No Phase 4A local report was generated; generated DOCX files were temporary
+test outputs only.
+
+### Tests added
+
+- Header/footer generation plan is JSON-serializable.
+- Reviewed header/footer/page-number candidates summarize into a simple plan.
+- Rejected and unsure candidates are not included in the plan.
+- Layout-placeholder candidates are not represented as semantic text.
+- Body-region candidates are not represented and fail closed.
+- Simple temp DOCX header/footer writing works with `python-docx`.
+- Generated temp DOCX header/footer XML can be inspected.
+- Header/footer text application is disabled by default.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "docx_header_footer or header_footer_text_plan"
+```
+
+Result: passed. 5 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 269 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/common/docx.py pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 269 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4A code/test
+and documentation files were modified.
+
+### Phase 4A recommendation
+
+Phase 4B should remain internal and private. The next safe direction is to
+prototype how an explicitly enabled DOCX generation experiment can consume the
+header/footer plan while keeping default conversion and public CLI/API behavior
+unchanged.

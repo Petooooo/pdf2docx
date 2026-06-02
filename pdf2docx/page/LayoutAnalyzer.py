@@ -707,6 +707,55 @@ def build_reviewed_header_footer_filter_report(
     }
 
 
+def build_docx_header_footer_generation_plan(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        enabled: bool = False) -> dict:
+    '''Build an internal plan for future DOCX header/footer generation.
+
+    This helper is intentionally plan-only. It does not mutate page content and
+    does not write DOCX files. Only explicit approve_exclude decisions for
+    header/footer/page-number candidates can become representable entries.
+    '''
+    dry_run_candidates = _dry_run_candidates(dry_run_report)
+    decision_map = _review_decision_map(review_decisions)
+    approved, blocked = _reviewed_exclusion_candidates(dry_run_candidates, decision_map)
+    text_lookup = _docx_header_footer_text_lookup(page_summaries)
+
+    if not enabled:
+        return _docx_header_footer_generation_plan_result(
+            enabled=False,
+            candidates=dry_run_candidates,
+            approved=approved,
+            blocked=blocked,
+            entries=[],
+            unrepresentable=[],
+            warnings=[{'type': 'docx_header_footer_generation_plan_disabled'}])
+
+    entries = []
+    unrepresentable = []
+    warnings = []
+    for candidate in approved:
+        entry, warning = _docx_header_footer_plan_entry(candidate, text_lookup)
+        if entry:
+            entries.append(entry)
+        else:
+            item = dict(candidate)
+            item['blocked_reason'] = warning.get('type', 'unrepresentable_candidate')
+            unrepresentable.append(item)
+            warnings.append(warning)
+
+    return _docx_header_footer_generation_plan_result(
+        enabled=True,
+        candidates=dry_run_candidates,
+        approved=approved,
+        blocked=blocked,
+        entries=entries,
+        unrepresentable=unrepresentable,
+        warnings=warnings)
+
+
 def build_body_filtering_diff_report(
         page_summaries: list,
         dry_run_report: dict,
@@ -3354,6 +3403,177 @@ def _reviewed_candidate_allowed(candidate: dict, decision: str) -> tuple:
     if role not in {ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER}:
         return False, 'role_not_filterable'
     return True, 'approved_review_decision'
+
+
+def _docx_header_footer_text_lookup(page_summaries: list) -> dict:
+    grouped = defaultdict(list)
+    for page in page_summaries or []:
+        for block in page.get('text_blocks', []) or []:
+            fingerprint = block.get('fingerprint', '')
+            text = normalize_text(block.get('text', ''))
+            if fingerprint and text:
+                grouped[fingerprint].append(text)
+
+    lookup = {}
+    for fingerprint, texts in grouped.items():
+        counts = Counter(normalize_text(text) for text in texts if normalize_text(text))
+        lookup[fingerprint] = counts.most_common(1)[0][0] if counts else ''
+    return lookup
+
+
+def _docx_header_footer_plan_entry(candidate: dict, text_lookup: dict) -> tuple:
+    role = candidate.get('proposed_role', '')
+    regions = _candidate_regions(candidate)
+    if REGION_BODY in regions:
+        return None, _docx_header_footer_warning(
+            candidate,
+            'body_region_candidate_not_represented',
+            'Body-region candidates are not eligible for DOCX header/footer generation.')
+    if role == ROLE_LAYOUT_PLACEHOLDER:
+        return None, _docx_header_footer_warning(
+            candidate,
+            'layout_placeholder_not_semantic_header_footer',
+            'Layout placeholders are not semantic DOCX header/footer text.')
+    if role not in {ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER}:
+        return None, _docx_header_footer_warning(
+            candidate,
+            'role_not_supported_for_docx_header_footer',
+            'Only header, footer, and page-number candidates are represented in Phase 4A.')
+
+    text = _docx_header_footer_candidate_text(candidate, text_lookup)
+    if role == ROLE_PAGE_NUMBER:
+        text = PAGE_NUMBER_PLACEHOLDER
+    elif not text:
+        return None, _docx_header_footer_warning(
+            candidate,
+            'empty_header_footer_text',
+            'Approved candidate has no representable text.')
+    elif _placeholder_kind(_comparison_text(text)):
+        return None, _docx_header_footer_warning(
+            candidate,
+            'placeholder_not_semantic_header_footer_text',
+            'Placeholder-like text is not represented as semantic header/footer content.')
+
+    target_part = 'header' if role == ROLE_HEADER else 'footer'
+    return {
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'role': role,
+        'target_part': target_part,
+        'text': normalize_text(text),
+        'text_kind': 'page_number_placeholder' if role == ROLE_PAGE_NUMBER else 'semantic_text',
+        'section_scope': 'document',
+        'affected_pages': list(candidate.get('affected_pages', []) or []),
+        'regions': sorted(regions),
+        'support_count': _readiness_int(candidate.get('support_count', 0)),
+        'page_count': _readiness_int(candidate.get('page_count', 0)),
+        'first_page_policy': 'deferred',
+        'odd_even_policy': 'deferred',
+        'page_number_field_generation': (
+            'deferred_placeholder_only' if role == ROLE_PAGE_NUMBER else 'not_applicable'),
+        'generation_status': (
+            'placeholder_only' if role == ROLE_PAGE_NUMBER else 'planned_text_only'),
+    }, None
+
+
+def _docx_header_footer_candidate_text(candidate: dict, text_lookup: dict) -> str:
+    fingerprint = candidate.get('fingerprint', '')
+    text = normalize_text(text_lookup.get(fingerprint, ''))
+    if text:
+        return text
+    return normalize_text((fingerprint or '').split('||')[0])
+
+
+def _docx_header_footer_warning(candidate: dict, warning_type: str, message: str) -> dict:
+    return {
+        'type': warning_type,
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'regions': sorted(_candidate_regions(candidate)),
+        'message': message,
+    }
+
+
+def _docx_header_footer_generation_plan_result(
+        enabled: bool,
+        candidates: list,
+        approved: list,
+        blocked: list,
+        entries: list,
+        unrepresentable: list,
+        warnings: list) -> dict:
+    section_plan = _docx_header_footer_section_plan(entries)
+    summary = {
+        'enabled': bool(enabled),
+        'candidate_count': len(candidates or []),
+        'approved_candidate_count': len(approved or []),
+        'blocked_candidate_count': len(blocked or []),
+        'representable_entry_count': len(entries or []),
+        'unrepresentable_approved_candidate_count': len(unrepresentable or []),
+        'header_text_count': sum(1 for entry in entries if entry.get('role') == ROLE_HEADER),
+        'footer_text_count': sum(1 for entry in entries if entry.get('role') == ROLE_FOOTER),
+        'page_number_placeholder_count': sum(
+            1 for entry in entries if entry.get('role') == ROLE_PAGE_NUMBER),
+        'semantic_header_footer_text_count': sum(
+            1 for entry in entries
+            if entry.get('text_kind') == 'semantic_text'),
+        'page_number_field_generation': 'deferred_placeholder_only',
+        'section_scope': 'document',
+        'first_page_policy': 'deferred',
+        'odd_even_policy': 'deferred',
+        'public_cli_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+        'safety_warning_count': len(warnings or []),
+    }
+    return {
+        'enabled': bool(enabled),
+        'policy': 'internal_docx_header_footer_generation_plan_only',
+        'summary': summary,
+        'entries': entries,
+        'sections': [section_plan],
+        'blocked_candidates': blocked,
+        'unrepresentable_approved_candidates': unrepresentable,
+        'safety_warnings': warnings,
+        'limitations': [
+            'Plan-only helper; not wired into default conversion.',
+            'Page-number fields are deferred and represented as a placeholder only.',
+            'First-page and odd/even section behavior is deferred.',
+            'Images, logos, and complex layout are not represented.',
+            'Paragraph continuation merging remains out of scope.',
+        ],
+        'recommendation': {
+            'safe_for_internal_docx_header_footer_experiment': bool(enabled and not warnings),
+            'reason': (
+                'Approved semantic header/footer candidates can be represented as simple DOCX text plans.'
+                if enabled and not warnings else
+                'Keep DOCX header/footer generation disabled until unrepresentable approved candidates are resolved.'
+            ),
+        },
+    }
+
+
+def _docx_header_footer_section_plan(entries: list) -> dict:
+    return {
+        'section_scope': 'document',
+        'first_page_policy': 'deferred',
+        'odd_even_policy': 'deferred',
+        'header_texts': _unique_entry_texts(entries, ROLE_HEADER),
+        'footer_texts': _unique_entry_texts(entries, ROLE_FOOTER),
+        'page_number_placeholders': _unique_entry_texts(entries, ROLE_PAGE_NUMBER),
+    }
+
+
+def _unique_entry_texts(entries: list, role: str) -> list:
+    values = []
+    for entry in entries or []:
+        if entry.get('role') != role:
+            continue
+        text = normalize_text(entry.get('text', ''))
+        if text and text not in values:
+            values.append(text)
+    return values
 
 
 def _block_matches_reviewed_candidate(block: dict, page_index, candidate: dict) -> bool:
