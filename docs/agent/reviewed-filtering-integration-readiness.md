@@ -254,3 +254,37 @@ Still intentionally not implemented:
 Phase 3D should remain internal. The next useful work is to add the remaining
 synthetic scenarios that are still thin: callout/text-box content, list/heading
 boundaries, and synthetic table-geometry deltas under filtered parsing.
+
+## Phase 3D Local Corpus DOCX Smoke Validation
+
+Phase 3D runs the Phase 3B/3C private filtered parse and DOCX comparison path
+against approved ignored local corpus samples. This remains local-only evidence:
+the sample PDFs, review packs, generated DOCX files, and reports are not
+committed.
+
+Validated locally:
+
+- `input.pdf` completed baseline vs filtered DOCX smoke validation.
+- `input3.pdf` completed baseline vs filtered DOCX smoke validation.
+- `input6_large.pdf` was validated only through a bounded subset of 15 pages.
+- Generated baseline, filtered, and post-experiment default DOCX files stayed
+  under ignored `local_reports/phase3d/` paths.
+- The large sample full-document parse and DOCX generation stayed skipped.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- The internal config path still requires explicit review approvals.
+- Raw `would_exclude` labels alone remain insufficient.
+- Rejected, unsure, body-region, and layout-placeholder candidates remain
+  blocked.
+- Body text signature preservation remains the primary safety criterion.
+- Body TextBlock count deltas and DOCX table count deltas are diagnostics, not
+  automatic failures, when body and table text signatures remain preserved.
+- Body text loss, table text loss, or true residual header/footer pollution
+  remain fail-closed conditions.
+
+Phase 3E should remain internal and should focus on broadening committed
+synthetic regressions for callout/text-box, list/heading, and table-geometry
+delta cases before any public opt-in design is considered.

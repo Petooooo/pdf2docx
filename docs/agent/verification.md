@@ -4136,3 +4136,136 @@ Phase 3D should remain internal and non-default. The next useful direction is
 to add synthetic coverage for callout/text-box, list/heading, and synthetic
 table-geometry delta scenarios before any public opt-in or production-default
 integration is considered.
+
+## Phase 3D
+
+Date: 2026-06-02
+
+### Scope
+
+Phase 3D added local-corpus DOCX smoke summary support for the private reviewed
+filtering config path and generated an ignored local report for approved local
+samples. This remains internal, explicitly opt-in, and non-default.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- No Word section header/footer parts were generated.
+- No content was moved into DOCX headers/footers.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Local corpus smoke results
+
+The ignored local report was generated at
+`local_reports/phase3d-local-corpus-docx-smoke-report.md`.
+
+Evaluated samples:
+
+- `input.pdf`: passed.
+- `input3.pdf`: passed.
+- `input6_large.pdf`: bounded subset passed; full 756-page validation was not
+  run.
+
+Generated DOCX artifacts stayed under ignored `local_reports/phase3d/` paths.
+The bounded large-document subset stayed under ignored `local_samples/subsets/`.
+
+Summary:
+
+- Sample count: 3.
+- Passed count: 2.
+- Bounded-subset passed count: 1.
+- Blocked count: 0.
+- Total approved header/footer/page-number removals: 83.
+- True residual header/footer pollution count: 0.
+- Body text loss warning count: 0.
+- Table text loss warning count: 0.
+
+Per-sample DOCX metrics:
+
+- `input.pdf`: paragraphs 364 / 351, tables 139 / 127, removed approved blocks
+  48.
+- `input3.pdf`: paragraphs 49 / 43, tables 16 / 13, removed approved blocks 5.
+- `input6_large.pdf` bounded subset: paragraphs 177 / 159, tables 10 / 10,
+  removed approved blocks 30.
+
+Body text signature preservation:
+
+- `input.pdf`: preserved.
+- `input3.pdf`: preserved.
+- `input6_large.pdf` bounded subset: preserved.
+
+Diagnostic deltas:
+
+- `input.pdf`: DOCX table count delta -12, classified as reported with no
+  table text loss.
+- `input3.pdf`: body TextBlock delta -1 and DOCX table count delta -3,
+  classified as acceptable diagnostics because body/table text loss warnings
+  were zero.
+- `input6_large.pdf` bounded subset: body TextBlock delta -1, classified as an
+  acceptable diagnostic because body text signature was preserved.
+
+Fail-closed warning behavior remained active for true residual header/footer
+pollution, body text loss, table text loss, missing approval artifacts, missing
+DOCX outputs, and non-local generated DOCX paths.
+
+### Tests added
+
+- Local corpus smoke summary builder handles multiple samples.
+- Missing approval artifacts block a sample clearly.
+- Large samples remain bounded-subset-only.
+- Body text signature preservation is required.
+- True residual header/footer pollution, body text loss, and table text loss
+  fail closed.
+- Body TextBlock count delta is reported as a diagnostic.
+- Generated DOCX paths must be temporary or ignored local paths.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 258 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 258 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 3D code/test
+and documentation files were staged for commit.
+
+### Phase 3D recommendation
+
+Phase 3E should remain internal and non-default. The next useful direction is
+to broaden committed synthetic coverage for callout/text-box content,
+list/heading boundaries, and table-geometry delta scenarios before any public
+opt-in or production-default integration is considered.

@@ -4771,6 +4771,116 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'body_text_loss',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_local_corpus_smoke_summary_handles_multiple_samples(self):
+        reports = [
+            _local_corpus_docx_smoke_sample_report(
+                'input.pdf',
+                _local_docx_metric(paragraphs=20, tables=2),
+                _local_docx_metric(paragraphs=16, tables=2),
+                _local_internal_report(removed=4),
+                body_text_signature_preserved=True,
+                generated_paths=['local_reports/phase3d/input/baseline.docx']),
+            _local_corpus_docx_smoke_sample_report(
+                'input3.pdf',
+                _local_docx_metric(paragraphs=18, tables=1),
+                _local_docx_metric(paragraphs=17, tables=1),
+                _local_internal_report(removed=1),
+                body_text_signature_preserved=True,
+                generated_paths=['local_reports/phase3d/input3/filtered.docx']),
+        ]
+        summary = _local_corpus_docx_smoke_summary_report(reports)
+
+        self.assertEqual(summary['summary']['sample_count'], 2)
+        self.assertEqual(summary['summary']['passed_count'], 2)
+        self.assertEqual(summary['summary']['blocked_count'], 0)
+        self.assertEqual(summary['summary']['total_removed_approved_count'], 5)
+
+    def test_local_corpus_smoke_marks_missing_approval_artifacts_blocked(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'missing.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            {},
+            approval_artifacts_available=False)
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'missing_approval_artifacts',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_local_corpus_smoke_keeps_large_sample_bounded_only(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'input6_large.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            _local_internal_report(removed=30),
+            bounded_subset_only=True,
+            full_document_skipped=True,
+            body_text_signature_preserved=True,
+            generated_paths=['local_reports/phase3d/input6_large_subset/filtered.docx'])
+
+        self.assertEqual(report['status'], 'bounded_subset_passed')
+        self.assertTrue(report['bounded_subset_only'])
+        self.assertTrue(report['full_document_skipped'])
+
+    def test_local_corpus_smoke_requires_body_text_signature_preservation(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'input3.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            _local_internal_report(removed=1),
+            body_text_signature_preserved=False)
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'body_text_signature_not_preserved',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_local_corpus_smoke_fail_closes_on_residual_body_or_table_loss(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'input3.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            _local_internal_report(removed=1),
+            body_text_signature_preserved=True,
+            true_residual_header_footer_pollution_count=1,
+            body_text_loss_warning_count=1,
+            table_text_loss_warning_count=1)
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('true_residual_header_footer_pollution', warning_types)
+        self.assertIn('body_text_loss', warning_types)
+        self.assertIn('table_text_loss', warning_types)
+
+    def test_local_corpus_smoke_reports_body_textblock_delta(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'input3.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            _local_internal_report(removed=1, body_text_block_delta=-2),
+            body_text_signature_preserved=True)
+
+        self.assertEqual(report['summary']['body_text_block_delta'], -2)
+        self.assertIn(
+            'body_text_block_count_changed',
+            {warning['type'] for warning in report['diagnostic_warnings']})
+        self.assertEqual(report['status'], 'passed')
+
+    def test_local_corpus_smoke_blocks_nonlocal_docx_paths(self):
+        report = _local_corpus_docx_smoke_sample_report(
+            'input.pdf',
+            _local_docx_metric(),
+            _local_docx_metric(),
+            _local_internal_report(removed=1),
+            body_text_signature_preserved=True,
+            generated_paths=['/outside/generated.docx'])
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'generated_docx_path_not_local_only',
+            {warning['type'] for warning in report['safety_warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -6361,6 +6471,220 @@ def _synthetic_docx_comparison_report_from_metrics(
                 'Synthetic filtered DOCX comparison produced fail-closed warnings.'),
         },
     }
+
+
+def _local_corpus_docx_smoke_sample_report(
+        sample_name,
+        baseline_docx_metrics=None,
+        filtered_docx_metrics=None,
+        internal_filtered_parse_report=None,
+        approval_artifacts_available=True,
+        bounded_subset_only=False,
+        full_document_skipped=False,
+        body_text_signature_preserved=True,
+        true_residual_header_footer_pollution_count=0,
+        body_text_loss_warning_count=0,
+        table_text_loss_warning_count=0,
+        generated_paths=None,
+        skipped_reason=''):
+    baseline_docx_metrics = baseline_docx_metrics or {}
+    filtered_docx_metrics = filtered_docx_metrics or {}
+    internal_report = internal_filtered_parse_report or {}
+    internal_summary = internal_report.get('summary') or {}
+    generated_paths = list(generated_paths or [])
+    diagnostic_warnings = []
+    safety_warnings = []
+
+    if skipped_reason:
+        safety_warnings.append({
+            'type': 'sample_skipped',
+            'reason': skipped_reason,
+        })
+    if not approval_artifacts_available:
+        safety_warnings.append({'type': 'missing_approval_artifacts'})
+    if not _local_docx_metric_exists(baseline_docx_metrics):
+        safety_warnings.append({'type': 'baseline_docx_missing_or_empty'})
+    if not _local_docx_metric_exists(filtered_docx_metrics):
+        safety_warnings.append({'type': 'filtered_docx_missing_or_empty'})
+    if not body_text_signature_preserved:
+        safety_warnings.append({'type': 'body_text_signature_not_preserved'})
+    if true_residual_header_footer_pollution_count:
+        safety_warnings.append({
+            'type': 'true_residual_header_footer_pollution',
+            'count': true_residual_header_footer_pollution_count,
+        })
+    if body_text_loss_warning_count:
+        safety_warnings.append({
+            'type': 'body_text_loss',
+            'count': body_text_loss_warning_count,
+        })
+    if table_text_loss_warning_count:
+        safety_warnings.append({
+            'type': 'table_text_loss',
+            'count': table_text_loss_warning_count,
+        })
+    if not _local_generated_paths_are_local_only(generated_paths):
+        safety_warnings.append({'type': 'generated_docx_path_not_local_only'})
+
+    body_text_block_delta = internal_summary.get('body_text_block_delta')
+    if body_text_block_delta:
+        diagnostic_warnings.append({
+            'type': 'body_text_block_count_changed',
+            'delta': body_text_block_delta,
+            'classification': (
+                'acceptable_boundary_or_grouping_shift'
+                if body_text_signature_preserved else
+                'unsafe_body_text_loss'),
+        })
+
+    table_delta = (
+        _local_docx_metric_int(filtered_docx_metrics, 'table_count') -
+        _local_docx_metric_int(baseline_docx_metrics, 'table_count'))
+    if table_delta:
+        diagnostic_warnings.append({
+            'type': 'docx_table_count_changed',
+            'delta': table_delta,
+            'classification': (
+                'reported_no_table_text_loss'
+                if not table_text_loss_warning_count else
+                'unsafe_table_text_loss'),
+        })
+
+    status = 'blocked' if safety_warnings else 'passed'
+    if bounded_subset_only and not safety_warnings:
+        status = 'bounded_subset_passed'
+    if skipped_reason and not approval_artifacts_available:
+        status = 'skipped'
+
+    return {
+        'sample_name': sample_name,
+        'status': status,
+        'bounded_subset_only': bool(bounded_subset_only),
+        'full_document_skipped': bool(full_document_skipped),
+        'generated_paths': generated_paths,
+        'summary': {
+            'baseline_docx_paragraph_count': _local_docx_metric_int(
+                baseline_docx_metrics, 'paragraph_count'),
+            'filtered_docx_paragraph_count': _local_docx_metric_int(
+                filtered_docx_metrics, 'paragraph_count'),
+            'baseline_docx_table_count': _local_docx_metric_int(
+                baseline_docx_metrics, 'table_count'),
+            'filtered_docx_table_count': _local_docx_metric_int(
+                filtered_docx_metrics, 'table_count'),
+            'removed_approved_header_footer_page_number_count': _local_docx_metric_int(
+                internal_summary, 'removed_raw_block_count'),
+            'true_residual_header_footer_pollution_count': int(
+                true_residual_header_footer_pollution_count or 0),
+            'body_text_signature_preserved': bool(body_text_signature_preserved),
+            'body_text_loss_warning_count': int(body_text_loss_warning_count or 0),
+            'table_text_loss_warning_count': int(table_text_loss_warning_count or 0),
+            'body_text_block_delta': body_text_block_delta or 0,
+            'generated_docx_artifacts_local_only': _local_generated_paths_are_local_only(
+                generated_paths),
+            'default_conversion_unchanged': True,
+        },
+        'diagnostic_warnings': diagnostic_warnings,
+        'safety_warnings': safety_warnings,
+    }
+
+
+def _local_corpus_docx_smoke_summary_report(sample_reports):
+    sample_reports = list(sample_reports or [])
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_internal_filtered_docx_smoke_only',
+        'summary': {
+            'sample_count': len(sample_reports),
+            'passed_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'passed'),
+            'bounded_subset_passed_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'bounded_subset_passed'),
+            'blocked_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'blocked'),
+            'skipped_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'skipped'),
+            'total_removed_approved_count': sum(
+                int((report.get('summary') or {}).get(
+                    'removed_approved_header_footer_page_number_count', 0))
+                for report in sample_reports),
+            'total_true_residual_header_footer_pollution_count': sum(
+                int((report.get('summary') or {}).get(
+                    'true_residual_header_footer_pollution_count', 0))
+                for report in sample_reports),
+            'total_body_text_loss_warning_count': sum(
+                int((report.get('summary') or {}).get(
+                    'body_text_loss_warning_count', 0))
+                for report in sample_reports),
+            'total_table_text_loss_warning_count': sum(
+                int((report.get('summary') or {}).get(
+                    'table_text_loss_warning_count', 0))
+                for report in sample_reports),
+        },
+        'samples': sample_reports,
+        'recommendation': {
+            'safe_for_phase_3e': all(
+                report.get('status') in {'passed', 'bounded_subset_passed'}
+                for report in sample_reports),
+            'reason': (
+                'Local corpus smoke validation has no fail-closed blockers.'
+                if all(
+                    report.get('status') in {'passed', 'bounded_subset_passed'}
+                    for report in sample_reports) else
+                'Resolve blocked or skipped local corpus smoke samples before Phase 3E.'),
+        },
+    }
+
+
+def _local_docx_metric(paragraphs=10, tables=1, size=1200):
+    return {
+        'exists': True,
+        'size': size,
+        'paragraph_count': paragraphs,
+        'table_count': tables,
+        'all_text': 'local corpus body text',
+    }
+
+
+def _local_internal_report(removed=0, body_text_block_delta=0):
+    return {
+        'applied_to_parse': bool(removed),
+        'summary': {
+            'removed_raw_block_count': removed,
+            'body_text_block_delta': body_text_block_delta,
+        },
+        'safety_warnings': [],
+    }
+
+
+def _local_docx_metric_exists(metrics):
+    return bool(
+        metrics.get('exists') and
+        (
+            metrics.get('size', 0) or
+            metrics.get('size_bytes', 0) or
+            metrics.get('file_size_bytes', 0)))
+
+
+def _local_docx_metric_int(metrics, key):
+    try:
+        return int(metrics.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _local_generated_paths_are_local_only(paths):
+    for path in paths or []:
+        normalized = str(path).replace('\\', '/')
+        if normalized.startswith('/tmp/'):
+            continue
+        if normalized.startswith('local_reports/') or '/local_reports/' in normalized:
+            continue
+        return False
+    return True
 
 
 def _body_text_fragments(layout):
