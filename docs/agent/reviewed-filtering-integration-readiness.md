@@ -504,3 +504,49 @@ Safety interpretation:
 Phase 4E should remain internal. The next safe direction is to prototype
 first-page or odd/even DOCX writing only in temporary synthetic tests, or to
 keep improving policy diagnostics before production integration is considered.
+
+## Phase 4E Local Corpus Default-Policy Migration Smoke
+
+Phase 4E applies the Phase 4D default-policy migration smoke path to approved
+ignored local corpus samples. This evidence remains local-only and
+non-committed.
+
+Local corpus policy results:
+
+- `input.pdf` classified as `default`.
+- `input3.pdf` classified as `default`.
+- `input6_large.pdf` classified as `unsupported` on the bounded subset because
+  the local evidence has incomplete header/footer page coverage. Full
+  756-page migration and DOCX generation were not run.
+
+Local smoke interpretation:
+
+- `input.pdf` and `input3.pdf` both wrote approved header/footer text into DOCX
+  header/footer XML in ignored local output paths.
+- Approved header/footer residual pollution in body XML was 0 for the evaluated
+  samples.
+- Table text loss warnings were 0.
+- The strict DOCX body-signature criterion failed closed for the two eligible
+  local samples. This differs from the Phase 3D raw body-region signature
+  evidence and should be investigated before broadening migration.
+- `input6_large.pdf` remained bounded-subset-only and skipped because only
+  `default` policy is allowed to write DOCX header/footer parts in the current
+  internal writer.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Only `default` policy is allowed for local corpus migration smoke.
+- `first_page`, `odd_even`, `section_scoped`, `unsupported`, and ambiguous
+  policies remain fail-closed.
+- Local corpus PDFs, reports, review packs, and generated DOCX files remain
+  ignored and non-committed.
+- Page-number behavior remains placeholder-only; robust Word field insertion is
+  still deferred.
+- This is still not production/default integration.
+
+Phase 4F should remain internal. The next safe direction is to reconcile the
+local corpus DOCX body-signature validation with the already-passing raw
+body-region signature evidence before adding first-page, odd/even, or
+production migration behavior.

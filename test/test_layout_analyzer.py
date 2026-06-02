@@ -5740,6 +5740,81 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'generated_docx_path_not_local_only',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_local_corpus_default_policy_migration_summary_handles_multiple_samples(self):
+        reports = [
+            _local_corpus_default_policy_migration_sample_report(
+                'input.pdf',
+                'default',
+                _default_policy_migration_smoke_summary()),
+            _local_corpus_default_policy_migration_sample_report(
+                'input6_large.pdf',
+                'unsupported',
+                bounded_subset_only=True,
+                full_document_skipped=True,
+                skipped_reason='policy_not_default'),
+        ]
+        summary = _local_corpus_default_policy_migration_summary_report(reports)
+
+        self.assertEqual(summary['summary']['sample_count'], 2)
+        self.assertEqual(summary['summary']['passed_count'], 1)
+        self.assertEqual(summary['summary']['skipped_count'], 1)
+        self.assertEqual(summary['summary']['bounded_subset_only_count'], 1)
+
+    def test_local_corpus_default_policy_migration_blocks_missing_artifacts(self):
+        report = _local_corpus_default_policy_migration_sample_report(
+            'missing.pdf',
+            'unknown',
+            approval_artifacts_available=False,
+            skipped_reason='missing_approval_artifacts')
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'missing_approval_artifacts',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_local_corpus_default_policy_migration_skips_non_default_policy(self):
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input6_large.pdf',
+            'section_scoped',
+            _default_policy_migration_smoke_summary(),
+            bounded_subset_only=True,
+            skipped_reason='policy_not_default')
+
+        self.assertEqual(report['status'], 'skipped')
+        self.assertIn(
+            'non_default_policy_skipped',
+            {warning['type'] for warning in report['diagnostic_warnings']})
+
+    def test_local_corpus_default_policy_migration_fail_closes_on_safety_loss(self):
+        summary = _default_policy_migration_smoke_summary(
+            body_text_signature_preserved=False,
+            true_residual_header_footer_pollution_count=1,
+            body_text_loss_warning_count=1,
+            table_text_loss_warning_count=1)
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            summary)
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('body_text_signature_not_preserved', warning_types)
+        self.assertIn('true_residual_header_footer_pollution', warning_types)
+        self.assertIn('body_text_loss', warning_types)
+        self.assertIn('table_text_loss', warning_types)
+
+    def test_local_corpus_default_policy_migration_blocks_nonlocal_paths(self):
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            _default_policy_migration_smoke_summary(),
+            generated_paths=['/outside/baseline.docx'])
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'generated_docx_path_not_local_only',
+            {warning['type'] for warning in report['safety_warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -7396,6 +7471,8 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
     ]
     header_present = all(text in header_xml for text in header_texts)
     footer_present = all(text in footer_xml for text in footer_texts)
+    page_placeholder_expected = (
+        int(plan.get('summary', {}).get('page_number_placeholder_count', 0)) > 0)
     page_placeholder_present = '&lt;PAGE_NUMBER&gt;' in footer_xml
 
     safety_warnings = []
@@ -7410,7 +7487,7 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         safety_warnings.append({'type': 'approved_header_text_missing_from_docx_header'})
     if not footer_present:
         safety_warnings.append({'type': 'approved_footer_text_missing_from_docx_footer'})
-    if not page_placeholder_present:
+    if page_placeholder_expected and not page_placeholder_present:
         safety_warnings.append({'type': 'page_number_placeholder_missing_from_docx_footer'})
     if approved_residuals_in_body:
         safety_warnings.append({
@@ -7430,6 +7507,7 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         'policy_safety_status': policy.get('safety_status', ''),
         'docx_header_xml_contains_approved_header': header_present,
         'docx_footer_xml_contains_approved_footer': footer_present,
+        'docx_footer_xml_page_placeholder_expected': page_placeholder_expected,
         'docx_footer_xml_contains_page_placeholder': page_placeholder_present,
         'approved_residuals_absent_from_body_xml': not approved_residuals_in_body,
         'body_residual_header_footer_pollution_count': int(
@@ -7871,6 +7949,184 @@ def _local_corpus_docx_smoke_summary_report(sample_reports):
                     report.get('status') in {'passed', 'bounded_subset_passed'}
                     for report in sample_reports) else
                 'Resolve blocked or skipped local corpus smoke samples before Phase 3E.'),
+        },
+    }
+
+
+def _default_policy_migration_smoke_summary(
+        smoke_passed=True,
+        body_text_signature_preserved=True,
+        true_residual_header_footer_pollution_count=0,
+        body_text_loss_warning_count=0,
+        table_text_loss_warning_count=0,
+        page_number_placeholder_expected=True):
+    page_number_placeholder_expected = bool(page_number_placeholder_expected)
+    return {
+        'smoke_passed': bool(smoke_passed),
+        'policy_type': 'default',
+        'docx_header_xml_contains_approved_header': True,
+        'docx_footer_xml_contains_approved_footer': True,
+        'docx_footer_xml_page_placeholder_expected': page_number_placeholder_expected,
+        'docx_footer_xml_contains_page_placeholder': page_number_placeholder_expected,
+        'approved_residuals_absent_from_body_xml': (
+            int(true_residual_header_footer_pollution_count or 0) == 0),
+        'body_residual_header_footer_pollution_count': int(
+            true_residual_header_footer_pollution_count or 0),
+        'body_text_signature_preserved': bool(body_text_signature_preserved),
+        'body_text_loss_warning_count': int(body_text_loss_warning_count or 0),
+        'table_text_loss_warning_count': int(table_text_loss_warning_count or 0),
+        'page_number_behavior': 'placeholder_only',
+        'page_number_field_generation': 'deferred_placeholder_only',
+        'generated_docx_artifacts_temp_only': True,
+    }
+
+
+def _local_corpus_default_policy_migration_sample_report(
+        sample_name,
+        policy_type,
+        smoke_summary=None,
+        approval_artifacts_available=True,
+        bounded_subset_only=False,
+        full_document_skipped=False,
+        generated_paths=None,
+        skipped_reason=''):
+    smoke_summary = dict(smoke_summary or {})
+    generated_paths = list(generated_paths or [])
+    diagnostic_warnings = []
+    safety_warnings = []
+    if not approval_artifacts_available:
+        safety_warnings.append({'type': 'missing_approval_artifacts'})
+    if policy_type != 'default':
+        diagnostic_warnings.append({
+            'type': 'non_default_policy_skipped',
+            'policy_type': policy_type,
+        })
+    if skipped_reason:
+        diagnostic_warnings.append({
+            'type': 'sample_skipped',
+            'reason': skipped_reason,
+        })
+    if (
+            policy_type == 'default' and
+            smoke_summary and
+            not smoke_summary.get('smoke_passed', False)):
+        safety_warnings.append({'type': 'default_policy_migration_smoke_failed'})
+    if smoke_summary and not smoke_summary.get('body_text_signature_preserved', False):
+        safety_warnings.append({'type': 'body_text_signature_not_preserved'})
+    if int(smoke_summary.get('body_residual_header_footer_pollution_count', 0) or 0):
+        safety_warnings.append({
+            'type': 'true_residual_header_footer_pollution',
+            'count': int(smoke_summary.get('body_residual_header_footer_pollution_count', 0)),
+        })
+    if int(smoke_summary.get('body_text_loss_warning_count', 0) or 0):
+        safety_warnings.append({
+            'type': 'body_text_loss',
+            'count': int(smoke_summary.get('body_text_loss_warning_count', 0)),
+        })
+    if int(smoke_summary.get('table_text_loss_warning_count', 0) or 0):
+        safety_warnings.append({
+            'type': 'table_text_loss',
+            'count': int(smoke_summary.get('table_text_loss_warning_count', 0)),
+        })
+    if generated_paths and not _local_generated_paths_are_local_only(generated_paths):
+        safety_warnings.append({'type': 'generated_docx_path_not_local_only'})
+
+    if safety_warnings:
+        status = 'blocked'
+    elif policy_type == 'default' and smoke_summary.get('smoke_passed', False):
+        status = 'bounded_subset_passed' if bounded_subset_only else 'passed'
+    else:
+        status = 'skipped'
+
+    return {
+        'sample_name': sample_name,
+        'status': status,
+        'policy_type': policy_type,
+        'bounded_subset_only': bool(bounded_subset_only),
+        'full_document_skipped': bool(full_document_skipped),
+        'generated_paths': generated_paths,
+        'summary': {
+            'default_policy_migration_smoke_passed': bool(
+                smoke_summary.get('smoke_passed', False)),
+            'docx_header_xml_contains_approved_header': bool(
+                smoke_summary.get('docx_header_xml_contains_approved_header', False)),
+            'docx_footer_xml_contains_approved_footer': bool(
+                smoke_summary.get('docx_footer_xml_contains_approved_footer', False)),
+            'docx_footer_xml_contains_page_placeholder': bool(
+                smoke_summary.get('docx_footer_xml_contains_page_placeholder', False)),
+            'docx_footer_xml_page_placeholder_expected': bool(
+                smoke_summary.get('docx_footer_xml_page_placeholder_expected', False)),
+            'body_residual_header_footer_pollution_count': int(
+                smoke_summary.get('body_residual_header_footer_pollution_count', 0) or 0),
+            'body_text_signature_preserved': bool(
+                smoke_summary.get('body_text_signature_preserved', False)),
+            'body_text_loss_warning_count': int(
+                smoke_summary.get('body_text_loss_warning_count', 0) or 0),
+            'table_text_loss_warning_count': int(
+                smoke_summary.get('table_text_loss_warning_count', 0) or 0),
+            'page_number_behavior': smoke_summary.get('page_number_behavior', ''),
+            'page_number_field_generation': smoke_summary.get(
+                'page_number_field_generation', ''),
+            'generated_docx_artifacts_local_only': (
+                _local_generated_paths_are_local_only(generated_paths)
+                if generated_paths else True),
+            'default_conversion_unchanged': True,
+        },
+        'diagnostic_warnings': diagnostic_warnings,
+        'safety_warnings': safety_warnings,
+    }
+
+
+def _local_corpus_default_policy_migration_summary_report(sample_reports):
+    sample_reports = list(sample_reports or [])
+    blocked = any(report.get('status') == 'blocked' for report in sample_reports)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_default_policy_header_footer_migration_smoke_only',
+        'summary': {
+            'sample_count': len(sample_reports),
+            'passed_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'passed'),
+            'bounded_subset_passed_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'bounded_subset_passed'),
+            'skipped_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'skipped'),
+            'blocked_count': sum(
+                1 for report in sample_reports
+                if report.get('status') == 'blocked'),
+            'bounded_subset_only_count': sum(
+                1 for report in sample_reports
+                if report.get('bounded_subset_only')),
+            'total_true_residual_header_footer_pollution_count': sum(
+                int((report.get('summary') or {}).get(
+                    'body_residual_header_footer_pollution_count', 0))
+                for report in sample_reports),
+            'total_body_text_loss_warning_count': sum(
+                int((report.get('summary') or {}).get(
+                    'body_text_loss_warning_count', 0))
+                for report in sample_reports),
+            'total_table_text_loss_warning_count': sum(
+                int((report.get('summary') or {}).get(
+                    'table_text_loss_warning_count', 0))
+                for report in sample_reports),
+        },
+        'samples': sample_reports,
+        'warnings': [
+            warning
+            for report in sample_reports
+            for warning in (
+                (report.get('safety_warnings') or []) +
+                (report.get('diagnostic_warnings') or []))
+        ],
+        'recommendation': {
+            'safe_for_phase_4f': not blocked,
+            'reason': (
+                'Local default-policy migration smoke completed or skipped fail-closed.'
+                if not blocked else
+                'Resolve blocked local default-policy migration smoke samples first.'),
         },
     }
 

@@ -4914,3 +4914,122 @@ Phase 4E should remain internal and private. The next safe direction is to
 prototype first-page or odd/even DOCX writing only in temporary synthetic tests,
 or continue improving section-aware policy diagnostics before any production
 integration is considered.
+
+## Phase 4E
+
+Date: 2026-06-03
+
+### Scope
+
+Phase 4E added local-only default-policy migration smoke summary support for
+approved ignored local corpus samples. It does not wire DOCX header/footer
+migration into normal conversion.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Local corpus result
+
+Evaluated local-only samples:
+
+- `input.pdf`: classified as `default`; smoke blocked by strict DOCX body
+  signature validation.
+- `input3.pdf`: classified as `default`; smoke blocked by strict DOCX body
+  signature validation.
+- `input6_large.pdf`: bounded subset only; classified as `unsupported` because
+  the bounded evidence has incomplete header/footer page coverage; full
+  756-page migration and DOCX generation were skipped.
+
+Local smoke summary:
+
+- Sample count: 3.
+- Passed: 0.
+- Skipped: 1.
+- Blocked: 2.
+- Body residual header/footer pollution count: 0.
+- Table text loss warning count: 0.
+- Body text loss warning count from the strict DOCX signature gate: 12.
+- Page-number behavior: placeholder-only; no Word page-number field generation.
+
+For the two `default` samples, approved header/footer text was written to
+ignored local DOCX header/footer XML, and approved residual header/footer
+pollution did not remain in the body. The stricter local DOCX body-signature
+gate still fail-closed, so Phase 4F should investigate that mismatch before
+any broader migration work.
+
+Generated ignored local artifacts:
+
+- `local_reports/phase4e-local-corpus-default-policy-migration-report.md`
+- `local_reports/phase4e/input/*.docx`
+- `local_reports/phase4e/input3/*.docx`
+
+### Tests added
+
+- Local corpus migration summary handles multiple samples.
+- Missing approval artifacts block clearly.
+- Non-default policies are skipped/fail-closed.
+- Default-policy smoke safety loss blocks.
+- Non-local generated DOCX paths block.
+- Page-number placeholder expectation is represented separately from
+  placeholder presence.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "local_corpus_default_policy_migration or default_policy_header_footer_migration_smoke or default_policy_migration"
+```
+
+Result: passed. 8 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 287 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 287 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated local DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4E test and
+documentation files were modified.
+
+### Phase 4E recommendation
+
+Phase 4F should remain internal. The next safe direction is to reconcile the
+local corpus strict DOCX body-signature gate with the previously passing raw
+body-region signature evidence before adding first-page, odd/even, section, or
+production migration behavior.
