@@ -4,8 +4,11 @@
 layout.json
 .vscode/
 .venv/
+.venv-wheel-smoke/
 local_samples/
 local_reports/
+wheelhouse/
+*.whl
 
 # pdf testing files
 *.pdf

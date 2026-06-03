@@ -7253,6 +7253,51 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertEqual(filtering['summary']['removed_block_count'], 0)
             self.assertFalse(_phase5f_uses_local_sample_text(_layout_all_text(layout)))
 
+    def test_phase6a_smoke_convert_script_argument_parsing(self):
+        module = _load_smoke_convert_script()
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'input.pdf',
+            'output.docx',
+            '--start',
+            '1',
+            '--end',
+            '3',
+            '--pages',
+            '0,2',
+        ])
+
+        self.assertEqual(args.input_pdf, 'input.pdf')
+        self.assertEqual(args.output_docx, 'output.docx')
+        self.assertEqual(args.start, 1)
+        self.assertEqual(args.end, 3)
+        self.assertEqual(args.pages, [0, 2])
+        self.assertIsNone(module.parse_pages(''))
+
+    def test_phase6a_smoke_convert_script_missing_input_fails_clearly(self):
+        module = _load_smoke_convert_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_pdf = Path(tmp) / 'missing.pdf'
+            output_docx = Path(tmp) / 'output.docx'
+            exit_code = module.main([str(missing_pdf), str(output_docx)])
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(output_docx.exists())
+
+    def test_phase6a_packaging_plan_mentions_offline_install_and_python_support(self):
+        plan_path = (
+            Path(__file__).resolve().parents[1] /
+            'docs' /
+            'agent' /
+            'offline-wheelhouse-packaging-plan.md')
+        text = plan_path.read_text(encoding='utf-8')
+
+        self.assertIn('--no-index', text)
+        self.assertIn('--find-links', text)
+        self.assertIn('python_requires=">=3.10"', text)
+        self.assertIn('Python 3.10', text)
+        self.assertIn('scripts/smoke_convert_pdf_to_docx.py', text)
+
     def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
             synthetic_coverage=_quality_synthetic_evidence(),
@@ -10899,6 +10944,17 @@ def _phase5f_uses_local_sample_text(text):
         'input6_large.pdf',
     }
     return any(marker in lowered for marker in local_markers)
+
+
+def _load_smoke_convert_script():
+    script_path = (
+        Path(__file__).resolve().parents[1] /
+        'scripts' /
+        'smoke_convert_pdf_to_docx.py')
+    spec = util.spec_from_file_location('smoke_convert_pdf_to_docx', script_path)
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _quality_local_evidence(

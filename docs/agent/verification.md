@@ -6581,3 +6581,280 @@ Phase 5G should evaluate performance/stress behavior or continue expanding
 public-safe fixtures. Public/default integration, non-default policy writing,
 image/logo migration, paragraph merge, and table parser changes remain future
 work.
+
+## Phase 6A
+
+Packaging Phase 6A prepared private/offline wheelhouse usage documentation and
+a generic wheel conversion smoke script. This phase is private packaging work
+only; it does not expose reviewed header/footer migration publicly and does not
+change default conversion behavior.
+
+### Default/public behavior
+
+Production/default conversion changed:
+
+- No.
+
+Public CLI/API changed:
+
+- No.
+
+Existing conversion tests passed:
+
+- Yes.
+
+Reviewed filtering status:
+
+- Internal-only and disabled by default.
+- No public CLI flag was added.
+- No public API option was added.
+- No production table parsing behavior was changed.
+
+### Packaging metadata summary
+
+Packaging metadata files inspected:
+
+- `setup.py`
+- `requirements.txt`
+- `.gitignore`
+- `MANIFEST.in`
+
+Absent metadata files:
+
+- No committed `pyproject.toml`.
+- No committed `setup.cfg`.
+
+Declared package metadata:
+
+- Package name: `pdf2docx`
+- Version source: `version.txt`
+- Built version: `0.5.13`
+- Declared Python support: `Requires-Python: >=3.10`
+- Console entry point: `pdf2docx=pdf2docx.main:main`
+- Project wheel tag: `py3-none-any`
+- Wheel metadata: `Root-Is-Purelib: true`
+
+Runtime dependency constraints:
+
+- `PyMuPDF>=1.26.7`
+- `python-docx>=0.8.10`
+- `fonttools>=4.24.0`
+- `numpy>=1.17.2`
+- `opencv-python-headless>=4.5`
+- `fire>=0.3.0`
+
+Packaging interpretation:
+
+- The project package wheel is pure Python.
+- The offline wheelhouse is platform/Python-target specific because PyMuPDF,
+  numpy, opencv-python-headless, lxml, and fonttools provide platform wheels.
+
+### Python compatibility
+
+Tested full packaging/install/conversion interpreter:
+
+- Python 3.12.13, Windows 11, `win-amd64`.
+
+Dependency wheels built for the local wheelhouse:
+
+- CPython 3.12 / Windows AMD64 where platform-specific.
+- PyMuPDF wheel: `cp310-abi3-win_amd64`.
+- opencv wheel: `cp37-abi3-win_amd64`.
+
+Additional local interpreter check:
+
+- `/usr/bin/python3.10` was available.
+- Python 3.10 syntax/compile check passed for the touched smoke script and
+  core files.
+- Python 3.10 dependency install/test matrix was not run because the built
+  wheelhouse targets Windows/AMD64 Python 3.12, not the local Linux Python
+  3.10 interpreter.
+
+Unsupported/not tested:
+
+- Python 2.7 and Python 3.6 are below the declared `>=3.10` minimum and were
+  not tested.
+- Python 3.11 and Python 3.13 interpreters were not available locally in the
+  tested environment.
+
+### Files added
+
+Committed packaging plan:
+
+- `docs/agent/offline-wheelhouse-packaging-plan.md`
+
+Committed smoke script:
+
+- `scripts/smoke_convert_pdf_to_docx.py`
+
+Git ignore additions:
+
+- `.venv-wheel-smoke/`
+- `wheelhouse/`
+- `*.whl`
+
+### Commands run
+
+Focused Phase 6A tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "phase6a"
+```
+
+Result: passed. 3 selected tests ran successfully.
+
+Required layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 361 tests and 40 subtests ran successfully.
+
+Required compile check plus smoke script compile:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py scripts/smoke_convert_pdf_to_docx.py
+```
+
+Result: passed.
+
+Python 3.10 syntax/compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp python3.10 -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py scripts/smoke_convert_pdf_to_docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Required conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Install build tools:
+
+```bash
+.venv/bin/python -m pip install --upgrade build wheel
+```
+
+Result: passed. Installed `build==1.5.0`, `wheel==0.47.0`, and
+`pyproject_hooks==1.2.0` into the ignored `.venv/`.
+
+Build project wheel:
+
+```bash
+.venv/bin/python -m build --wheel
+```
+
+Result: passed. Built `dist/pdf2docx-0.5.13-py3-none-any.whl`.
+
+Build dependency wheelhouse:
+
+```bash
+.venv/bin/python -m pip wheel -w wheelhouse .
+```
+
+Result: passed. Built `wheelhouse/` with the project wheel and runtime
+dependency wheels.
+
+Create fresh wheel smoke environment:
+
+```bash
+.venv/bin/python -m venv .venv-wheel-smoke
+```
+
+Result: passed. Fresh environment created with
+`.venv-wheel-smoke/Scripts/python.exe`.
+
+Offline-style install from wheelhouse:
+
+```bash
+.venv-wheel-smoke/Scripts/python.exe -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Result: passed. Installed `pdf2docx==0.5.13` and runtime dependencies from
+`wheelhouse/` only.
+
+Import smoke:
+
+```bash
+/mnt/d/Workspaces/Codex/pdf2docx/.venv-wheel-smoke/Scripts/python.exe -c "import sys, platform, pdf2docx; print(sys.version); print(platform.platform()); print(pdf2docx.__file__)"
+```
+
+Run from `/tmp`.
+
+Result: passed. `pdf2docx.__file__` resolved to
+`.venv-wheel-smoke/Lib/site-packages/pdf2docx/__init__.py`.
+
+Conversion smoke with committed demo PDF:
+
+```bash
+/mnt/d/Workspaces/Codex/pdf2docx/.venv-wheel-smoke/Scripts/python.exe D:/Workspaces/Codex/pdf2docx/scripts/smoke_convert_pdf_to_docx.py D:/Workspaces/Codex/pdf2docx/test/samples/demo.pdf D:/Workspaces/Codex/pdf2docx/local_reports/wheel_smoke/demo.docx
+```
+
+Result: passed. Output:
+
+- `local_reports/wheel_smoke/demo.docx`
+- Size: 440087 bytes
+- Imported module: `.venv-wheel-smoke/Lib/site-packages/pdf2docx/__init__.py`
+
+Private local sample conversion smoke:
+
+```bash
+/mnt/d/Workspaces/Codex/pdf2docx/.venv-wheel-smoke/Scripts/python.exe D:/Workspaces/Codex/pdf2docx/scripts/smoke_convert_pdf_to_docx.py D:/Workspaces/Codex/pdf2docx/local_samples/input.pdf D:/Workspaces/Codex/pdf2docx/local_reports/wheel_smoke/input.docx
+```
+
+Result: passed because `local_samples/input.pdf` was present. Output:
+
+- `local_reports/wheel_smoke/input.docx`
+- Size: 280904 bytes
+- Imported module: `.venv-wheel-smoke/Lib/site-packages/pdf2docx/__init__.py`
+
+### Generated artifacts
+
+Generated and ignored:
+
+- `build/`
+- `dist/pdf2docx-0.5.13-py3-none-any.whl`
+- `wheelhouse/`
+- `.venv-wheel-smoke/`
+- `pdf2docx.egg-info/`
+- `local_reports/wheel_smoke/demo.docx`
+- `local_reports/wheel_smoke/input.docx`
+- `local_reports/wheel_smoke/*.docx` temporary/lock files
+- caches and `__pycache__/`
+
+Ignore verification:
+
+- `dist/` ignored by `.gitignore`.
+- `wheelhouse/` ignored by `.gitignore`.
+- `.venv-wheel-smoke/` ignored by `.gitignore`.
+- wheel files ignored by `.gitignore`.
+- wheel smoke DOCX outputs ignored through `local_reports/`.
+
+### Compatibility limitations
+
+- Full wheel install and conversion smoke were run only on Python 3.12.13
+  Windows AMD64.
+- Python 3.10 was compile-checked but not dependency-installed/tested.
+- Linux/macOS wheelhouses were not built in this phase.
+- Python 3.11 and Python 3.13 were not tested locally.
+- Dependency wheel availability must be verified per closed-network target.
+
+### Phase 6A recommendation
+
+Phase 6B should run the same wheelhouse install and conversion smoke on the
+actual closed-network target OS/Python matrix, record dependency wheel
+availability, and define checksum/transfer procedures for the offline bundle.
