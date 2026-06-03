@@ -769,3 +769,36 @@ Phase 5A should keep the profile internal and use it as the single entry point
 for any next bounded smoke path. A sensible next step is a profile-driven,
 default-policy local smoke that reuses the existing normalized gate, still
 without default conversion changes or public exposure.
+
+## Phase 5A: Quality Evaluation Pack
+
+Phase 5A adds an internal quality evaluation pack for the reviewed
+header/footer migration MVP. It evaluates readiness and evidence quality rather
+than expanding behavior.
+
+Committed evaluation document:
+
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+
+Phase 5A status:
+
+- The feature remains internal-only.
+- Public CLI/API exposure remains closed.
+- Production/default integration is still not enabled.
+- Normal conversion output remains unchanged.
+- Reviewed filtering remains disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- Only default-policy simple text writing is considered supported.
+- Non-default policy writing remains fail-closed.
+- `placeholder_only` remains the default page-number behavior.
+- `word_field` remains explicit and internal-only.
+
+The quality evaluation summarizes synthetic coverage, available ignored local
+corpus evidence, approval and preservation safety gates, policy limitations,
+page-number behavior, remaining gaps, and recommended next phases. It does not
+include extracted local PDF text and does not promote ignored local evidence to
+committed fixture coverage.
+
+Phase 5B should remain bounded and internal. The safest next direction is to
+use the quality pack as a checklist for a profile-driven default-policy smoke,
+without public/default integration or broader migration behavior.

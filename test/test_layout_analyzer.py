@@ -36,6 +36,7 @@ build_reviewed_filtering_internal_config_report = LayoutAnalyzer.build_reviewed_
 build_reviewed_header_footer_migration_profile = LayoutAnalyzer.build_reviewed_header_footer_migration_profile
 summarize_reviewed_header_footer_migration_profile = LayoutAnalyzer.summarize_reviewed_header_footer_migration_profile
 validate_reviewed_header_footer_migration_profile = LayoutAnalyzer.validate_reviewed_header_footer_migration_profile
+build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
@@ -6680,6 +6681,104 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'residual_header_footer_pollution',
             {warning['type'] for warning in residual_validation['warnings']})
 
+    def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            synthetic_coverage=_quality_synthetic_evidence(),
+            local_corpus_evidence=_quality_local_evidence())
+        summary = pack['summary']
+
+        self.assertEqual(
+            summary['readiness_status'],
+            'ready_for_internal_quality_review')
+        self.assertEqual(
+            summary['public_default_readiness_status'],
+            'not_public_ready')
+        self.assertEqual(summary['public_exposure'], 'none')
+        self.assertFalse(summary['production_default_enabled'])
+        self.assertFalse(summary['default_conversion_changed'])
+        self.assertFalse(pack['recommendation']['public_default_ready'])
+
+    def test_reviewed_header_footer_quality_evaluation_records_internal_mvp_evidence(self):
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            synthetic_coverage=_quality_synthetic_evidence(test_count=12),
+            local_corpus_evidence=_quality_local_evidence())
+        summary = pack['summary']
+
+        self.assertEqual(summary['synthetic_test_count'], 12)
+        self.assertEqual(summary['synthetic_pass_count'], 12)
+        self.assertEqual(summary['local_sample_count'], 3)
+        self.assertEqual(summary['local_pass_count'], 2)
+        self.assertEqual(summary['local_skip_count'], 1)
+        self.assertEqual(summary['local_bounded_subset_only_count'], 1)
+        self.assertEqual(summary['true_body_text_loss_count'], 0)
+        self.assertEqual(summary['table_text_loss_count'], 0)
+        self.assertEqual(summary['callout_text_loss_count'], 0)
+        self.assertEqual(summary['list_text_loss_count'], 0)
+        self.assertEqual(summary['residual_header_footer_pollution_count'], 0)
+        self.assertTrue(summary['default_policy_supported'])
+        self.assertTrue(summary['non_default_policy_fail_closed'])
+        self.assertEqual(summary['page_number_default_behavior'], 'placeholder_only')
+        self.assertTrue(summary['word_field_supported_internal_only'])
+        json.dumps(pack)
+
+    def test_reviewed_header_footer_quality_evaluation_blocks_body_table_callout_list_loss(self):
+        local_evidence = _quality_local_evidence(
+            true_body_text_loss_count=2,
+            table_text_loss_count=1,
+            callout_text_loss_count=1,
+            list_text_loss_count=1)
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            synthetic_coverage=_quality_synthetic_evidence(),
+            local_corpus_evidence=local_evidence)
+        warning_types = {warning['type'] for warning in pack['warnings']}
+
+        self.assertEqual(pack['summary']['readiness_status'], 'blocked')
+        self.assertIn('true_body_text_loss', warning_types)
+        self.assertIn('table_text_loss', warning_types)
+        self.assertIn('callout_text_loss', warning_types)
+        self.assertIn('list_text_loss', warning_types)
+
+    def test_reviewed_header_footer_quality_evaluation_blocks_residual_pollution(self):
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            synthetic_coverage=_quality_synthetic_evidence(),
+            local_corpus_evidence=_quality_local_evidence(
+                residual_header_footer_pollution_count=1))
+        warning_types = {warning['type'] for warning in pack['warnings']}
+
+        self.assertEqual(pack['summary']['readiness_status'], 'blocked')
+        self.assertIn('residual_header_footer_pollution', warning_types)
+
+    def test_reviewed_header_footer_quality_evaluation_keeps_non_default_policy_fail_closed(self):
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            synthetic_coverage=_quality_synthetic_evidence(),
+            local_corpus_evidence=_quality_local_evidence())
+        policy = pack['policy_support']
+
+        self.assertTrue(policy['default_policy_supported'])
+        self.assertTrue(policy['non_default_policy_fail_closed'])
+        self.assertEqual(policy['first_page_policy'], 'fail_closed')
+        self.assertEqual(policy['odd_even_policy'], 'fail_closed')
+        self.assertEqual(policy['section_scoped_policy'], 'fail_closed')
+        self.assertEqual(policy['unsupported_policy'], 'fail_closed')
+
+    def test_reviewed_header_footer_quality_evaluation_page_number_modes_remain_internal(self):
+        pack = build_reviewed_header_footer_quality_evaluation_pack(
+            migration_profile=build_reviewed_header_footer_migration_profile({
+                'enabled': True,
+                'review_decisions': _profile_review_decisions(),
+                'page_number_behavior': 'word_field',
+            }),
+            synthetic_coverage=_quality_synthetic_evidence(),
+            local_corpus_evidence=_quality_local_evidence())
+        page_number = pack['page_number_behavior']
+
+        self.assertEqual(page_number['default_behavior'], 'placeholder_only')
+        self.assertEqual(page_number['profile_page_number_behavior'], 'word_field')
+        self.assertTrue(page_number['word_field_supported_internal_only'])
+        self.assertFalse(page_number['word_field_default_enabled'])
+        self.assertEqual(page_number['static_text'], 'diagnostic_static_only')
+        self.assertEqual(page_number['unsupported_behavior'], 'fail_closed')
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -9798,6 +9897,82 @@ def _profile_review_decisions():
             'candidate_count': 1,
             'decision_counts': {'approve_exclude': 1},
         },
+    }
+
+
+def _quality_synthetic_evidence(test_count=10, passed_count=None):
+    passed_count = test_count if passed_count is None else passed_count
+    return {
+        'summary': {
+            'synthetic_test_count': test_count,
+            'synthetic_pass_count': passed_count,
+        },
+        'coverage': {
+            'default_policy_migration_smoke': True,
+            'word_field_migration_smoke': True,
+            'callout_preservation': True,
+            'list_heading_preservation': True,
+            'table_text_preservation': True,
+            'body_region_protection': True,
+            'fail_closed_regressions': True,
+        },
+    }
+
+
+def _quality_local_evidence(
+        sample_count=3,
+        passed_count=2,
+        skipped_count=1,
+        blocked_count=0,
+        bounded_subset_only_count=1,
+        true_body_text_loss_count=0,
+        table_text_loss_count=0,
+        callout_text_loss_count=0,
+        list_text_loss_count=0,
+        residual_header_footer_pollution_count=0):
+    return {
+        'summary': {
+            'sample_count': sample_count,
+            'passed_count': passed_count,
+            'skipped_count': skipped_count,
+            'blocked_count': blocked_count,
+            'bounded_subset_only_count': bounded_subset_only_count,
+            'strict_exact_gate_failed_count': 2,
+            'normalized_gate_passed_count': 2,
+            'total_true_body_text_loss_count': true_body_text_loss_count,
+            'total_table_text_loss_warning_count': table_text_loss_count,
+            'total_callout_text_loss_warning_count': callout_text_loss_count,
+            'total_list_text_loss_warning_count': list_text_loss_count,
+            'total_true_residual_header_footer_pollution_count': (
+                residual_header_footer_pollution_count),
+            'safe_for_phase_5a': (
+                not blocked_count and
+                not true_body_text_loss_count and
+                not table_text_loss_count and
+                not callout_text_loss_count and
+                not list_text_loss_count and
+                not residual_header_footer_pollution_count),
+        },
+        'samples': [
+            {
+                'sample_name': 'input.pdf',
+                'status': 'passed',
+                'policy_type': 'default',
+                'bounded_subset_only': False,
+            },
+            {
+                'sample_name': 'input3.pdf',
+                'status': 'passed',
+                'policy_type': 'default',
+                'bounded_subset_only': False,
+            },
+            {
+                'sample_name': 'input6_large.pdf',
+                'status': 'skipped',
+                'policy_type': 'unsupported',
+                'bounded_subset_only': True,
+            },
+        ],
     }
 
 

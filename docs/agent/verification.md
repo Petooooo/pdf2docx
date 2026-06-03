@@ -5662,3 +5662,153 @@ Phase 5A should keep this profile internal and use it as the single entry point
 for any next bounded default-policy smoke path. Production/default conversion,
 public CLI/API exposure, non-default policy writing, and cross-page paragraph
 merge should remain out of scope until a later explicit phase.
+
+## Phase 5A
+
+Phase 5A adds an internal quality evaluation pack for the reviewed
+header/footer migration MVP. It evaluates current evidence and readiness
+without expanding behavior.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Quality evaluation document:
+
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+
+Generated ignored local report:
+
+- `local_reports/phase5a-quality-evaluation-pack-report.md`
+
+### Quality status
+
+Internal MVP readiness:
+
+- `ready_for_internal_quality_review`
+
+Public/default readiness:
+
+- `not_public_ready`
+
+Synthetic coverage summary:
+
+- Repeated header/footer/page-number detection covered.
+- Approval-gated reviewed filtering covered.
+- Filtered body plus DOCX header/footer XML covered.
+- Default-policy migration smoke covered.
+- Explicit internal `word_field` PAGE field smoke covered.
+- Callout/list/heading/table preservation covered.
+- Non-default policy fail-closed behavior covered.
+
+Local corpus evidence summary:
+
+- Local evidence came from ignored Phase 4G/4H/4I/4J reports.
+- `input.pdf`: passed normalized local migration gate.
+- `input3.pdf`: passed normalized local migration gate.
+- `input6_large.pdf`: bounded subset only; skipped because policy remained
+  `unsupported` under incomplete coverage.
+- True body text loss count: 0.
+- Table text loss count: 0.
+- Callout text loss count: 0.
+- List text loss count: 0.
+- Residual header/footer pollution count: 0.
+- Local corpus evidence remains ignored and non-committed.
+
+Fail-closed safety summary:
+
+- Explicit review approval required.
+- Raw `would_exclude` blocked.
+- Rejected/unsure blocked.
+- Body-region protected.
+- Layout-placeholder protected.
+- Normalized token/ngram body signature remains primary.
+- Strict exact-fragment mismatch remains diagnostic-only.
+- True body/table/callout/list loss fails closed.
+- Residual header/footer pollution fails closed.
+- Non-default policies fail closed.
+- Unsupported page-number behavior fails closed.
+
+Remaining gaps:
+
+- Public CLI/API option is not exposed.
+- Production/default migration is not enabled.
+- First-page Word header/footer writing is not implemented.
+- Odd/even Word header/footer writing is not implemented.
+- Full section-specific production mapping is not implemented.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph continuation merge is not implemented.
+- Large document evidence remains bounded for `input6_large`.
+
+### Tests added
+
+- Quality summary marks public/default readiness as not ready.
+- Quality summary recognizes internal MVP evidence.
+- Quality summary records synthetic coverage.
+- Quality summary records local corpus evidence.
+- True body/table/callout/list loss blocks quality readiness.
+- Residual header/footer pollution blocks quality readiness.
+- Non-default policy support remains fail-closed.
+- Default page-number behavior remains `placeholder_only`.
+- `word_field` remains internal-only.
+- Quality summary is JSON-serializable.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "quality_evaluation"
+```
+
+Result: passed. 6 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 320 tests and 10 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 320 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: modified files were limited to Phase 5A code, tests, and committed
+documentation. `.venv/`, caches, `local_samples/`, `local_reports/`, and test
+outputs remained ignored.
+
+### Phase 5A recommendation
+
+Phase 5B should stay internal and bounded. Use the quality pack as the
+checklist for any next profile-driven default-policy smoke. Public/default
+integration, non-default policy writing, image/logo migration, paragraph merge,
+and table parser changes remain future work.

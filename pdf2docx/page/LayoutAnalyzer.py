@@ -899,6 +899,104 @@ def validate_reviewed_header_footer_migration_profile(
     }
 
 
+def build_reviewed_header_footer_quality_evaluation_pack(
+        migration_profile: dict = None,
+        synthetic_coverage: dict = None,
+        local_corpus_evidence=None,
+        enabled: bool = True) -> dict:
+    '''Summarize internal MVP quality evidence for reviewed migration.
+
+    This helper is evaluation-only. It does not read PDFs, write DOCX files, or
+    connect reviewed filtering to default conversion.
+    '''
+    profile = build_reviewed_header_footer_migration_profile(
+        _quality_migration_profile_config(migration_profile))
+    profile_summary = profile.get('summary') or {}
+    synthetic_summary = _quality_synthetic_summary(synthetic_coverage)
+    local_summary = _quality_local_corpus_summary(local_corpus_evidence)
+    safety_summary = _quality_safety_summary(
+        synthetic_summary,
+        local_summary)
+    policy_summary = _quality_policy_summary()
+    page_number_summary = _quality_page_number_summary(profile_summary)
+    exposure_summary = _quality_exposure_summary(profile_summary)
+    limitations = _quality_known_limitations(local_summary)
+
+    warnings, diagnostics = _quality_evaluation_warnings(
+        synthetic_summary,
+        local_summary,
+        safety_summary,
+        policy_summary,
+        page_number_summary,
+        exposure_summary,
+        enabled)
+    readiness_status = _quality_readiness_status(
+        enabled,
+        warnings,
+        synthetic_summary,
+        exposure_summary)
+
+    summary = {
+        'enabled': bool(enabled),
+        'readiness_status': readiness_status,
+        'internal_mvp_readiness_status': readiness_status,
+        'public_default_readiness_status': 'not_public_ready',
+        'synthetic_test_count': synthetic_summary.get('synthetic_test_count', 0),
+        'synthetic_pass_count': synthetic_summary.get('synthetic_pass_count', 0),
+        'synthetic_coverage_area_count': synthetic_summary.get(
+            'synthetic_coverage_area_count', 0),
+        'local_sample_count': local_summary.get('local_sample_count', 0),
+        'local_pass_count': local_summary.get('local_pass_count', 0),
+        'local_skip_count': local_summary.get('local_skip_count', 0),
+        'local_blocked_count': local_summary.get('local_blocked_count', 0),
+        'local_bounded_subset_only_count': local_summary.get(
+            'local_bounded_subset_only_count', 0),
+        'true_body_text_loss_count': safety_summary.get(
+            'true_body_text_loss_count', 0),
+        'table_text_loss_count': safety_summary.get('table_text_loss_count', 0),
+        'callout_text_loss_count': safety_summary.get('callout_text_loss_count', 0),
+        'list_text_loss_count': safety_summary.get('list_text_loss_count', 0),
+        'residual_header_footer_pollution_count': safety_summary.get(
+            'residual_header_footer_pollution_count', 0),
+        'default_policy_supported': policy_summary.get(
+            'default_policy_supported', False),
+        'non_default_policy_fail_closed': policy_summary.get(
+            'non_default_policy_fail_closed', False),
+        'page_number_default_behavior': page_number_summary.get(
+            'default_behavior', ''),
+        'word_field_supported_internal_only': page_number_summary.get(
+            'word_field_supported_internal_only', False),
+        'public_exposure': exposure_summary.get('public_exposure', ''),
+        'production_default_enabled': exposure_summary.get(
+            'production_default_enabled', False),
+        'default_conversion_changed': exposure_summary.get(
+            'default_conversion_changed', False),
+        'quality_review_only': True,
+    }
+    return {
+        'enabled': bool(enabled),
+        'policy': 'internal_reviewed_header_footer_quality_evaluation_only',
+        'summary': summary,
+        'migration_profile_summary': profile_summary,
+        'synthetic_coverage': synthetic_summary,
+        'local_corpus_evidence': local_summary,
+        'safety_gates': _quality_safety_gates(),
+        'safety_summary': safety_summary,
+        'policy_support': policy_summary,
+        'page_number_behavior': page_number_summary,
+        'exposure': exposure_summary,
+        'remaining_limitations': limitations,
+        'warnings': warnings,
+        'diagnostics': diagnostics,
+        'recommendation': {
+            'ready_for_internal_quality_review': (
+                readiness_status == 'ready_for_internal_quality_review'),
+            'public_default_ready': False,
+            'reason': _quality_recommendation(readiness_status, warnings),
+        },
+    }
+
+
 def build_reviewed_header_footer_filter_report(
         page_summaries: list,
         dry_run_report: dict,
@@ -3749,6 +3847,334 @@ def _reviewed_header_footer_migration_profile_recommendation(
         return 'Internal migration profile is ready for a private default-policy experiment only.'
     warning_types = sorted({warning.get('type') for warning in warnings or []})
     return f'Internal migration profile is fail-closed; resolve warnings first: {warning_types}.'
+
+
+def _quality_migration_profile_config(migration_profile: dict = None) -> dict:
+    profile = migration_profile or {}
+    if isinstance(profile, dict) and 'profile' in profile:
+        return profile.get('profile') or {}
+    return profile
+
+
+def _quality_synthetic_summary(synthetic_coverage: dict = None) -> dict:
+    coverage = dict(synthetic_coverage or {})
+    summary = dict(coverage.get('summary') or {})
+    areas = dict(
+        coverage.get('coverage') or
+        coverage.get('coverage_areas') or
+        summary.get('coverage') or
+        {})
+    synthetic_test_count = _quality_int(
+        summary.get(
+            'synthetic_test_count',
+            coverage.get('synthetic_test_count', coverage.get('test_count'))))
+    if not synthetic_test_count and areas:
+        synthetic_test_count = len(areas)
+    synthetic_pass_count = _quality_int(
+        summary.get(
+            'synthetic_pass_count',
+            coverage.get('synthetic_pass_count', coverage.get('passed_count'))))
+    if not synthetic_pass_count and areas:
+        synthetic_pass_count = sum(1 for value in areas.values() if bool(value))
+
+    return {
+        'available': bool(coverage),
+        'synthetic_test_count': synthetic_test_count,
+        'synthetic_pass_count': synthetic_pass_count,
+        'synthetic_failed_count': max(synthetic_test_count - synthetic_pass_count, 0),
+        'synthetic_coverage_area_count': len(areas),
+        'coverage': areas,
+        'default_policy_migration_smoke': bool(
+            areas.get('default_policy_migration_smoke', False)),
+        'word_field_migration_smoke': bool(
+            areas.get('word_field_migration_smoke', False)),
+        'callout_preservation': bool(areas.get('callout_preservation', False)),
+        'list_heading_preservation': bool(
+            areas.get('list_heading_preservation', False)),
+        'table_text_preservation': bool(
+            areas.get('table_text_preservation', False)),
+        'body_region_protection': bool(
+            areas.get('body_region_protection', False)),
+        'fail_closed_regressions': bool(
+            areas.get('fail_closed_regressions', False)),
+    }
+
+
+def _quality_local_corpus_summary(local_corpus_evidence=None) -> dict:
+    if not local_corpus_evidence:
+        return _quality_empty_local_summary()
+    if isinstance(local_corpus_evidence, list):
+        samples = [dict(item) for item in local_corpus_evidence or []]
+        evidence = {'samples': samples}
+    else:
+        evidence = dict(local_corpus_evidence or {})
+        samples = [dict(item) for item in evidence.get('samples', []) or []]
+
+    summary = dict(evidence.get('summary') or {})
+    local_sample_count = _quality_int(summary.get('sample_count'))
+    if not local_sample_count:
+        local_sample_count = len(samples)
+    local_pass_count = _quality_int(summary.get('passed_count'))
+    local_bounded_pass_count = _quality_int(summary.get('bounded_subset_passed_count'))
+    local_skip_count = _quality_int(summary.get('skipped_count'))
+    local_blocked_count = _quality_int(summary.get('blocked_count'))
+    local_bounded_subset_only_count = _quality_int(
+        summary.get('bounded_subset_only_count'))
+
+    if samples:
+        local_pass_count = local_pass_count or sum(
+            1 for sample in samples if sample.get('status') == 'passed')
+        local_bounded_pass_count = local_bounded_pass_count or sum(
+            1 for sample in samples
+            if sample.get('status') == 'bounded_subset_passed')
+        local_skip_count = local_skip_count or sum(
+            1 for sample in samples if sample.get('status') == 'skipped')
+        local_blocked_count = local_blocked_count or sum(
+            1 for sample in samples if sample.get('status') == 'blocked')
+        local_bounded_subset_only_count = (
+            local_bounded_subset_only_count or
+            sum(1 for sample in samples if sample.get('bounded_subset_only')))
+
+    return {
+        'available': True,
+        'local_sample_count': local_sample_count,
+        'local_pass_count': local_pass_count,
+        'local_bounded_subset_pass_count': local_bounded_pass_count,
+        'local_skip_count': local_skip_count,
+        'local_blocked_count': local_blocked_count,
+        'local_bounded_subset_only_count': local_bounded_subset_only_count,
+        'strict_exact_gate_failed_count': _quality_int(
+            summary.get('strict_exact_gate_failed_count')),
+        'normalized_gate_passed_count': _quality_int(
+            summary.get('normalized_gate_passed_count')),
+        'true_body_text_loss_count': _quality_int(
+            summary.get(
+                'total_true_body_text_loss_count',
+                summary.get('total_body_text_loss_warning_count'))),
+        'table_text_loss_count': _quality_int(
+            summary.get('total_table_text_loss_warning_count')),
+        'callout_text_loss_count': _quality_int(
+            summary.get('total_callout_text_loss_warning_count')),
+        'list_text_loss_count': _quality_int(
+            summary.get('total_list_text_loss_warning_count')),
+        'residual_header_footer_pollution_count': _quality_int(
+            summary.get('total_true_residual_header_footer_pollution_count')),
+        'safe_for_next_internal_phase': bool(
+            summary.get('safe_for_phase_4h', summary.get('safe_for_phase_5a', False))),
+        'samples': samples,
+    }
+
+
+def _quality_empty_local_summary() -> dict:
+    return {
+        'available': False,
+        'local_sample_count': 0,
+        'local_pass_count': 0,
+        'local_bounded_subset_pass_count': 0,
+        'local_skip_count': 0,
+        'local_blocked_count': 0,
+        'local_bounded_subset_only_count': 0,
+        'strict_exact_gate_failed_count': 0,
+        'normalized_gate_passed_count': 0,
+        'true_body_text_loss_count': 0,
+        'table_text_loss_count': 0,
+        'callout_text_loss_count': 0,
+        'list_text_loss_count': 0,
+        'residual_header_footer_pollution_count': 0,
+        'safe_for_next_internal_phase': False,
+        'samples': [],
+    }
+
+
+def _quality_safety_summary(
+        synthetic_summary: dict,
+        local_summary: dict) -> dict:
+    return {
+        'explicit_review_approval_required': True,
+        'raw_would_exclude_blocked': True,
+        'rejected_unsure_blocked': True,
+        'body_region_protected': True,
+        'layout_placeholder_protected': True,
+        'normalized_body_signature_primary': True,
+        'strict_exact_fragment_diagnostic_only': True,
+        'true_body_text_loss_count': _quality_int(
+            local_summary.get('true_body_text_loss_count')),
+        'table_text_loss_count': _quality_int(
+            local_summary.get('table_text_loss_count')),
+        'callout_text_loss_count': _quality_int(
+            local_summary.get('callout_text_loss_count')),
+        'list_text_loss_count': _quality_int(
+            local_summary.get('list_text_loss_count')),
+        'residual_header_footer_pollution_count': _quality_int(
+            local_summary.get('residual_header_footer_pollution_count')),
+        'synthetic_regression_failed_count': _quality_int(
+            synthetic_summary.get('synthetic_failed_count')),
+    }
+
+
+def _quality_policy_summary() -> dict:
+    return {
+        'default_policy_supported': True,
+        'default_policy_writer_scope': 'simple_text_header_footer_only',
+        'non_default_policy_fail_closed': True,
+        'first_page_policy': 'fail_closed',
+        'odd_even_policy': 'fail_closed',
+        'section_scoped_policy': 'fail_closed',
+        'unsupported_policy': 'fail_closed',
+    }
+
+
+def _quality_page_number_summary(profile_summary: dict) -> dict:
+    return {
+        'default_behavior': PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        'profile_page_number_behavior': profile_summary.get(
+            'page_number_behavior',
+            PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY),
+        'placeholder_only': 'default_diagnostic_only',
+        'static_text': 'diagnostic_static_only',
+        'word_field_supported_internal_only': True,
+        'word_field_default_enabled': False,
+        'unsupported_behavior': 'fail_closed',
+    }
+
+
+def _quality_exposure_summary(profile_summary: dict) -> dict:
+    return {
+        'public_exposure': profile_summary.get(
+            'public_exposure',
+            MIGRATION_PROFILE_PUBLIC_EXPOSURE),
+        'public_cli_exposed': bool(profile_summary.get('public_cli_exposed', False)),
+        'public_api_exposed': bool(profile_summary.get('public_api_exposed', False)),
+        'production_default_enabled': bool(
+            profile_summary.get('production_default_enabled', False)),
+        'default_conversion_changed': bool(
+            profile_summary.get('default_conversion_changed', False)),
+        'docx_header_footer_generation_default_enabled': False,
+        'reviewed_filtering_default_enabled': False,
+    }
+
+
+def _quality_known_limitations(local_summary: dict) -> list:
+    limitations = [
+        'public_cli_api_not_exposed',
+        'production_default_migration_not_enabled',
+        'first_page_header_footer_writing_not_implemented',
+        'odd_even_header_footer_writing_not_implemented',
+        'section_specific_mapping_not_implemented',
+        'image_logo_header_footer_migration_not_implemented',
+        'paragraph_continuation_merge_not_implemented',
+        'local_corpus_evidence_ignored_non_committed',
+    ]
+    if local_summary.get('local_bounded_subset_only_count', 0):
+        limitations.append('large_document_evidence_bounded_for_input6_large')
+    return limitations
+
+
+def _quality_safety_gates() -> dict:
+    return {
+        'explicit_review_approval_required': True,
+        'raw_would_exclude_blocked': True,
+        'rejected_candidates_blocked': True,
+        'unsure_candidates_blocked': True,
+        'body_region_protected': True,
+        'layout_placeholder_protected': True,
+        'normalized_body_signature_primary': True,
+        'strict_exact_fragment_diagnostic_only': True,
+        'true_body_text_loss_fail_closed': True,
+        'table_text_loss_fail_closed': True,
+        'callout_text_loss_fail_closed': True,
+        'list_text_loss_fail_closed': True,
+        'residual_header_footer_pollution_fail_closed': True,
+    }
+
+
+def _quality_evaluation_warnings(
+        synthetic_summary: dict,
+        local_summary: dict,
+        safety_summary: dict,
+        policy_summary: dict,
+        page_number_summary: dict,
+        exposure_summary: dict,
+        enabled: bool) -> tuple:
+    warnings = []
+    diagnostics = []
+    if not enabled:
+        diagnostics.append({'type': 'quality_evaluation_pack_disabled'})
+    if not synthetic_summary.get('available'):
+        diagnostics.append({'type': 'synthetic_coverage_evidence_missing'})
+    if not local_summary.get('available'):
+        diagnostics.append({'type': 'local_corpus_evidence_missing'})
+    if synthetic_summary.get('synthetic_failed_count', 0):
+        warnings.append({
+            'type': 'synthetic_regression_failure',
+            'count': synthetic_summary.get('synthetic_failed_count', 0),
+        })
+    for count_key, warning_type in (
+            ('true_body_text_loss_count', 'true_body_text_loss'),
+            ('table_text_loss_count', 'table_text_loss'),
+            ('callout_text_loss_count', 'callout_text_loss'),
+            ('list_text_loss_count', 'list_text_loss'),
+            ('residual_header_footer_pollution_count', 'residual_header_footer_pollution')):
+        count = _quality_int(safety_summary.get(count_key))
+        if count:
+            warnings.append({'type': warning_type, 'count': count})
+    if not policy_summary.get('default_policy_supported', False):
+        warnings.append({'type': 'default_policy_not_supported'})
+    if not policy_summary.get('non_default_policy_fail_closed', False):
+        warnings.append({'type': 'non_default_policy_not_fail_closed'})
+    if page_number_summary.get('default_behavior') != PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY:
+        warnings.append({'type': 'page_number_default_behavior_changed'})
+    if not page_number_summary.get('word_field_supported_internal_only', False):
+        warnings.append({'type': 'word_field_internal_support_missing'})
+    if (
+            exposure_summary.get('public_exposure') !=
+            MIGRATION_PROFILE_PUBLIC_EXPOSURE or
+            exposure_summary.get('public_cli_exposed') or
+            exposure_summary.get('public_api_exposed')):
+        warnings.append({'type': 'public_exposure_enabled'})
+    if (
+            exposure_summary.get('production_default_enabled') or
+            exposure_summary.get('default_conversion_changed')):
+        warnings.append({'type': 'production_default_behavior_changed'})
+    return warnings, diagnostics
+
+
+def _quality_readiness_status(
+        enabled: bool,
+        warnings: list,
+        synthetic_summary: dict,
+        exposure_summary: dict) -> str:
+    if warnings:
+        return 'blocked'
+    if not enabled:
+        return 'not_public_ready'
+    if (
+            exposure_summary.get('public_exposure') !=
+            MIGRATION_PROFILE_PUBLIC_EXPOSURE or
+            exposure_summary.get('production_default_enabled')):
+        return 'blocked'
+    if (
+            synthetic_summary.get('synthetic_test_count', 0) > 0 and
+            synthetic_summary.get('synthetic_failed_count', 0) == 0):
+        return 'ready_for_internal_quality_review'
+    return 'not_public_ready'
+
+
+def _quality_recommendation(readiness_status: str, warnings: list) -> str:
+    if readiness_status == 'ready_for_internal_quality_review':
+        return 'Internal MVP evidence is suitable for quality review only; public/default integration remains closed.'
+    if readiness_status == 'blocked':
+        warning_types = sorted({warning.get('type') for warning in warnings or []})
+        return f'Quality evaluation is fail-closed; resolve blockers first: {warning_types}.'
+    return 'Quality evaluation is not public/default ready; keep migration internal and disabled by default.'
+
+
+def _quality_int(value) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _reviewed_filtering_config_int_or_none(value):
