@@ -5291,3 +5291,124 @@ documentation files were modified.
 Phase 4H should remain internal. The next safe direction is to build on the
 normalized local corpus gate without proceeding to page-number handling, public
 API exposure, default integration, or broader migration.
+
+## Phase 4H
+
+Phase 4H defines and validates internal page-number handling for DOCX
+header/footer migration. The work remains private, opt-in, and disabled by
+default.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Page-number behavior modes
+
+Internal modes added:
+
+- `placeholder_only`
+- `static_text`
+- `word_field`
+- `unsupported`
+
+Default mode:
+
+- `placeholder_only`
+
+Mode behavior:
+
+- `placeholder_only` remains the safe diagnostic default and does not claim to
+  be a Word field.
+- `static_text` writes literal diagnostic/static placeholder text only.
+- `word_field` is internal-only and writes a Word `PAGE` field when explicitly
+  requested by tests or diagnostics.
+- `unsupported` fails closed.
+
+OpenXML validation:
+
+- Internal temp-DOCX tests validated that `word_field` mode writes PAGE field
+  instructions into footer OpenXML.
+- Static/placeholder tests validated that literal placeholder behavior does not
+  emit `w:instrText` PAGE field XML.
+
+Fail-closed behavior remains:
+
+- Dynamic page-number requirements fail closed unless `word_field` mode is
+  explicitly selected.
+- Unsupported page-number behavior fails closed.
+- Non-default header/footer policies remain blocked before simple writer
+  application.
+- Public/default conversion remains unchanged.
+
+Generated ignored local report:
+
+- `local_reports/phase4h-page-number-handling-report.md`
+
+### Tests added
+
+- Page-number behavior modes are explicit in the header/footer generation plan.
+- Dynamic page-number requirements fail closed for placeholder/static modes and
+  pass only with internal `word_field` mode.
+- Internal `word_field` mode writes PAGE field OpenXML in a temp DOCX.
+- Static page-number behavior remains diagnostic/static and is not a Word field.
+- Unsafe/non-default policies do not write PAGE fields.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "page_number_modes or dynamic_page_number or word_page_field or static_page_number or unsafe_policy"
+```
+
+Result: passed. 5 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 302 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 302 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated local DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4H code,
+tests, and documentation files were modified.
+
+### Phase 4H recommendation
+
+Phase 4I should remain internal. The next safe direction is to decide whether
+the internal `word_field` mode should be exercised in the default-policy
+synthetic/local migration smoke gates, without exposing public API/CLI behavior
+or changing default conversion.

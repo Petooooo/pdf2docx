@@ -81,13 +81,32 @@ def delete_paragraph(paragraph):
     paragraph._p = paragraph._element = None
 
 
-def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -> dict:
+_PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY = 'placeholder_only'
+_PAGE_NUMBER_BEHAVIOR_STATIC_TEXT = 'static_text'
+_PAGE_NUMBER_BEHAVIOR_WORD_FIELD = 'word_field'
+_PAGE_NUMBER_BEHAVIOR_UNSUPPORTED = 'unsupported'
+_PAGE_NUMBER_BEHAVIORS = {
+    _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+    _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT,
+    _PAGE_NUMBER_BEHAVIOR_WORD_FIELD,
+    _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED,
+}
+
+
+def apply_header_footer_text_plan(
+        document,
+        plan: dict,
+        enabled: bool = False,
+        page_number_behavior: str = _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY) -> dict:
     '''Apply a simple internal header/footer text plan to a python-docx document.
 
     This helper is not called by the normal conversion path. It supports only
-    plain text header/footer content and diagnostic page-number placeholders.
+    plain text header/footer content. Page numbers are explicit: placeholder
+    and static-text modes are diagnostic, while word_field writes an internal
+    OpenXML PAGE field only when this helper is explicitly enabled.
     '''
     sections = list(getattr(document, 'sections', []) or [])
+    page_number_behavior = _normalize_page_number_behavior(page_number_behavior)
     if not enabled:
         return {
             'enabled': False,
@@ -98,6 +117,8 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
                 'header_paragraphs_written': 0,
                 'footer_paragraphs_written': 0,
                 'page_number_field_generation': 'deferred_placeholder_only',
+                'page_number_behavior': page_number_behavior,
+                'page_number_fields_written': 0,
             },
             'safety_warnings': [],
         }
@@ -108,6 +129,8 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
     recommendation = (plan or {}).get('recommendation') or {}
     header_footer_policy = (plan or {}).get('header_footer_policy') or {}
     policy_type = header_footer_policy.get('policy_type')
+    if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        warnings.append({'type': 'unsupported_page_number_behavior'})
     if policy_type and policy_type != 'default':
         warnings.append({
             'type': 'header_footer_policy_not_supported_for_simple_writer',
@@ -134,15 +157,28 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
 
     header_count = 0
     footer_count = 0
+    page_number_fields_written = 0
+    page_number_placeholders_written = 0
     if sections and plan_sections and not warnings:
         section = sections[0]
         section_plan = plan_sections[0]
         header_texts = _header_footer_plan_texts(section_plan, 'header_texts')
         footer_texts = _header_footer_plan_texts(section_plan, 'footer_texts')
-        footer_texts.extend(
-            _header_footer_plan_texts(section_plan, 'page_number_placeholders'))
+        page_number_placeholders = _header_footer_plan_texts(
+            section_plan,
+            'page_number_placeholders')
+        if page_number_behavior in {
+                _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+                _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
+            footer_texts.extend(page_number_placeholders)
+            page_number_placeholders_written = len(page_number_placeholders)
         header_count = _replace_header_footer_part_text(section.header, header_texts)
         footer_count = _replace_header_footer_part_text(section.footer, footer_texts)
+        if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+            page_number_fields_written = _append_page_number_fields(
+                section.footer,
+                page_number_placeholders)
+            footer_count += page_number_fields_written
 
     return {
         'enabled': True,
@@ -153,11 +189,30 @@ def apply_header_footer_text_plan(document, plan: dict, enabled: bool = False) -
             'plan_section_count': len(plan_sections),
             'header_paragraphs_written': header_count,
             'footer_paragraphs_written': footer_count,
-            'page_number_field_generation': 'deferred_placeholder_only',
+            'page_number_behavior': page_number_behavior,
+            'page_number_field_generation': _page_number_field_generation(
+                page_number_behavior),
+            'page_number_fields_written': page_number_fields_written,
+            'page_number_placeholders_written': page_number_placeholders_written,
         },
         'safety_warnings': warnings,
         'plan_safety_warnings': plan_safety_warnings,
     }
+
+
+def _normalize_page_number_behavior(value: str) -> str:
+    behavior = str(value or _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY).strip().lower()
+    return behavior if behavior in _PAGE_NUMBER_BEHAVIORS else _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED
+
+
+def _page_number_field_generation(behavior: str) -> str:
+    if behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        return 'word_field'
+    if behavior == _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT:
+        return 'static_text_diagnostic_only'
+    if behavior == _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        return 'unsupported'
+    return 'deferred_placeholder_only'
 
 
 def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
@@ -167,6 +222,39 @@ def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
         if text:
             values.append(text)
     return values
+
+
+def _append_page_number_fields(part, placeholders: list) -> int:
+    written = 0
+    for _placeholder in placeholders or []:
+        paragraph = part.add_paragraph()
+        add_page_number_field(paragraph)
+        written += 1
+    return written
+
+
+def add_page_number_field(paragraph):
+    '''Append an internal Word PAGE field to a paragraph.
+
+    This helper is intentionally low-level and internal. It is not used by the
+    default converter path; tests inspect the resulting OpenXML before any
+    public migration path can depend on it.
+    '''
+    run = paragraph.add_run()
+    begin = OxmlElement('w:fldChar')
+    begin.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText')
+    instr.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    instr.text = ' PAGE '
+    separate = OxmlElement('w:fldChar')
+    separate.set(qn('w:fldCharType'), 'separate')
+    text = OxmlElement('w:t')
+    text.text = '1'
+    end = OxmlElement('w:fldChar')
+    end.set(qn('w:fldCharType'), 'end')
+    for element in (begin, instr, separate, text, end):
+        run._r.append(element)
+    return run
 
 
 def _replace_header_footer_part_text(part, texts: list) -> int:

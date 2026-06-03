@@ -28,6 +28,16 @@ ROLE_PAGE_NUMBER = 'page_number'
 ROLE_LAYOUT_PLACEHOLDER = 'layout_placeholder'
 ROLE_REVIEW_ONLY = 'review_only'
 ROLE_KEEP_BODY = 'keep_body'
+PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY = 'placeholder_only'
+PAGE_NUMBER_BEHAVIOR_STATIC_TEXT = 'static_text'
+PAGE_NUMBER_BEHAVIOR_WORD_FIELD = 'word_field'
+PAGE_NUMBER_BEHAVIOR_UNSUPPORTED = 'unsupported'
+PAGE_NUMBER_BEHAVIORS = {
+    PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+    PAGE_NUMBER_BEHAVIOR_STATIC_TEXT,
+    PAGE_NUMBER_BEHAVIOR_WORD_FIELD,
+    PAGE_NUMBER_BEHAVIOR_UNSUPPORTED,
+}
 DECISION_APPROVE_EXCLUDE = 'approve_exclude'
 DECISION_REJECT_EXCLUDE = 'reject_exclude'
 DECISION_UNSURE = 'unsure'
@@ -711,13 +721,16 @@ def build_docx_header_footer_generation_plan(
         page_summaries: list = None,
         dry_run_report: dict = None,
         review_decisions=None,
-        enabled: bool = False) -> dict:
+        enabled: bool = False,
+        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        require_dynamic_page_number: bool = False) -> dict:
     '''Build an internal plan for future DOCX header/footer generation.
 
     This helper is intentionally plan-only. It does not mutate page content and
     does not write DOCX files. Only explicit approve_exclude decisions for
     header/footer/page-number candidates can become representable entries.
     '''
+    page_number_behavior = _normalize_docx_page_number_behavior(page_number_behavior)
     dry_run_candidates = _dry_run_candidates(dry_run_report)
     decision_map = _review_decision_map(review_decisions)
     approved, blocked = _reviewed_exclusion_candidates(dry_run_candidates, decision_map)
@@ -731,13 +744,18 @@ def build_docx_header_footer_generation_plan(
             blocked=blocked,
             entries=[],
             unrepresentable=[],
-            warnings=[{'type': 'docx_header_footer_generation_plan_disabled'}])
+            warnings=[{'type': 'docx_header_footer_generation_plan_disabled'}],
+            page_number_behavior=page_number_behavior,
+            require_dynamic_page_number=require_dynamic_page_number)
 
     entries = []
     unrepresentable = []
     warnings = []
     for candidate in approved:
-        entry, warning = _docx_header_footer_plan_entry(candidate, text_lookup)
+        entry, warning = _docx_header_footer_plan_entry(
+            candidate,
+            text_lookup,
+            page_number_behavior)
         if entry:
             entries.append(entry)
         else:
@@ -753,7 +771,9 @@ def build_docx_header_footer_generation_plan(
         blocked=blocked,
         entries=entries,
         unrepresentable=unrepresentable,
-        warnings=warnings)
+        warnings=warnings,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
 
 
 def build_body_filtering_diff_report(
@@ -3423,7 +3443,25 @@ def _docx_header_footer_text_lookup(page_summaries: list) -> dict:
     return lookup
 
 
-def _docx_header_footer_plan_entry(candidate: dict, text_lookup: dict) -> tuple:
+def _normalize_docx_page_number_behavior(value: str) -> str:
+    behavior = normalize_text(value or PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY)
+    return behavior if behavior in PAGE_NUMBER_BEHAVIORS else PAGE_NUMBER_BEHAVIOR_UNSUPPORTED
+
+
+def _docx_page_number_generation_status(behavior: str) -> str:
+    if behavior == PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY:
+        return 'deferred_placeholder_only'
+    if behavior == PAGE_NUMBER_BEHAVIOR_STATIC_TEXT:
+        return 'static_text_diagnostic_only'
+    if behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        return 'word_field_requested'
+    return 'unsupported'
+
+
+def _docx_header_footer_plan_entry(
+        candidate: dict,
+        text_lookup: dict,
+        page_number_behavior: str) -> tuple:
     role = candidate.get('proposed_role', '')
     regions = _candidate_regions(candidate)
     if REGION_BODY in regions:
@@ -3471,10 +3509,13 @@ def _docx_header_footer_plan_entry(candidate: dict, text_lookup: dict) -> tuple:
         'page_count': _readiness_int(candidate.get('page_count', 0)),
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
+        'page_number_behavior': (
+            page_number_behavior if role == ROLE_PAGE_NUMBER else 'not_applicable'),
         'page_number_field_generation': (
-            'deferred_placeholder_only' if role == ROLE_PAGE_NUMBER else 'not_applicable'),
+            _docx_page_number_generation_status(page_number_behavior)
+            if role == ROLE_PAGE_NUMBER else 'not_applicable'),
         'generation_status': (
-            'placeholder_only' if role == ROLE_PAGE_NUMBER else 'planned_text_only'),
+            page_number_behavior if role == ROLE_PAGE_NUMBER else 'planned_text_only'),
     }, None
 
 
@@ -3504,10 +3545,29 @@ def _docx_header_footer_generation_plan_result(
         blocked: list,
         entries: list,
         unrepresentable: list,
-        warnings: list) -> dict:
-    policy = _docx_header_footer_policy(entries)
+        warnings: list,
+        page_number_behavior: str,
+        require_dynamic_page_number: bool = False) -> dict:
+    page_number_behavior = _normalize_docx_page_number_behavior(page_number_behavior)
+    policy = _docx_header_footer_policy(
+        entries,
+        page_number_behavior,
+        require_dynamic_page_number)
     warnings = list(warnings or []) + list(policy.get('warnings', []) or [])
-    section_plan = _docx_header_footer_section_plan(entries)
+    warning_types = {warning.get('type') for warning in warnings}
+    if page_number_behavior == PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        if 'unsupported_page_number_behavior' not in warning_types:
+            warnings.append({'type': 'unsupported_page_number_behavior'})
+            warning_types.add('unsupported_page_number_behavior')
+    if (
+            require_dynamic_page_number and
+            page_number_behavior != PAGE_NUMBER_BEHAVIOR_WORD_FIELD):
+        if 'dynamic_page_number_field_required' not in warning_types:
+            warnings.append({'type': 'dynamic_page_number_field_required'})
+            warning_types.add('dynamic_page_number_field_required')
+    section_plan = _docx_header_footer_section_plan(entries, page_number_behavior)
+    page_number_field_generation = _docx_page_number_generation_status(
+        page_number_behavior)
     summary = {
         'enabled': bool(enabled),
         'candidate_count': len(candidates or []),
@@ -3522,7 +3582,11 @@ def _docx_header_footer_generation_plan_result(
         'semantic_header_footer_text_count': sum(
             1 for entry in entries
             if entry.get('text_kind') == 'semantic_text'),
-        'page_number_field_generation': 'deferred_placeholder_only',
+        'supported_page_number_behaviors': sorted(PAGE_NUMBER_BEHAVIORS),
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': page_number_field_generation,
+        'page_number_dynamic_field_required': bool(require_dynamic_page_number),
+        'page_number_word_field_supported': True,
         'section_scope': 'document',
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
@@ -3547,7 +3611,7 @@ def _docx_header_footer_generation_plan_result(
         'safety_warnings': warnings,
         'limitations': [
             'Plan-only helper; not wired into default conversion.',
-            'Page-number fields are deferred and represented as a placeholder only.',
+            _docx_page_number_limitation(page_number_behavior),
             'First-page and odd/even section behavior is deferred.',
             'Images, logos, and complex layout are not represented.',
             'Paragraph continuation merging remains out of scope.',
@@ -3564,8 +3628,32 @@ def _docx_header_footer_generation_plan_result(
     }
 
 
-def _docx_header_footer_policy(entries: list) -> dict:
+def _docx_page_number_limitation(behavior: str) -> str:
+    if behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        return 'Page-number Word PAGE fields are internal-only and require OpenXML validation.'
+    if behavior == PAGE_NUMBER_BEHAVIOR_STATIC_TEXT:
+        return 'Page numbers are represented as diagnostic static text, not dynamic Word fields.'
+    if behavior == PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        return 'Unsupported page-number behavior fails closed for migration.'
+    return 'Page-number fields default to diagnostic placeholder-only behavior.'
+
+
+def _docx_page_number_unsupported_features(behavior: str) -> list:
+    features = [
+        'image_or_logo_header_footer_migration',
+        'paragraph_continuation_merge',
+    ]
+    if behavior != PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        features.insert(0, 'word_page_number_field_generation')
+    return features
+
+
+def _docx_header_footer_policy(
+        entries: list,
+        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        require_dynamic_page_number: bool = False) -> dict:
     entries = list(entries or [])
+    page_number_behavior = _normalize_docx_page_number_behavior(page_number_behavior)
     page_count = _docx_header_footer_policy_page_count(entries)
     base = {
         'policy_type': 'unsupported',
@@ -3579,14 +3667,14 @@ def _docx_header_footer_policy(entries: list) -> dict:
         'odd_footer_text': '',
         'even_header_text': '',
         'even_footer_text': '',
-        'page_number_behavior': 'placeholder_only',
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': _docx_page_number_generation_status(
+            page_number_behavior),
+        'page_number_dynamic_field_required': bool(require_dynamic_page_number),
         'section_policies': [],
         'warnings': [],
-        'unsupported_features': [
-            'word_page_number_field_generation',
-            'image_or_logo_header_footer_migration',
-            'paragraph_continuation_merge',
-        ],
+        'unsupported_features': _docx_page_number_unsupported_features(
+            page_number_behavior),
         'needs_section_mapping': False,
         'fail_closed': True,
         'safety_status': 'blocked',
@@ -3612,7 +3700,10 @@ def _docx_header_footer_policy(entries: list) -> dict:
 
     first_signature = page_signatures[0]
     if all(signature == first_signature for signature in page_signatures):
-        base.update(_docx_header_footer_default_policy(first_signature))
+        base.update(_docx_header_footer_default_policy(
+            first_signature,
+            page_number_behavior,
+            require_dynamic_page_number))
         return base
 
     if page_count > 1:
@@ -3620,7 +3711,8 @@ def _docx_header_footer_policy(entries: list) -> dict:
         if remaining and all(signature == remaining[0] for signature in remaining):
             base.update(_docx_header_footer_first_page_policy(
                 first_signature,
-                remaining[0]))
+                remaining[0],
+                page_number_behavior))
             return base
 
     odd_signatures = page_signatures[0::2]
@@ -3632,12 +3724,15 @@ def _docx_header_footer_policy(entries: list) -> dict:
             odd_signatures[0] != even_signatures[0]):
         base.update(_docx_header_footer_odd_even_policy(
             odd_signatures[0],
-            even_signatures[0]))
+            even_signatures[0],
+            page_number_behavior))
         return base
 
     ranges = _docx_header_footer_signature_ranges(page_signatures)
     if len(ranges) > 1 and all(item['page_count'] > 1 for item in ranges):
-        base.update(_docx_header_footer_section_scoped_policy(ranges))
+        base.update(_docx_header_footer_section_scoped_policy(
+            ranges,
+            page_number_behavior))
         return base
 
     base['warnings'].append({
@@ -3701,58 +3796,76 @@ def _docx_header_footer_signature_text(signature: dict, key: str) -> str:
     return ' | '.join(signature.get(key, []) or [])
 
 
-def _docx_header_footer_default_policy(signature: dict) -> dict:
+def _docx_header_footer_default_policy(
+        signature: dict,
+        page_number_behavior: str,
+        require_dynamic_page_number: bool = False) -> dict:
+    warnings = []
+    fail_closed = False
+    safety_status = 'safe_for_simple_default_writer'
+    if page_number_behavior == PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        warnings.append({'type': 'unsupported_page_number_behavior'})
+        fail_closed = True
+        safety_status = 'blocked'
+    if (
+            require_dynamic_page_number and
+            page_number_behavior != PAGE_NUMBER_BEHAVIOR_WORD_FIELD):
+        warnings.append({'type': 'dynamic_page_number_field_required'})
+        fail_closed = True
+        safety_status = 'blocked'
     return {
         'policy_type': 'default',
         'default_header_text': _docx_header_footer_signature_text(signature, 'header'),
         'default_footer_text': _docx_header_footer_signature_text(signature, 'footer'),
-        'page_number_behavior': 'placeholder_only',
-        'warnings': [],
-        'unsupported_features': [
-            'word_page_number_field_generation',
-            'image_or_logo_header_footer_migration',
-            'paragraph_continuation_merge',
-        ],
-        'fail_closed': False,
-        'safety_status': 'safe_for_simple_default_writer',
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': _docx_page_number_generation_status(
+            page_number_behavior),
+        'page_number_dynamic_field_required': bool(require_dynamic_page_number),
+        'warnings': warnings,
+        'unsupported_features': _docx_page_number_unsupported_features(
+            page_number_behavior),
+        'fail_closed': fail_closed,
+        'safety_status': safety_status,
     }
 
 
-def _docx_header_footer_first_page_policy(first_signature: dict, default_signature: dict) -> dict:
+def _docx_header_footer_first_page_policy(
+        first_signature: dict,
+        default_signature: dict,
+        page_number_behavior: str) -> dict:
     return {
         'policy_type': 'first_page',
         'default_header_text': _docx_header_footer_signature_text(default_signature, 'header'),
         'default_footer_text': _docx_header_footer_signature_text(default_signature, 'footer'),
         'first_page_header_text': _docx_header_footer_signature_text(first_signature, 'header'),
         'first_page_footer_text': _docx_header_footer_signature_text(first_signature, 'footer'),
-        'page_number_behavior': 'placeholder_only',
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': _docx_page_number_generation_status(
+            page_number_behavior),
         'warnings': [{'type': 'first_page_docx_header_footer_writing_deferred'}],
-        'unsupported_features': [
-            'first_page_docx_header_footer_writing',
-            'word_page_number_field_generation',
-            'image_or_logo_header_footer_migration',
-            'paragraph_continuation_merge',
-        ],
+        'unsupported_features': ['first_page_docx_header_footer_writing'] +
+        _docx_page_number_unsupported_features(page_number_behavior),
         'fail_closed': True,
         'safety_status': 'diagnostic_only',
     }
 
 
-def _docx_header_footer_odd_even_policy(odd_signature: dict, even_signature: dict) -> dict:
+def _docx_header_footer_odd_even_policy(
+        odd_signature: dict,
+        even_signature: dict,
+        page_number_behavior: str) -> dict:
     return {
         'policy_type': 'odd_even',
         'odd_header_text': _docx_header_footer_signature_text(odd_signature, 'header'),
         'odd_footer_text': _docx_header_footer_signature_text(odd_signature, 'footer'),
         'even_header_text': _docx_header_footer_signature_text(even_signature, 'header'),
         'even_footer_text': _docx_header_footer_signature_text(even_signature, 'footer'),
-        'page_number_behavior': 'placeholder_only',
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': _docx_page_number_generation_status(
+            page_number_behavior),
         'warnings': [{'type': 'odd_even_docx_header_footer_writing_deferred'}],
-        'unsupported_features': [
-            'odd_even_docx_header_footer_writing',
-            'word_page_number_field_generation',
-            'image_or_logo_header_footer_migration',
-            'paragraph_continuation_merge',
-        ],
+        'unsupported_features': ['odd_even_docx_header_footer_writing'] +
+        _docx_page_number_unsupported_features(page_number_behavior),
         'fail_closed': True,
         'safety_status': 'diagnostic_only',
     }
@@ -3779,29 +3892,32 @@ def _docx_header_footer_signature_ranges(signatures: list) -> list:
     return ranges
 
 
-def _docx_header_footer_section_scoped_policy(ranges: list) -> dict:
+def _docx_header_footer_section_scoped_policy(
+        ranges: list,
+        page_number_behavior: str) -> dict:
     return {
         'policy_type': 'section_scoped',
         'section_policies': ranges,
-        'page_number_behavior': 'placeholder_only',
+        'page_number_behavior': page_number_behavior,
+        'page_number_field_generation': _docx_page_number_generation_status(
+            page_number_behavior),
         'warnings': [{'type': 'section_scoped_docx_header_footer_mapping_deferred'}],
-        'unsupported_features': [
-            'production_section_mapping',
-            'word_page_number_field_generation',
-            'image_or_logo_header_footer_migration',
-            'paragraph_continuation_merge',
-        ],
+        'unsupported_features': ['production_section_mapping'] +
+        _docx_page_number_unsupported_features(page_number_behavior),
         'needs_section_mapping': True,
         'fail_closed': True,
         'safety_status': 'diagnostic_only',
     }
 
 
-def _docx_header_footer_section_plan(entries: list) -> dict:
+def _docx_header_footer_section_plan(
+        entries: list,
+        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY) -> dict:
     return {
         'section_scope': 'document',
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
+        'page_number_behavior': page_number_behavior,
         'header_texts': _unique_entry_texts(entries, ROLE_HEADER),
         'footer_texts': _unique_entry_texts(entries, ROLE_FOOTER),
         'page_number_placeholders': _unique_entry_texts(entries, ROLE_PAGE_NUMBER),

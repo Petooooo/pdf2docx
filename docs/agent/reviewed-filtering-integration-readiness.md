@@ -634,3 +634,51 @@ Safety interpretation:
 Phase 4H should remain internal. The next safe direction is to decide the next
 private experiment using the normalized gate without proceeding to page-number
 handling, public API exposure, default integration, or broader migration.
+
+## Phase 4H Page-Number Handling Design
+
+Phase 4H defines explicit internal page-number behavior for reviewed
+header/footer migration. The feature remains private, opt-in, and disabled by
+default.
+
+Supported internal page-number modes:
+
+- `placeholder_only`: the default diagnostic mode. It records that a reviewed
+  page-number candidate was removed from the DOCX body, but it does not create
+  a dynamic Word page-number field.
+- `static_text`: diagnostic/static text mode. It can write literal placeholder
+  text for inspection, but it is not a dynamic page number.
+- `word_field`: internal-only dynamic mode. When explicitly requested by tests
+  or diagnostics, the DOCX helper writes a Word `PAGE` field into the
+  header/footer part and tests inspect the resulting OpenXML.
+- `unsupported`: fail-closed mode for ambiguous or invalid page-number
+  behavior.
+
+Implementation status:
+
+- The header/footer generation plan now records page-number behavior, supported
+  modes, field-generation status, and whether a dynamic field is required.
+- The default mode remains `placeholder_only`.
+- The simple DOCX helper now has an internal-only PAGE-field writer for
+  `word_field` mode.
+- OpenXML tests verify that `word_field` mode emits `PAGE` field instructions.
+- Static and placeholder modes remain clearly diagnostic and do not claim to be
+  dynamic Word fields.
+- If dynamic numbering is required but the plan is placeholder/static or
+  unsupported, the plan fails closed.
+- Non-default header/footer policies remain fail-closed for the simple writer.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- DOCX header/footer generation remains disabled by default.
+- Page-number handling remains internal-only.
+- Placeholder/static page-number behavior is not a dynamic page number.
+- Unsupported page-number behavior fails closed when dynamic numbering is
+  required.
+
+Phase 4I should remain internal. The next safe direction is to decide whether
+the PAGE-field mode should be included in the default-policy synthetic/local
+migration smoke gates, still without public API exposure or default conversion
+changes.

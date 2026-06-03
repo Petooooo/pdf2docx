@@ -4981,6 +4981,91 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertTrue(
                 plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
 
+    def test_docx_header_footer_plan_page_number_modes_are_explicit(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-page-number-modes.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            placeholder_plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True)
+            static_plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                page_number_behavior='static_text')
+            word_field_plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                page_number_behavior='word_field')
+
+            self.assertEqual(
+                placeholder_plan['summary']['page_number_behavior'],
+                'placeholder_only')
+            self.assertEqual(
+                placeholder_plan['summary']['page_number_field_generation'],
+                'deferred_placeholder_only')
+            self.assertEqual(
+                static_plan['summary']['page_number_field_generation'],
+                'static_text_diagnostic_only')
+            self.assertEqual(
+                static_plan['header_footer_policy']['page_number_behavior'],
+                'static_text')
+            self.assertEqual(
+                word_field_plan['summary']['page_number_field_generation'],
+                'word_field_requested')
+            self.assertEqual(
+                word_field_plan['header_footer_policy']['page_number_behavior'],
+                'word_field')
+            self.assertIn(
+                'unsupported',
+                word_field_plan['summary']['supported_page_number_behaviors'])
+
+    def test_docx_header_footer_plan_requires_dynamic_page_number_field_when_requested(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-header-footer-dynamic-required.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            blocked_plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                require_dynamic_page_number=True)
+            word_field_plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                page_number_behavior='word_field',
+                require_dynamic_page_number=True)
+
+            self.assertTrue(blocked_plan['header_footer_policy']['fail_closed'])
+            self.assertFalse(
+                blocked_plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
+            self.assertIn(
+                'dynamic_page_number_field_required',
+                {warning['type'] for warning in blocked_plan['safety_warnings']})
+            self.assertFalse(word_field_plan['header_footer_policy']['fail_closed'])
+            self.assertEqual(
+                word_field_plan['summary']['page_number_field_generation'],
+                'word_field_requested')
+
     def test_docx_header_footer_policy_classifies_first_page_variation(self):
         plan = _docx_header_footer_policy_plan_for_page_texts(
             headers=[
@@ -5296,6 +5381,119 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertEqual(
                 report['summary']['page_number_field_generation'],
                 'deferred_placeholder_only')
+
+    def test_internal_docx_header_footer_word_page_field_writes_openxml(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-page-number-field.pdf'
+            docx_path = Path(tmp) / 'page-number-field.docx'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                page_number_behavior='word_field',
+                require_dynamic_page_number=True)
+
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            with zipfile.ZipFile(docx_path) as archive:
+                footer_xml = archive.read('word/footer1.xml').decode('utf-8')
+
+            self.assertTrue(report['applied'])
+            self.assertEqual(
+                report['summary']['page_number_behavior'],
+                'word_field')
+            self.assertEqual(
+                report['summary']['page_number_field_generation'],
+                'word_field')
+            self.assertEqual(report['summary']['page_number_fields_written'], 1)
+            self.assertIn('w:instrText', footer_xml)
+            self.assertIn(' PAGE ', footer_xml)
+            self.assertIn('w:fldCharType="begin"', footer_xml)
+            self.assertIn('w:fldCharType="end"', footer_xml)
+            self.assertNotIn('&lt;PAGE_NUMBER&gt;', footer_xml)
+
+    def test_internal_docx_header_footer_static_page_number_is_not_word_field(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'docx-page-number-static.pdf'
+            docx_path = Path(tmp) / 'page-number-static.docx'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            plan = build_docx_header_footer_generation_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                decisions,
+                enabled=True,
+                page_number_behavior='static_text')
+
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='static_text')
+            document.save(str(docx_path))
+            with zipfile.ZipFile(docx_path) as archive:
+                footer_xml = archive.read('word/footer1.xml').decode('utf-8')
+
+            self.assertTrue(report['applied'])
+            self.assertEqual(
+                report['summary']['page_number_field_generation'],
+                'static_text_diagnostic_only')
+            self.assertEqual(report['summary']['page_number_fields_written'], 0)
+            self.assertIn('&lt;PAGE_NUMBER&gt;', footer_xml)
+            self.assertNotIn('w:instrText', footer_xml)
+
+    def test_internal_docx_header_footer_word_page_field_fails_closed_for_unsafe_policy(self):
+        _require_docx_header_footer_support(self)
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic First Page Header',
+                'Synthetic Default Header',
+                'Synthetic Default Header',
+            ],
+            page_numbers=[
+                '<PAGE_NUMBER>',
+                '<PAGE_NUMBER>',
+                '<PAGE_NUMBER>',
+            ],
+            page_number_behavior='word_field')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'unsafe-page-field.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            with zipfile.ZipFile(docx_path) as archive:
+                footer_xml = (
+                    archive.read('word/footer1.xml').decode('utf-8')
+                    if 'word/footer1.xml' in archive.namelist() else '')
+
+        self.assertFalse(report['applied'])
+        self.assertEqual(report['summary']['page_number_fields_written'], 0)
+        self.assertNotIn('w:instrText', footer_xml)
+        self.assertIn(
+            'header_footer_policy_fail_closed',
+            {warning['type'] for warning in report['safety_warnings']})
 
     def test_internal_docx_header_footer_text_plan_disabled_by_default(self):
         _require_docx_header_footer_support(self)
@@ -7489,10 +7687,16 @@ def _run_synthetic_filtered_docx_comparison(
         default_after_metrics=default_after['metrics'])
 
 
-def _docx_header_footer_policy_plan_for_page_texts(headers=None, footers=None):
+def _docx_header_footer_policy_plan_for_page_texts(
+        headers=None,
+        footers=None,
+        page_numbers=None,
+        page_number_behavior='placeholder_only',
+        require_dynamic_page_number=False):
     headers = list(headers or [])
     footers = list(footers or [])
-    page_count = max(len(headers), len(footers))
+    page_numbers = list(page_numbers or [])
+    page_count = max(len(headers), len(footers), len(page_numbers))
     page_summaries = []
     candidate_groups = {}
 
@@ -7522,6 +7726,18 @@ def _docx_header_footer_policy_plan_for_page_texts(headers=None, footers=None):
             candidate_groups.setdefault(
                 (ROLE_FOOTER, REGION_BOTTOM, text, fingerprint),
                 []).append(page_index)
+            block_index += 1
+        if page_index < len(page_numbers) and page_numbers[page_index]:
+            text = page_numbers[page_index]
+            fingerprint = _summary_fingerprint(text, REGION_BOTTOM)
+            blocks.append(_mapping_summary_block(
+                block_index,
+                fingerprint,
+                REGION_BOTTOM,
+                text))
+            candidate_groups.setdefault(
+                (ROLE_PAGE_NUMBER, REGION_BOTTOM, text, fingerprint),
+                []).append(page_index)
         page_summaries.append({
             'page_index': page_index,
             'text_blocks': blocks,
@@ -7548,7 +7764,9 @@ def _docx_header_footer_policy_plan_for_page_texts(headers=None, footers=None):
         page_summaries,
         {'candidates': candidates},
         {'decisions': decisions},
-        enabled=True)
+        enabled=True,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
 
 
 def _run_synthetic_filtered_docx_with_header_footer_parts(
