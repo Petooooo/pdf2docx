@@ -5412,3 +5412,121 @@ Phase 4I should remain internal. The next safe direction is to decide whether
 the internal `word_field` mode should be exercised in the default-policy
 synthetic/local migration smoke gates, without exposing public API/CLI behavior
 or changing default conversion.
+
+## Phase 4I
+
+Phase 4I validates explicit internal `word_field` page-number behavior inside
+the existing default-policy DOCX header/footer migration smoke path.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- `word_field` is not the default page-number behavior.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Page-number smoke result
+
+Default page-number behavior:
+
+- `placeholder_only`
+
+Explicit `word_field` smoke:
+
+- Synthetic repeated header/footer/page-number fixture passed.
+- The header/footer policy remained `default`.
+- Approved header/footer/page-number residuals were absent from DOCX body XML.
+- Approved header text appeared in header XML.
+- Approved footer text appeared in footer XML.
+- Footer OpenXML contained a Word `PAGE` field instruction.
+- Literal `<PAGE_NUMBER>` placeholder text was not written in `word_field` mode.
+- Body text signature was preserved.
+- Body residual header/footer/page-number pollution count: 0.
+- Body text loss warning count: 0.
+- Table text loss warning count: 0.
+
+Placeholder/static behavior:
+
+- Placeholder smoke remained `placeholder_only`.
+- Placeholder smoke did not contain PAGE field OpenXML.
+- Static-text smoke wrote only literal diagnostic/static placeholder text.
+- Static-text smoke did not contain PAGE field OpenXML.
+
+Protection and fail-closed behavior:
+
+- Rejected page-number candidates did not produce PAGE fields.
+- Unsure page-number candidates did not produce PAGE fields.
+- Body-region page-number-like candidates were not represented and remained
+  fail-closed.
+- Non-default and unsafe policies remain blocked before writer application.
+
+Generated ignored local report:
+
+- `local_reports/phase4i-page-number-word-field-migration-report.md`
+
+### Tests added
+
+- Default-policy migration smoke supports explicit `word_field` behavior.
+- Placeholder/default smoke remains placeholder-only and contains no PAGE field.
+- Static-text smoke contains no PAGE field.
+- PAGE field generation requires explicit page-number approval.
+- Unsure page-number candidates do not generate PAGE fields.
+- Body-region page-number-like candidates do not generate PAGE fields.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "default_policy_migration_smoke or word_field or static_page_number"
+```
+
+Result: passed. 6 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 307 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 307 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated local DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4I tests and
+documentation files were modified.
+
+### Phase 4I recommendation
+
+Phase 4J should remain internal. The next safe direction is an optional
+bounded local-corpus `word_field` smoke for default-policy samples, still
+without public CLI/API exposure, default conversion changes, or broader
+migration behavior.

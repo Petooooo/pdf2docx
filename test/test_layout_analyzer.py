@@ -5728,6 +5728,7 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertTrue(summary['docx_header_xml_contains_approved_header'])
             self.assertTrue(summary['docx_footer_xml_contains_approved_footer'])
             self.assertTrue(summary['docx_footer_xml_contains_page_placeholder'])
+            self.assertFalse(summary['docx_footer_xml_contains_page_field'])
             self.assertTrue(summary['approved_residuals_absent_from_body_xml'])
             self.assertEqual(summary['body_residual_header_footer_pollution_count'], 0)
             self.assertTrue(summary['body_text_signature_preserved'])
@@ -5735,11 +5736,197 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertEqual(summary['table_text_loss_warning_count'], 0)
             self.assertEqual(summary['page_number_behavior'], 'placeholder_only')
             self.assertEqual(summary['page_number_field_generation'], 'deferred_placeholder_only')
+            self.assertEqual(summary['page_number_fields_written'], 0)
+            self.assertEqual(summary['page_number_placeholders_written'], 1)
             self.assertFalse(smoke['safety_warnings'])
             self.assertIn(
                 'synthetic report header',
                 smoke['default_metrics']['all_text'])
             self.assertFalse(smoke['default_metrics']['header_footer_xml']['has_header_text'])
+
+    def test_internal_default_policy_migration_smoke_writes_word_page_field_when_explicit(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-word-field-smoke.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp,
+                page_number_behavior='word_field',
+                require_dynamic_page_number=True)
+            summary = smoke['summary']
+            footer_xml = smoke['openxml']['footer_xml']
+            body_xml = smoke['openxml']['body_xml']
+
+            self.assertTrue(summary['smoke_passed'])
+            self.assertEqual(summary['policy_type'], 'default')
+            self.assertEqual(summary['page_number_behavior'], 'word_field')
+            self.assertEqual(summary['page_number_field_generation'], 'word_field')
+            self.assertEqual(summary['page_number_fields_written'], 1)
+            self.assertEqual(summary['page_number_placeholders_written'], 0)
+            self.assertTrue(summary['docx_footer_xml_contains_page_field'])
+            self.assertFalse(summary['docx_footer_xml_contains_page_placeholder'])
+            self.assertIn('w:instrText', footer_xml)
+            self.assertIn(' PAGE ', footer_xml)
+            self.assertNotIn('&lt;PAGE_NUMBER&gt;', footer_xml)
+            self.assertNotIn('Page 1 of 4', body_xml)
+            self.assertTrue(summary['docx_header_xml_contains_approved_header'])
+            self.assertTrue(summary['docx_footer_xml_contains_approved_footer'])
+            self.assertTrue(summary['approved_residuals_absent_from_body_xml'])
+            self.assertEqual(summary['body_residual_header_footer_pollution_count'], 0)
+            self.assertTrue(summary['body_text_signature_preserved'])
+            self.assertEqual(summary['body_text_loss_warning_count'], 0)
+            self.assertEqual(summary['table_text_loss_warning_count'], 0)
+            self.assertFalse(smoke['default_metrics']['header_footer_xml']['has_header_text'])
+
+    def test_internal_default_policy_migration_static_page_number_is_literal_only(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-static-page-smoke.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp,
+                page_number_behavior='static_text')
+            summary = smoke['summary']
+            footer_xml = smoke['openxml']['footer_xml']
+
+            self.assertTrue(summary['smoke_passed'])
+            self.assertEqual(summary['page_number_behavior'], 'static_text')
+            self.assertEqual(
+                summary['page_number_field_generation'],
+                'static_text_diagnostic_only')
+            self.assertTrue(summary['docx_footer_xml_contains_page_placeholder'])
+            self.assertFalse(summary['docx_footer_xml_contains_page_field'])
+            self.assertIn('&lt;PAGE_NUMBER&gt;', footer_xml)
+            self.assertNotIn('w:instrText', footer_xml)
+            self.assertEqual(summary['page_number_fields_written'], 0)
+            self.assertEqual(summary['page_number_placeholders_written'], 1)
+
+    def test_internal_default_policy_migration_word_field_requires_page_number_approval(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-word-field-without-page-approval.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER})
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp,
+                page_number_behavior='word_field',
+                require_dynamic_page_number=True)
+            summary = smoke['summary']
+            footer_xml = smoke['openxml']['footer_xml']
+
+            self.assertTrue(summary['smoke_passed'])
+            self.assertEqual(summary['page_number_behavior'], 'word_field')
+            self.assertEqual(smoke['plan']['summary']['page_number_placeholder_count'], 0)
+            self.assertFalse(summary['docx_footer_xml_contains_page_field'])
+            self.assertFalse(summary['docx_footer_xml_contains_page_placeholder'])
+            self.assertEqual(summary['page_number_fields_written'], 0)
+            self.assertNotIn('w:instrText', footer_xml)
+
+    def test_internal_default_policy_migration_word_field_excludes_unsure_page_numbers(self):
+        _require_docx_header_footer_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'default-policy-word-field-unsure-page.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER})
+            for decision in decisions['decisions']:
+                if decision.get('proposed_role') == ROLE_PAGE_NUMBER:
+                    decision['manual_decision'] = 'unsure'
+                    decision['checked_decisions'] = ['unsure']
+
+            smoke = _run_synthetic_default_policy_header_footer_migration_smoke(
+                pdf_path,
+                decisions,
+                layout,
+                tmp,
+                page_number_behavior='word_field',
+                require_dynamic_page_number=True)
+            summary = smoke['summary']
+            footer_xml = smoke['openxml']['footer_xml']
+
+            self.assertTrue(summary['smoke_passed'])
+            self.assertEqual(smoke['plan']['summary']['page_number_placeholder_count'], 0)
+            self.assertFalse(summary['docx_footer_xml_contains_page_field'])
+            self.assertEqual(summary['page_number_fields_written'], 0)
+            self.assertNotIn('w:instrText', footer_xml)
+
+    def test_internal_default_policy_migration_word_field_excludes_body_region_page_numbers(self):
+        _require_docx_header_footer_support(self)
+        page_fingerprint = _summary_fingerprint('Page 9 of 9', REGION_BODY)
+        page_summaries = [{
+            'page_index': 0,
+            'text_blocks': [
+                _mapping_summary_block(0, page_fingerprint, REGION_BODY, 'Page 9 of 9'),
+            ],
+        }]
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'body-page-number',
+                    page_fingerprint,
+                    ROLE_PAGE_NUMBER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BODY]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision('body-page-number', page_fingerprint, 'approve_exclude'),
+            ],
+        }
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'body-page-number-blocked.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertFalse(apply_report['applied'])
+        self.assertEqual(plan['summary']['representable_entry_count'], 0)
+        self.assertEqual(apply_report['summary']['page_number_fields_written'], 0)
+        self.assertFalse(_docx_openxml_contains_page_field(
+            openxml['header_xml'] + openxml['footer_xml']))
+        self.assertIn(
+            'body_region_candidate_not_represented',
+            {warning['type'] for warning in plan['safety_warnings']})
 
     def test_internal_default_policy_migration_preserves_callout_body_content(self):
         _require_docx_header_footer_support(self)
@@ -7773,7 +7960,9 @@ def _run_synthetic_filtered_docx_with_header_footer_parts(
         pdf_path,
         review_decisions,
         layout,
-        temp_root):
+        temp_root,
+        page_number_behavior='placeholder_only',
+        require_dynamic_page_number=False):
     baseline_path = Path(temp_root) / 'baseline-body.docx'
     filtered_body_path = Path(temp_root) / 'filtered-body.docx'
     final_path = Path(temp_root) / 'filtered-body-with-header-footer.docx'
@@ -7790,13 +7979,16 @@ def _run_synthetic_filtered_docx_with_header_footer_parts(
         layout.get('pages', []),
         layout.get('header_footer_exclusion_dry_run', {}),
         review_decisions,
-        enabled=True)
+        enabled=True,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
 
     document = DocxDocument(str(filtered_body_path))
     apply_report = docx_utils.apply_header_footer_text_plan(
         document,
         plan,
-        enabled=True)
+        enabled=True,
+        page_number_behavior=page_number_behavior)
     document.save(str(final_path))
 
     final_metrics = _read_docx_file_metrics(final_path)
@@ -7841,12 +8033,16 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         pdf_path,
         review_decisions,
         layout,
-        temp_root):
+        temp_root,
+        page_number_behavior='placeholder_only',
+        require_dynamic_page_number=False):
     report = _run_synthetic_filtered_docx_with_header_footer_parts(
         pdf_path,
         review_decisions,
         layout,
-        temp_root)
+        temp_root,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
     plan = report['plan']
     policy = plan.get('header_footer_policy') or {}
     comparison_summary = report['comparison']['summary']
@@ -7871,8 +8067,14 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
     header_present = all(text in header_xml for text in header_texts)
     footer_present = all(text in footer_xml for text in footer_texts)
     page_placeholder_expected = (
-        int(plan.get('summary', {}).get('page_number_placeholder_count', 0)) > 0)
+        int(plan.get('summary', {}).get('page_number_placeholder_count', 0)) > 0 and
+        policy.get('page_number_behavior') in {'placeholder_only', 'static_text'})
     page_placeholder_present = '&lt;PAGE_NUMBER&gt;' in footer_xml
+    page_field_expected = (
+        int(plan.get('summary', {}).get('page_number_placeholder_count', 0)) > 0 and
+        policy.get('page_number_behavior') == 'word_field')
+    page_field_present = _docx_openxml_contains_page_field(
+        header_xml + footer_xml)
 
     safety_warnings = []
     if policy.get('policy_type') != 'default':
@@ -7888,6 +8090,12 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         safety_warnings.append({'type': 'approved_footer_text_missing_from_docx_footer'})
     if page_placeholder_expected and not page_placeholder_present:
         safety_warnings.append({'type': 'page_number_placeholder_missing_from_docx_footer'})
+    if page_field_expected and not page_field_present:
+        safety_warnings.append({'type': 'page_number_word_field_missing_from_docx_footer'})
+    if not page_field_expected and page_field_present:
+        safety_warnings.append({'type': 'unexpected_page_number_word_field_in_docx_parts'})
+    if page_field_expected and page_placeholder_present:
+        safety_warnings.append({'type': 'page_number_placeholder_present_in_word_field_smoke'})
     if approved_residuals_in_body:
         safety_warnings.append({
             'type': 'approved_header_footer_residuals_remaining_in_body_xml',
@@ -7908,6 +8116,8 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         'docx_footer_xml_contains_approved_footer': footer_present,
         'docx_footer_xml_page_placeholder_expected': page_placeholder_expected,
         'docx_footer_xml_contains_page_placeholder': page_placeholder_present,
+        'docx_footer_xml_page_field_expected': page_field_expected,
+        'docx_footer_xml_contains_page_field': page_field_present,
         'approved_residuals_absent_from_body_xml': not approved_residuals_in_body,
         'body_residual_header_footer_pollution_count': int(
             comparison_summary.get('true_residual_header_footer_pollution_count', 0)),
@@ -7920,6 +8130,10 @@ def _run_synthetic_default_policy_header_footer_migration_smoke(
         'page_number_behavior': policy.get('page_number_behavior', ''),
         'page_number_field_generation': (
             report['apply_report']['summary'].get('page_number_field_generation', '')),
+        'page_number_fields_written': int(
+            report['apply_report']['summary'].get('page_number_fields_written', 0)),
+        'page_number_placeholders_written': int(
+            report['apply_report']['summary'].get('page_number_placeholders_written', 0)),
         'generated_docx_artifacts_temp_only': bool(
             comparison_summary.get('generated_docx_artifacts_temp_only')),
         'smoke_passed': not safety_warnings,
@@ -8028,6 +8242,11 @@ def _read_docx_openxml_parts(docx_path):
             for name in names
             if name.startswith('word/footer') and name.endswith('.xml'))
     return parts
+
+
+def _docx_openxml_contains_page_field(xml_text):
+    text = xml_text or ''
+    return 'w:instrText' in text and ' PAGE ' in text
 
 
 def _synthetic_docx_comparison_report_from_metrics(

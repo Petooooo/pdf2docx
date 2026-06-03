@@ -682,3 +682,46 @@ Phase 4I should remain internal. The next safe direction is to decide whether
 the PAGE-field mode should be included in the default-policy synthetic/local
 migration smoke gates, still without public API exposure or default conversion
 changes.
+
+## Phase 4I Word-Field Migration Smoke Validation
+
+Phase 4I validates the explicit internal `word_field` page-number mode inside
+the combined default-policy migration smoke path. The default page-number mode
+remains `placeholder_only`.
+
+Validated behavior:
+
+- The synthetic repeated header/footer/page-number fixture can run the full
+  internal smoke path with `page_number_behavior='word_field'`.
+- The generated policy remains `default`.
+- Approved header/footer/page-number residuals are removed from DOCX body XML.
+- Approved header text appears in DOCX header XML.
+- Approved footer text appears in DOCX footer XML.
+- Footer OpenXML contains a real Word `PAGE` field instruction when
+  `word_field` is explicitly requested.
+- The literal `<PAGE_NUMBER>` placeholder is not written in `word_field` mode.
+- Placeholder/default smoke still writes only diagnostic placeholder text and
+  does not contain PAGE field OpenXML.
+- Static-text smoke writes only literal diagnostic/static text and does not
+  contain PAGE field OpenXML.
+- Rejected, unsure, and unapproved page-number candidates do not produce PAGE
+  fields.
+- Body-region page-number-like candidates are not represented and remain
+  fail-closed.
+
+Safety interpretation:
+
+- `word_field` remains internal-only.
+- `word_field` must be explicitly requested both in the plan and writer call.
+- Placeholder/static modes are not dynamic page-number fields.
+- Non-default policies remain fail-closed for the simple writer.
+- Body text signature preservation remains mandatory.
+- Body/table/callout/list text loss and residual header/footer pollution remain
+  fail-closed.
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+
+Phase 4J should remain internal. The next safe direction is to decide whether a
+bounded local-corpus `word_field` smoke is useful for default-policy samples,
+without changing default conversion, adding public API/CLI exposure, or
+broadening migration behavior.
