@@ -100,6 +100,53 @@ normal conversion is unchanged, the public CLI/API remains closed, migration is
 still internal-only and disabled by default, and only default-policy simple text
 header/footer writing has internal smoke evidence.
 
+## Phase 5F Public-Safe Synthetic Fixture Expansion
+
+Phase 5F expands committed public-safe synthetic coverage without using ignored
+local PDFs or local extracted text. The new tests generate small deterministic
+PDFs at runtime with artificial `Synthetic public safe ...` content and keep
+all generated PDF/DOCX artifacts in temporary directories.
+
+New committed synthetic coverage:
+
+- First-page-different header/footer fixture coverage verifies the future
+  `first_page` policy shape remains fail-closed for the simple writer.
+- Odd/even header/footer fixture coverage verifies `odd_even` remains
+  fail-closed.
+- Section-like contiguous ranges verify `section_scoped` remains fail-closed
+  and still requires future section mapping.
+- Header/footer text that partially resembles a body heading does not remove
+  the body heading; the body signature remains preserved.
+- Page-number `word_field` behavior remains explicit: placeholder mode does
+  not emit a Word `PAGE` field, while explicit `word_field` does.
+- Strict exact-fragment mismatch remains diagnostic-only when the normalized
+  token/ngram body signature gate passes.
+- Warning model mapping remains stable for missing review decisions,
+  unsupported policy, unsafe page-number behavior, body/table text loss, and
+  residual header/footer pollution.
+- A negative/control fixture with no repeated header/footer candidates remains
+  ineligible for migration and removes nothing.
+
+Public-safe fixture policy:
+
+- No ignored local PDF text is used.
+- No generated PDF or DOCX binaries are committed.
+- Synthetic PDFs and DOCX outputs are generated only in temporary directories.
+- The public CLI/API remains closed and default conversion remains unchanged.
+
+Remaining fixture gaps:
+
+- The committed fixture suite is still synthetic and intentionally small.
+- First-page, odd/even, and section-scoped DOCX writing are not implemented.
+- Image/logo header/footer migration is not covered.
+- Cross-page paragraph merge is not implemented.
+- Broader public-safe fixture diversity and performance/stress evidence are
+  still required before public/default readiness.
+
+Local corpus evidence remains ignored/non-committed. Phase 5F improves public
+regression coverage, but it does not promote local samples into fixtures and
+does not unblock public/default integration by itself.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

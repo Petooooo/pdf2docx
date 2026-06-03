@@ -6413,3 +6413,171 @@ warning/error expectations before any public opt-in implementation is
 considered. Public/default integration, non-default policy writing,
 image/logo migration, paragraph merge, and table parser changes remain future
 work.
+
+## Phase 5F
+
+Phase 5F expanded committed public-safe synthetic/generated fixture coverage
+for reviewed header/footer migration. It did not use ignored local PDFs or
+local extracted text, and it did not commit generated PDF/DOCX binaries.
+
+### Default/public behavior
+
+Production/default conversion changed:
+
+- No.
+
+Public CLI/API changed:
+
+- No.
+
+Existing conversion tests passed:
+
+- Yes.
+
+Default conversion behavior:
+
+- Unchanged.
+- Reviewed filtering remains internal-only and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Generated ignored local report:
+
+- `local_reports/phase5f-public-safe-fixture-expansion-report.md`
+
+### Synthetic fixture scenarios added
+
+Runtime-generated public-safe PDF scenarios:
+
+- `phase5f_first_page_policy`
+- `phase5f_odd_even_policy`
+- `phase5f_section_scoped_policy`
+- `phase5f_body_heading_similarity`
+- `phase5f_no_header_footer_control`
+
+Additional synthetic/test-only plan coverage:
+
+- Default page-number placeholder vs explicit `word_field`.
+- Strict exact-fragment mismatch with normalized token/ngram body signature
+  preserved.
+- Public warning model mapping for blocking and diagnostic-only codes.
+
+Public-safe fixture policy:
+
+- Synthetic text uses artificial `Synthetic public safe ...` content.
+- Ignored local PDF text is not used.
+- Generated PDFs and DOCX files are created only in temporary directories.
+- No generated PDF/DOCX binary fixture is committed.
+- `local_samples/` and `local_reports/` remain ignored.
+
+### Coverage results
+
+Policy fail-closed coverage:
+
+- `first_page` policy remains fail-closed for the simple writer.
+- `odd_even` policy remains fail-closed for the simple writer.
+- `section_scoped` policy remains fail-closed and still requires future
+  section mapping.
+
+Body preservation coverage:
+
+- Header/footer text that partially resembles a body heading does not remove
+  the body heading.
+- Body-region removal count remains 0 for the similarity fixture.
+- Body text signature remains preserved.
+
+Page-number field coverage:
+
+- Placeholder mode does not emit a Word `PAGE` field.
+- Explicit `word_field` mode emits PAGE field OpenXML.
+- `word_field` remains opt-in and internal/test-only.
+
+Normalized gate coverage:
+
+- Normalized token/ngram body signature gate passes for the artificial
+  fragmentation case.
+- Strict exact-fragment mismatch remains diagnostic-only.
+
+Warning model coverage:
+
+- Missing review decisions map to `missing_review_decisions`.
+- Unsafe/non-default policy maps to `non_default_policy_unsupported`.
+- Unsafe page-number behavior maps to `unsafe_page_number_behavior`.
+- Body/table text loss maps to `body_text_loss_detected` and
+  `table_text_loss_detected`.
+- Residual pollution maps to `residual_header_footer_pollution`.
+- Strict exact-fragment mismatch maps to
+  `strict_exact_fragment_mismatch_diagnostic`.
+
+Negative/control coverage:
+
+- Public-safe no-header/footer control produces 0 migration candidates.
+- No reviewed filtering removal occurs without eligible candidates.
+
+### Remaining gaps
+
+- Public CLI/API option remains unimplemented.
+- Production/default migration remains disabled.
+- First-page Word header/footer writing is not implemented.
+- Odd/even Word header/footer writing is not implemented.
+- Full section-specific production mapping is not implemented.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph continuation merge is not implemented.
+- Broader public-safe fixture diversity is still needed.
+- Performance/stress evidence remains future work.
+- Local corpus evidence remains ignored and non-committed.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "phase5f"
+```
+
+Result: passed. 6 selected tests and 9 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 358 tests and 40 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 358 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: modified tracked files were limited to Phase 5F tests and committed
+documentation before commit. `.venv/`, caches, `local_samples/`,
+`local_reports/`, and test outputs remained ignored.
+
+### Phase 5F recommendation
+
+Phase 5G should evaluate performance/stress behavior or continue expanding
+public-safe fixtures. Public/default integration, non-default policy writing,
+image/logo migration, paragraph merge, and table parser changes remain future
+work.

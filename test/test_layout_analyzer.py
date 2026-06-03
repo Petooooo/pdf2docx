@@ -7081,6 +7081,178 @@ class TestLayoutAnalyzer(unittest.TestCase):
         json.dumps(model)
         json.dumps(validation)
 
+    def test_phase5f_public_safe_generated_policy_fixtures_fail_closed(self):
+        _require_docx_header_footer_support(self)
+        _require_synthetic_pdf_support(self)
+        cases = [
+            ('first_page', 'phase5f_first_page_policy'),
+            ('odd_even', 'phase5f_odd_even_policy'),
+            ('section_scoped', 'phase5f_section_scoped_policy'),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            for expected_policy, scenario in cases:
+                with self.subTest(expected_policy=expected_policy):
+                    pdf_path = temp_root / f'{scenario}.pdf'
+                    _write_synthetic_pdf(pdf_path, scenario)
+                    layout = _parse_synthetic_layout(pdf_path)
+                    layout_text = _layout_all_text(layout).lower()
+                    plan = _phase5f_public_safe_policy_plan(expected_policy)
+                    document = DocxDocument()
+                    report = docx_utils.apply_header_footer_text_plan(
+                        document,
+                        plan,
+                        enabled=True)
+                    warning_types = {
+                        warning['type']
+                        for warning in report['safety_warnings']
+                    }
+
+                    self.assertTrue(_phase5f_artifact_is_temp_only(pdf_path, temp_root))
+                    self.assertIn('synthetic public safe', layout_text)
+                    self.assertFalse(_phase5f_uses_local_sample_text(layout_text))
+                    self.assertEqual(
+                        plan['header_footer_policy']['policy_type'],
+                        expected_policy)
+                    self.assertTrue(plan['header_footer_policy']['fail_closed'])
+                    self.assertFalse(report['applied'])
+                    self.assertIn(
+                        'header_footer_policy_not_supported_for_simple_writer',
+                        warning_types)
+                    self.assertIn(
+                        'header_footer_policy_fail_closed',
+                        warning_types)
+
+    def test_phase5f_public_safe_body_heading_similarity_preserves_body_signature(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'phase5f-similar-heading.pdf'
+            _write_synthetic_pdf(pdf_path, 'phase5f_body_heading_similarity')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = _synthetic_review_decisions(
+                layout,
+                approve_roles={ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER})
+            filtering = _synthetic_filtering_report(layout, decisions)
+            body_validation = _synthetic_body_text_validation(layout, filtering)
+            body_text = body_validation['filtered_signature']
+
+            self.assertTrue(_phase5f_artifact_is_temp_only(pdf_path, Path(tmp)))
+            self.assertIn('synthetic public safe similar header body heading', body_text)
+            self.assertEqual(_removed_region_count(filtering, REGION_BODY), 0)
+            self.assertEqual(
+                _removed_text_match_count(
+                    filtering,
+                    'Synthetic public safe similar header body heading'),
+                0)
+            self.assertTrue(body_validation['body_text_signature_preserved'])
+
+    def test_phase5f_public_safe_page_number_word_field_remains_explicit(self):
+        _require_docx_header_footer_support(self)
+        placeholder_plan = _phase5f_public_safe_default_page_number_plan()
+        word_field_plan = _phase5f_public_safe_default_page_number_plan(
+            page_number_behavior='word_field')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            placeholder_path = Path(tmp) / 'placeholder.docx'
+            word_field_path = Path(tmp) / 'word-field.docx'
+            placeholder_document = DocxDocument()
+            word_field_document = DocxDocument()
+            placeholder_report = docx_utils.apply_header_footer_text_plan(
+                placeholder_document,
+                placeholder_plan,
+                enabled=True)
+            word_field_report = docx_utils.apply_header_footer_text_plan(
+                word_field_document,
+                word_field_plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            placeholder_document.save(str(placeholder_path))
+            word_field_document.save(str(word_field_path))
+            placeholder_xml = _read_docx_openxml_parts(placeholder_path)
+            word_field_xml = _read_docx_openxml_parts(word_field_path)
+
+        self.assertTrue(placeholder_report['applied'])
+        self.assertTrue(word_field_report['applied'])
+        self.assertEqual(
+            placeholder_report['summary']['page_number_field_generation'],
+            'deferred_placeholder_only')
+        self.assertEqual(
+            word_field_report['summary']['page_number_field_generation'],
+            'word_field')
+        self.assertFalse(_docx_openxml_contains_page_field(
+            placeholder_xml['header_xml'] + placeholder_xml['footer_xml']))
+        self.assertTrue(_docx_openxml_contains_page_field(
+            word_field_xml['header_xml'] + word_field_xml['footer_xml']))
+        self.assertIn('&lt;PAGE_NUMBER&gt;', placeholder_xml['footer_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', word_field_xml['footer_xml'])
+
+    def test_phase5f_public_safe_normalized_gate_keeps_strict_mismatch_diagnostic(self):
+        profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('synthetic public safe alpha beta gamma'),
+            _body_signature_metric('synthetic public safe alpha beta gamma'),
+            strict_missing_fragments=[
+                'synthetic public safe alpha   beta gamma',
+            ],
+            removed_texts=[])
+
+        validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            migration_gate_report=report)
+        diagnostic_types = {
+            warning['type'] for warning in validation['diagnostics']
+        }
+
+        self.assertEqual(
+            report['summary']['normalized_body_signature_gate_passed'],
+            True)
+        self.assertFalse(
+            report['summary']['strict_exact_fragment_gate_passed'])
+        self.assertFalse(validation['warnings'])
+        self.assertIn(
+            'strict_exact_fragment_mismatch_diagnostic_only',
+            diagnostic_types)
+
+    def test_phase5f_public_safe_warning_model_maps_fixture_failures(self):
+        warnings = _public_warning_model_by_code()
+        expected_codes = {
+            'missing_review_decisions',
+            'non_default_policy_unsupported',
+            'unsafe_page_number_behavior',
+            'body_text_loss_detected',
+            'table_text_loss_detected',
+            'residual_header_footer_pollution',
+        }
+
+        for code in expected_codes:
+            with self.subTest(code=code):
+                self.assertIn(code, warnings)
+                self.assertFalse(warnings[code]['safe_to_continue'])
+                self.assertTrue(warnings[code]['blocking'])
+        self.assertTrue(
+            warnings['strict_exact_fragment_mismatch_diagnostic']['diagnostic_only'])
+
+    def test_phase5f_public_safe_negative_control_has_no_migration_candidates(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'phase5f-negative-control.pdf'
+            _write_synthetic_pdf(pdf_path, 'phase5f_no_header_footer_control')
+            layout = _parse_synthetic_layout(pdf_path)
+            decisions = {'decisions': [], 'summary': {'candidate_count': 0}}
+            filtering = _synthetic_filtering_report(layout, decisions)
+
+            self.assertTrue(_phase5f_artifact_is_temp_only(pdf_path, Path(tmp)))
+            self.assertEqual(
+                layout['header_footer_exclusion_dry_run']['summary']['candidate_count'],
+                0)
+            self.assertEqual(filtering['approved_candidate_count'], 0)
+            self.assertEqual(filtering['summary']['removed_block_count'], 0)
+            self.assertFalse(_phase5f_uses_local_sample_text(_layout_all_text(layout)))
+
     def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
             synthetic_coverage=_quality_synthetic_evidence(),
@@ -8670,6 +8842,79 @@ def _write_synthetic_pdf(path, scenario):
                 'A later body sentence remains available for paragraph grouping.')
             _synthetic_footer(page, 'SYNTHETIC CONTINUITY FOOTER')
             _synthetic_page_number(page, 2, 2)
+        elif scenario == 'phase5f_first_page_policy':
+            for page_index in range(4):
+                page = _synthetic_page(doc)
+                if page_index == 0:
+                    header = 'SYNTHETIC PUBLIC SAFE FIRST PAGE HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE FIRST PAGE FOOTER'
+                else:
+                    header = 'SYNTHETIC PUBLIC SAFE DEFAULT HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE DEFAULT FOOTER'
+                _synthetic_header(page, header)
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic public safe first-page body {page_index + 1}.')
+                _synthetic_footer(page, footer)
+        elif scenario == 'phase5f_odd_even_policy':
+            for page_index in range(6):
+                page = _synthetic_page(doc)
+                if (page_index + 1) % 2:
+                    header = 'SYNTHETIC PUBLIC SAFE ODD HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE ODD FOOTER'
+                else:
+                    header = 'SYNTHETIC PUBLIC SAFE EVEN HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE EVEN FOOTER'
+                _synthetic_header(page, header)
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic public safe odd-even body {page_index + 1}.')
+                _synthetic_footer(page, footer)
+        elif scenario == 'phase5f_section_scoped_policy':
+            for page_index in range(4):
+                page = _synthetic_page(doc)
+                if page_index < 2:
+                    header = 'SYNTHETIC PUBLIC SAFE SECTION ALPHA HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE SECTION ALPHA FOOTER'
+                else:
+                    header = 'SYNTHETIC PUBLIC SAFE SECTION BETA HEADER'
+                    footer = 'SYNTHETIC PUBLIC SAFE SECTION BETA FOOTER'
+                _synthetic_header(page, header)
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic public safe section body {page_index + 1}.')
+                _synthetic_footer(page, footer)
+        elif scenario == 'phase5f_body_heading_similarity':
+            for page_index in range(4):
+                page = _synthetic_page(doc)
+                _synthetic_header(page, 'SYNTHETIC PUBLIC SAFE SIMILAR HEADER')
+                _synthetic_body_line(
+                    page,
+                    148,
+                    (
+                        'Synthetic public safe similar header body heading '
+                        f'{page_index + 1} must remain.'
+                    ))
+                _synthetic_body_line(
+                    page,
+                    180,
+                    f'Synthetic public safe body paragraph {page_index + 1} remains.')
+                _synthetic_footer(page, 'SYNTHETIC PUBLIC SAFE SIMILAR FOOTER')
+                _synthetic_page_number(page, page_index + 1, 4)
+        elif scenario == 'phase5f_no_header_footer_control':
+            for page_index in range(3):
+                page = _synthetic_page(doc)
+                _synthetic_body_line(
+                    page,
+                    150,
+                    f'Synthetic public safe unique body alpha {page_index + 1}.')
+                _synthetic_body_line(
+                    page,
+                    185,
+                    f'Synthetic public safe unique body beta {page_index + 1}.')
         else:
             raise ValueError(f'Unknown synthetic scenario: {scenario}')
 
@@ -10558,6 +10803,102 @@ def _public_warning_model_by_code():
         warning['code']: warning
         for warning in build_reviewed_header_footer_warning_model()['warnings']
     }
+
+
+def _phase5f_public_safe_policy_plan(policy_type):
+    if policy_type == 'first_page':
+        return _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic public safe first page header',
+                'Synthetic public safe default header',
+                'Synthetic public safe default header',
+                'Synthetic public safe default header',
+            ],
+            footers=[
+                'Synthetic public safe first page footer',
+                'Synthetic public safe default footer',
+                'Synthetic public safe default footer',
+                'Synthetic public safe default footer',
+            ])
+    if policy_type == 'odd_even':
+        return _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic public safe odd header',
+                'Synthetic public safe even header',
+                'Synthetic public safe odd header',
+                'Synthetic public safe even header',
+            ],
+            footers=[
+                'Synthetic public safe odd footer',
+                'Synthetic public safe even footer',
+                'Synthetic public safe odd footer',
+                'Synthetic public safe even footer',
+            ])
+    if policy_type == 'section_scoped':
+        return _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic public safe section alpha header',
+                'Synthetic public safe section alpha header',
+                'Synthetic public safe section beta header',
+                'Synthetic public safe section beta header',
+            ],
+            footers=[
+                'Synthetic public safe section alpha footer',
+                'Synthetic public safe section alpha footer',
+                'Synthetic public safe section beta footer',
+                'Synthetic public safe section beta footer',
+            ])
+    raise ValueError(f'Unknown Phase 5F policy fixture: {policy_type}')
+
+
+def _phase5f_public_safe_default_page_number_plan(
+        page_number_behavior='placeholder_only'):
+    return _docx_header_footer_policy_plan_for_page_texts(
+        headers=[
+            'Synthetic public safe default header',
+            'Synthetic public safe default header',
+            'Synthetic public safe default header',
+        ],
+        footers=[
+            'Synthetic public safe default footer',
+            'Synthetic public safe default footer',
+            'Synthetic public safe default footer',
+        ],
+        page_numbers=[
+            PAGE_NUMBER_PLACEHOLDER,
+            PAGE_NUMBER_PLACEHOLDER,
+            PAGE_NUMBER_PLACEHOLDER,
+        ],
+        page_number_behavior=page_number_behavior)
+
+
+def _layout_all_text(layout):
+    return normalize_text(' '.join(
+        block.get('text', '')
+        for page in (layout or {}).get('pages', []) or []
+        for block in page.get('text_blocks', []) or []))
+
+
+def _phase5f_artifact_is_temp_only(path, temp_root):
+    try:
+        Path(path).resolve().relative_to(Path(temp_root).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _phase5f_uses_local_sample_text(text):
+    lowered = normalize_text(text).lower()
+    local_markers = {
+        'local_samples',
+        'input.pdf',
+        'input2.pdf',
+        'input3.pdf',
+        'input4.pdf',
+        'input5.pdf',
+        'input6_large.pdf',
+    }
+    return any(marker in lowered for marker in local_markers)
 
 
 def _quality_local_evidence(

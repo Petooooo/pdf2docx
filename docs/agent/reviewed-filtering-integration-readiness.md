@@ -922,3 +922,34 @@ Phase 5E status:
 
 Recommended next direction is Phase 5F: expand committed public-safe fixtures
 without enabling public behavior.
+
+## Phase 5F: Public-Safe Synthetic Fixture Expansion
+
+Phase 5F expands committed public-safe synthetic fixture coverage for reviewed
+header/footer migration. The update is test/documentation-only: it does not
+expose a public CLI flag, does not add a public API option, and does not change
+default conversion behavior.
+
+Committed quality summary:
+
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+
+Phase 5F status:
+
+- Runtime-generated synthetic PDFs use artificial text only.
+- Generated PDF/DOCX artifacts remain temporary or ignored and are not
+  committed.
+- First-page, odd/even, and section-scoped policy scenarios remain
+  fail-closed for the simple writer.
+- Body heading similarity coverage verifies body text is preserved.
+- Explicit `word_field` PAGE field behavior remains opt-in and is not selected
+  by default.
+- Normalized token/ngram body signature remains the primary gate; strict
+  exact-fragment mismatch remains diagnostic-only.
+- Warning model mappings remain stable for missing review decisions, unsafe
+  policy/page-number behavior, body/table loss, and residual pollution.
+- Public CLI/API exposure remains closed.
+
+Recommended next direction is Phase 5G: evaluate performance/stress behavior
+or continue expanding public-safe fixtures before any public opt-in
+implementation.
