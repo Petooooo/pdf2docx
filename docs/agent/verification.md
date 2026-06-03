@@ -6089,3 +6089,134 @@ Phase 5D should keep this surface private and validation-only unless a later
 phase explicitly adds a private adapter. Public/default integration,
 non-default policy writing, image/logo migration, paragraph merge, and table
 parser changes remain future work.
+
+## Phase 5D
+
+Phase 5D creates a public/default readiness checklist for the reviewed
+header/footer migration MVP. It defines what must be true before any future
+public opt-in or default-on integration can be considered.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Public readiness checklist:
+
+- `docs/agent/reviewed-filtering-public-readiness-checklist.md`
+
+Generated ignored local report:
+
+- `local_reports/phase5d-public-readiness-checklist-report.md`
+
+### Readiness status
+
+Internal MVP readiness:
+
+- `internal_mvp_ready=True`
+
+Public opt-in readiness:
+
+- `public_opt_in_ready=False`
+
+Default-on readiness:
+
+- `default_on_ready=False`
+
+Key public blockers:
+
+- No public API or CLI option.
+- API shape remains internal-only.
+- Review decisions are not user-facing.
+- Local report/output policy is not user-facing.
+- Public warning/error model is missing.
+- End-user documentation is missing.
+- Public option backward compatibility policy is missing.
+
+Key default-on blockers:
+
+- Only `default` policy writing is supported.
+- `first_page`, `odd_even`, `section_scoped`, and `unsupported` policies still
+  fail closed.
+- Image/logo header/footer migration is not implemented.
+- Paragraph continuation merge is not implemented.
+- Large document evidence remains bounded for `input6_large`.
+- Local corpus evidence is ignored and non-committed.
+- Public regression fixture set is limited.
+- Performance characteristics are not fully evaluated.
+- Manual review approval is still required.
+
+Recommended next phase:
+
+- Phase 5E: public option naming and warning model draft.
+
+### Tests added
+
+- Checklist marks internal MVP as ready.
+- Checklist marks public opt-in as not ready.
+- Checklist marks default-on as not ready.
+- Checklist includes non-default policy blockers.
+- Checklist includes paragraph continuation blockers.
+- Checklist includes image/logo migration blockers.
+- Checklist includes large corpus/performance blockers.
+- Checklist includes required public/default gates.
+- Checklist summary is JSON-serializable.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "public_readiness_checklist"
+```
+
+Result: passed. 7 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 344 tests and 10 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 344 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: modified files were limited to Phase 5D code, tests, and committed
+documentation. `.venv/`, caches, `local_samples/`, `local_reports/`, and test
+outputs remained ignored.
+
+### Phase 5D recommendation
+
+Phase 5E should draft public option naming and a public warning/error model
+without exposing behavior. Public/default integration, non-default policy
+writing, image/logo migration, paragraph merge, and table parser changes remain
+future work.

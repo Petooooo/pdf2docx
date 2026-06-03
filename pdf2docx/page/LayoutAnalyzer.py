@@ -1201,6 +1201,60 @@ def validate_reviewed_header_footer_internal_request(
     }
 
 
+def build_reviewed_header_footer_public_readiness_checklist(
+        enabled: bool = True) -> dict:
+    '''Summarize blockers before any public/default migration exposure.
+
+    This checklist is documentation/test-only. It does not expose API options,
+    change converter defaults, or execute migration.
+    '''
+    internal_readiness = _public_readiness_internal_items()
+    public_blockers = _public_readiness_public_blockers()
+    default_blockers = _public_readiness_default_blockers()
+    public_gates = _public_readiness_required_public_gates()
+    default_gates = _public_readiness_required_default_gates()
+    risks = _public_readiness_remaining_risks()
+    internal_mvp_ready = bool(enabled and all(
+        item.get('ready', False) for item in internal_readiness))
+    summary = {
+        'enabled': bool(enabled),
+        'internal_mvp_ready': internal_mvp_ready,
+        'public_opt_in_ready': False,
+        'default_on_ready': False,
+        'public_blocker_count': len(public_blockers),
+        'default_blocker_count': len(default_blockers),
+        'required_public_gate_count': len(public_gates),
+        'required_default_gate_count': len(default_gates),
+        'remaining_risk_count': len(risks),
+        'public_exposure': MIGRATION_PROFILE_PUBLIC_EXPOSURE,
+        'public_cli_exposed': False,
+        'public_api_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+        'recommended_next_phase': 'Phase 5E',
+    }
+    return {
+        'enabled': bool(enabled),
+        'policy': 'reviewed_header_footer_public_default_readiness_checklist_only',
+        'summary': summary,
+        'current_internal_readiness': internal_readiness,
+        'public_blockers': public_blockers,
+        'default_blockers': default_blockers,
+        'required_public_gates': public_gates,
+        'required_default_gates': default_gates,
+        'remaining_risks': risks,
+        'recommendation': {
+            'internal_mvp_ready': internal_mvp_ready,
+            'public_opt_in_ready': False,
+            'default_on_ready': False,
+            'next_phase': 'Phase 5E',
+            'reason': (
+                'Internal MVP is ready for private review only; public opt-in '
+                'and default-on behavior remain blocked by checklist items.'),
+        },
+    }
+
+
 def build_reviewed_header_footer_quality_evaluation_pack(
         migration_profile: dict = None,
         synthetic_coverage: dict = None,
@@ -4148,6 +4202,113 @@ def _internal_request_recommendation(status: str, warnings: list) -> str:
         return 'Internal request is safe to hand to a future private smoke adapter only; public/default integration remains closed.'
     warning_types = sorted({warning.get('type') for warning in warnings or []})
     return f'Internal request is fail-closed; resolve warnings first: {warning_types}.'
+
+
+def _public_readiness_internal_items() -> list:
+    return [
+        {
+            'id': 'internal_migration_profile_exists',
+            'ready': True,
+            'evidence': 'Phase 4J consolidated migration profile.',
+        },
+        {
+            'id': 'internal_request_config_surface_exists',
+            'ready': True,
+            'evidence': 'Phase 5C internal request/config surface.',
+        },
+        {
+            'id': 'default_policy_migration_smoke_exists',
+            'ready': True,
+            'evidence': 'Default-policy migration smoke is covered internally.',
+        },
+        {
+            'id': 'docx_header_footer_xml_output_validated',
+            'ready': True,
+            'evidence': 'Synthetic DOCX header/footer XML checks exist.',
+        },
+        {
+            'id': 'word_field_page_field_validated_internal_only',
+            'ready': True,
+            'evidence': 'Explicit internal word_field PAGE field smoke exists.',
+        },
+        {
+            'id': 'normalized_body_signature_local_gate_exists',
+            'ready': True,
+            'evidence': 'Normalized token/ngram body gate is primary locally.',
+        },
+        {
+            'id': 'quality_evaluation_pack_exists',
+            'ready': True,
+            'evidence': 'Phase 5A/5B quality evaluation docs and helpers exist.',
+        },
+    ]
+
+
+def _public_readiness_public_blockers() -> list:
+    return [
+        'public_api_cli_option_missing',
+        'internal_api_shape_only',
+        'review_decisions_not_user_facing',
+        'local_output_report_policy_not_user_facing',
+        'public_error_warning_model_missing',
+        'end_user_documentation_missing',
+        'public_option_backward_compatibility_policy_missing',
+    ]
+
+
+def _public_readiness_default_blockers() -> list:
+    return [
+        'non_default_policy_writing_missing',
+        'first_page_odd_even_section_scoped_policies_fail_closed',
+        'image_logo_header_footer_migration_missing',
+        'paragraph_continuation_merge_missing',
+        'large_document_evidence_bounded_input6_large',
+        'local_corpus_evidence_ignored_non_committed',
+        'public_regression_fixture_set_limited',
+        'performance_characteristics_not_fully_evaluated',
+        'manual_review_approval_required',
+    ]
+
+
+def _public_readiness_required_public_gates() -> list:
+    return [
+        'public_option_naming_proposal',
+        'public_warnings_errors_model',
+        'public_review_decision_schema_or_automatic_safe_mode',
+        'robust_fixture_suite',
+        'quality_gate_summary_exposed_to_caller',
+        'fail_closed_behavior_verified',
+        'backward_compatibility_plan',
+        'user_documentation',
+        'security_privacy_guidance_for_local_reports',
+    ]
+
+
+def _public_readiness_required_default_gates() -> list:
+    return [
+        'broader_corpus_validation',
+        'non_default_policy_support_or_safe_skip_behavior',
+        'first_page_odd_even_section_handling_strategy',
+        'paragraph_continuation_strategy',
+        'performance_stress_testing',
+        'user_facing_fallback_behavior',
+        'stronger_e2e_docx_structural_tests',
+        'clear_success_failure_metrics',
+    ]
+
+
+def _public_readiness_remaining_risks() -> list:
+    return [
+        'body_text_loss',
+        'table_text_loss',
+        'callout_text_loss',
+        'list_text_loss',
+        'residual_header_footer_pollution',
+        'unsupported_policy',
+        'unsafe_page_number_behavior',
+        'local_report_privacy',
+        'large_document_performance',
+    ]
 
 
 def _reviewed_header_footer_migration_profile_payload(

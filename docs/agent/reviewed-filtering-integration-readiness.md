@@ -866,3 +866,31 @@ Phase 5D should keep this request surface private. A later bounded phase may
 wire a private adapter to consume the request summary, but public/default
 integration, non-default policy writing, image/logo migration, paragraph merge,
 and table parser changes remain future work.
+
+## Phase 5D: Public Readiness Checklist
+
+Phase 5D creates a public/default readiness checklist for the reviewed
+header/footer migration MVP. This phase is checklist-only: it does not expose
+public API/CLI options, does not change default conversion, and does not wire
+the internal request surface into production behavior.
+
+Committed checklist document:
+
+- `docs/agent/reviewed-filtering-public-readiness-checklist.md`
+
+Phase 5D status:
+
+- Internal MVP readiness is documented as ready for private review.
+- Public opt-in readiness remains blocked.
+- Default-on readiness remains blocked.
+- Public CLI/API exposure remains closed.
+- Production/default conversion remains unchanged.
+- Manual review approval is still required for the current internal MVP.
+- Non-default policy writing remains unsupported.
+- Image/logo header/footer migration remains unsupported.
+- Paragraph continuation merge remains future work.
+- Broader public-safe fixtures, corpus validation, and performance evidence are
+  still required.
+
+Recommended next direction is Phase 5E: draft public option naming and a
+public warning/error model without enabling public behavior.

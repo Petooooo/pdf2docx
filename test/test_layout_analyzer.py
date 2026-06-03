@@ -39,6 +39,7 @@ validate_reviewed_header_footer_migration_profile = LayoutAnalyzer.validate_revi
 build_reviewed_header_footer_internal_request = LayoutAnalyzer.build_reviewed_header_footer_internal_request
 summarize_reviewed_header_footer_internal_request = LayoutAnalyzer.summarize_reviewed_header_footer_internal_request
 validate_reviewed_header_footer_internal_request = LayoutAnalyzer.validate_reviewed_header_footer_internal_request
+build_reviewed_header_footer_public_readiness_checklist = LayoutAnalyzer.build_reviewed_header_footer_public_readiness_checklist
 build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
 build_local_corpus_quality_review_summary_report = LayoutAnalyzer.build_local_corpus_quality_review_summary_report
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
@@ -6876,6 +6877,98 @@ class TestLayoutAnalyzer(unittest.TestCase):
         json.dumps(request)
         json.dumps(summary)
         json.dumps(validation)
+
+    def test_reviewed_header_footer_public_readiness_checklist_marks_internal_mvp_ready(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        summary = checklist['summary']
+        internal_ids = {
+            item['id']
+            for item in checklist['current_internal_readiness']
+            if item['ready']
+        }
+
+        self.assertTrue(summary['internal_mvp_ready'])
+        self.assertIn('internal_migration_profile_exists', internal_ids)
+        self.assertIn('internal_request_config_surface_exists', internal_ids)
+        self.assertIn('default_policy_migration_smoke_exists', internal_ids)
+        self.assertIn('docx_header_footer_xml_output_validated', internal_ids)
+        self.assertIn('word_field_page_field_validated_internal_only', internal_ids)
+        self.assertIn('normalized_body_signature_local_gate_exists', internal_ids)
+        self.assertIn('quality_evaluation_pack_exists', internal_ids)
+
+    def test_reviewed_header_footer_public_readiness_checklist_blocks_public_opt_in_and_default_on(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        summary = checklist['summary']
+
+        self.assertFalse(summary['public_opt_in_ready'])
+        self.assertFalse(summary['default_on_ready'])
+        self.assertEqual(summary['public_exposure'], 'none')
+        self.assertFalse(summary['public_cli_exposed'])
+        self.assertFalse(summary['public_api_exposed'])
+        self.assertFalse(summary['production_default_enabled'])
+        self.assertFalse(summary['default_conversion_changed'])
+
+    def test_reviewed_header_footer_public_readiness_checklist_records_policy_and_paragraph_blockers(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        default_blockers = set(checklist['default_blockers'])
+
+        self.assertIn('non_default_policy_writing_missing', default_blockers)
+        self.assertIn(
+            'first_page_odd_even_section_scoped_policies_fail_closed',
+            default_blockers)
+        self.assertIn('paragraph_continuation_merge_missing', default_blockers)
+
+    def test_reviewed_header_footer_public_readiness_checklist_records_image_large_corpus_and_performance_blockers(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        default_blockers = set(checklist['default_blockers'])
+        risks = set(checklist['remaining_risks'])
+
+        self.assertIn('image_logo_header_footer_migration_missing', default_blockers)
+        self.assertIn('large_document_evidence_bounded_input6_large', default_blockers)
+        self.assertIn('public_regression_fixture_set_limited', default_blockers)
+        self.assertIn(
+            'performance_characteristics_not_fully_evaluated',
+            default_blockers)
+        self.assertIn('large_document_performance', risks)
+
+    def test_reviewed_header_footer_public_readiness_checklist_records_required_public_gates(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        public_gates = set(checklist['required_public_gates'])
+
+        self.assertIn('public_option_naming_proposal', public_gates)
+        self.assertIn('public_warnings_errors_model', public_gates)
+        self.assertIn(
+            'public_review_decision_schema_or_automatic_safe_mode',
+            public_gates)
+        self.assertIn('quality_gate_summary_exposed_to_caller', public_gates)
+        self.assertIn('backward_compatibility_plan', public_gates)
+        self.assertIn('security_privacy_guidance_for_local_reports', public_gates)
+
+    def test_reviewed_header_footer_public_readiness_checklist_records_required_default_gates(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+        default_gates = set(checklist['required_default_gates'])
+
+        self.assertIn('broader_corpus_validation', default_gates)
+        self.assertIn(
+            'non_default_policy_support_or_safe_skip_behavior',
+            default_gates)
+        self.assertIn(
+            'first_page_odd_even_section_handling_strategy',
+            default_gates)
+        self.assertIn('paragraph_continuation_strategy', default_gates)
+        self.assertIn('performance_stress_testing', default_gates)
+        self.assertIn('stronger_e2e_docx_structural_tests', default_gates)
+
+    def test_reviewed_header_footer_public_readiness_checklist_summary_is_json_serializable(self):
+        checklist = build_reviewed_header_footer_public_readiness_checklist()
+
+        self.assertEqual(
+            checklist['summary']['recommended_next_phase'],
+            'Phase 5E')
+        self.assertEqual(
+            checklist['recommendation']['next_phase'],
+            'Phase 5E')
+        json.dumps(checklist)
 
     def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
