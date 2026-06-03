@@ -33,6 +33,9 @@ find_repeated_text_candidates = LayoutAnalyzer.find_repeated_text_candidates
 build_header_footer_exclusion_dry_run = LayoutAnalyzer.build_header_footer_exclusion_dry_run
 build_reviewed_filtering_internal_config = LayoutAnalyzer.build_reviewed_filtering_internal_config
 build_reviewed_filtering_internal_config_report = LayoutAnalyzer.build_reviewed_filtering_internal_config_report
+build_reviewed_header_footer_migration_profile = LayoutAnalyzer.build_reviewed_header_footer_migration_profile
+summarize_reviewed_header_footer_migration_profile = LayoutAnalyzer.summarize_reviewed_header_footer_migration_profile
+validate_reviewed_header_footer_migration_profile = LayoutAnalyzer.validate_reviewed_header_footer_migration_profile
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
@@ -6381,6 +6384,302 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'non_default_policy_skipped',
             {warning['type'] for warning in report['diagnostic_warnings']})
 
+    def test_reviewed_header_footer_migration_profile_default_is_disabled(self):
+        profile = build_reviewed_header_footer_migration_profile()
+        summary = profile['summary']
+
+        self.assertFalse(profile['enabled'])
+        self.assertFalse(summary['enabled'])
+        self.assertEqual(summary['parse_mode'], 'filtered_parse_experiment')
+        self.assertEqual(summary['page_number_behavior'], 'placeholder_only')
+        self.assertFalse(summary['page_number_word_field_selected'])
+        self.assertFalse(summary['docx_header_footer_generation_enabled'])
+        self.assertEqual(summary['body_signature_gate'], 'normalized_token_ngram')
+        self.assertEqual(summary['strict_exact_fragment_gate'], 'diagnostic_only')
+        self.assertFalse(summary['strict_exact_fragment_gate_blocks'])
+        self.assertEqual(summary['local_output_policy'], 'temp_or_ignored_only')
+        self.assertEqual(summary['public_exposure'], 'none')
+        self.assertFalse(summary['public_cli_exposed'])
+        self.assertFalse(summary['public_api_exposed'])
+        self.assertFalse(summary['production_default_enabled'])
+        self.assertFalse(summary['default_conversion_changed'])
+        self.assertEqual(profile['document_parse_settings'], {})
+        json.dumps(summary)
+
+    def test_reviewed_header_footer_migration_profile_enabled_builds_filtered_parse_config(self):
+        decisions = _profile_review_decisions()
+        profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': decisions,
+        })
+        config = profile['reviewed_filtering_internal_config']
+        settings = profile['document_parse_settings']
+        validation = profile['validation']
+
+        self.assertTrue(config['enabled'])
+        self.assertEqual(config['mode'], 'filtered_parse_experiment')
+        self.assertTrue(config['require_explicit_approval'])
+        self.assertFalse(config['allow_raw_would_exclude'])
+        self.assertFalse(config['allow_rejected'])
+        self.assertFalse(config['allow_unsure'])
+        self.assertTrue(config['protect_body_region'])
+        self.assertTrue(config['protect_layout_placeholders'])
+        self.assertIn('_document_parse_filtered_parse_experiment_enabled', settings)
+        self.assertEqual(
+            validation['summary']['status'],
+            'ready_for_internal_migration_profile')
+        self.assertFalse(validation['warnings'])
+
+    def test_reviewed_header_footer_migration_profile_enabled_requires_review_decisions(self):
+        profile = build_reviewed_header_footer_migration_profile({'enabled': True})
+        validation = profile['validation']
+
+        self.assertEqual(validation['summary']['status'], 'blocked')
+        self.assertIn(
+            'missing_review_decisions',
+            {warning['type'] for warning in validation['warnings']})
+
+    def test_reviewed_header_footer_migration_profile_blocks_raw_rejected_unsure_body_and_placeholder_candidates(self):
+        raw_fingerprint = _summary_fingerprint('Raw Header', REGION_TOP)
+        rejected_fingerprint = _summary_fingerprint('Rejected Footer', REGION_BOTTOM)
+        unsure_fingerprint = _summary_fingerprint('Unsure Footer', REGION_BOTTOM)
+        body_fingerprint = _summary_fingerprint('Body Heading', REGION_BODY)
+        placeholder_fingerprint = _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP)
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'raw-header',
+                    raw_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'rejected-footer',
+                    rejected_fingerprint,
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BOTTOM]),
+                _dry_run_candidate(
+                    'unsure-footer',
+                    unsure_fingerprint,
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BOTTOM]),
+                _dry_run_candidate(
+                    'body-heading',
+                    body_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BODY]),
+                _dry_run_candidate(
+                    'placeholder',
+                    placeholder_fingerprint,
+                    ROLE_LAYOUT_PLACEHOLDER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision(
+                    'rejected-footer',
+                    rejected_fingerprint,
+                    'reject_exclude'),
+                _review_decision(
+                    'unsure-footer',
+                    unsure_fingerprint,
+                    'unsure'),
+                _review_decision(
+                    'body-heading',
+                    body_fingerprint,
+                    'approve_exclude'),
+                _review_decision(
+                    'placeholder',
+                    placeholder_fingerprint,
+                    'approve_exclude'),
+            ],
+        }
+        profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': decisions,
+        })
+
+        report = build_reviewed_filtering_internal_config_report(
+            profile['reviewed_filtering_internal_config'],
+            dry_run,
+            decisions,
+            enabled=True)
+        rows = {
+            row['candidate_id']: row
+            for row in report['candidates']
+        }
+
+        self.assertEqual(report['summary']['eligible_candidate_count'], 0)
+        self.assertEqual(
+            rows['raw-header']['blocked_reason'],
+            'explicit_review_decision_required')
+        self.assertEqual(
+            rows['rejected-footer']['blocked_reason'],
+            'rejected_candidate_blocked')
+        self.assertEqual(
+            rows['unsure-footer']['blocked_reason'],
+            'unsure_candidate_blocked')
+        self.assertEqual(
+            rows['body-heading']['blocked_reason'],
+            'body_region_protected')
+        self.assertEqual(
+            rows['placeholder']['blocked_reason'],
+            'layout_placeholder_protected')
+
+    def test_reviewed_header_footer_migration_profile_allows_only_default_policy(self):
+        profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        default_plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=['Synthetic Default Header', 'Synthetic Default Header'])
+        first_page_plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'Synthetic First Page Header',
+                'Synthetic Default Header',
+                'Synthetic Default Header',
+            ])
+
+        default_validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            docx_header_footer_plan=default_plan)
+        first_page_validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            docx_header_footer_plan=first_page_plan)
+
+        self.assertEqual(
+            default_validation['summary']['status'],
+            'ready_for_internal_migration_profile')
+        self.assertNotIn(
+            'unsafe_policy',
+            {warning['type'] for warning in default_validation['warnings']})
+        self.assertEqual(
+            first_page_validation['summary']['status'],
+            'blocked')
+        self.assertIn(
+            'unsafe_policy',
+            {warning['type'] for warning in first_page_validation['warnings']})
+
+    def test_reviewed_header_footer_migration_profile_page_number_behavior_is_explicit(self):
+        default_profile = build_reviewed_header_footer_migration_profile()
+        word_field_profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'word_field',
+        })
+        static_profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'static_text',
+        })
+        unsupported_profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'future_dynamic_mode',
+        })
+
+        self.assertEqual(
+            default_profile['summary']['page_number_behavior'],
+            'placeholder_only')
+        self.assertFalse(default_profile['summary']['page_number_word_field_selected'])
+        self.assertEqual(
+            word_field_profile['writer_settings']['page_number_behavior'],
+            'word_field')
+        self.assertTrue(
+            word_field_profile['summary']['page_number_behavior_explicitly_requested'])
+        self.assertEqual(
+            word_field_profile['validation']['summary']['status'],
+            'ready_for_internal_migration_profile')
+        self.assertIn(
+            'static_text_page_number_behavior_diagnostic_only',
+            {warning['type'] for warning in static_profile['validation']['diagnostics']})
+        self.assertIn(
+            'unsafe_page_number_behavior',
+            {warning['type'] for warning in unsupported_profile['validation']['warnings']})
+
+    def test_reviewed_header_footer_migration_profile_gate_expectations_fail_closed_and_diagnostic_strict_gate(self):
+        profile = build_reviewed_header_footer_migration_profile({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        expectations = profile['migration_gate_expectations']
+        fail_closed_on = set(expectations['fail_closed_on'])
+        strict_mismatch_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha beta'),
+            _body_signature_metric('body alpha beta'),
+            strict_missing_fragments=['body   alpha beta'],
+            removed_texts=[])
+        loss_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body table row alpha callout panel item one'),
+            _body_signature_metric('body'),
+            strict_missing_fragments=['table row alpha callout panel item one'],
+            removed_texts=[],
+            table_watch_texts=['table row alpha'],
+            callout_watch_texts=['callout panel'],
+            list_watch_texts=['item one'])
+        residual_report = {
+            'summary': {
+                'normalized_body_signature_gate_passed': True,
+                'strict_exact_fragment_gate_passed': True,
+                'body_residual_header_footer_pollution_count': 1,
+            },
+            'safety_warnings': [],
+        }
+
+        strict_validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            migration_gate_report=strict_mismatch_report)
+        loss_validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            migration_gate_report=loss_report)
+        residual_validation = validate_reviewed_header_footer_migration_profile(
+            profile,
+            migration_gate_report=residual_report)
+
+        self.assertEqual(expectations['body_signature_gate'], 'normalized_token_ngram')
+        self.assertEqual(expectations['strict_exact_fragment_gate'], 'diagnostic_only')
+        self.assertFalse(expectations['strict_exact_fragment_gate_blocks'])
+        self.assertEqual(expectations['local_output_policy'], 'temp_or_ignored_only')
+        for warning_type in {
+                'true_body_text_loss',
+                'table_text_loss',
+                'callout_text_loss',
+                'list_text_loss',
+                'residual_header_footer_pollution',
+                'unsafe_policy',
+                'unsafe_page_number_behavior',
+                'missing_review_decisions'}:
+            self.assertIn(warning_type, fail_closed_on)
+        self.assertFalse(strict_validation['warnings'])
+        self.assertIn(
+            'strict_exact_fragment_mismatch_diagnostic_only',
+            {warning['type'] for warning in strict_validation['diagnostics']})
+        self.assertIn(
+            'true_body_text_loss',
+            {warning['type'] for warning in loss_validation['warnings']})
+        self.assertIn(
+            'table_text_loss',
+            {warning['type'] for warning in loss_validation['warnings']})
+        self.assertIn(
+            'callout_text_loss',
+            {warning['type'] for warning in loss_validation['warnings']})
+        self.assertIn(
+            'list_text_loss',
+            {warning['type'] for warning in loss_validation['warnings']})
+        self.assertIn(
+            'residual_header_footer_pollution',
+            {warning['type'] for warning in residual_validation['warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -9483,6 +9782,22 @@ def _review_decision(candidate_id, fingerprint, manual_decision):
         'candidate_id': candidate_id,
         'fingerprint': fingerprint,
         'manual_decision': manual_decision,
+    }
+
+
+def _profile_review_decisions():
+    fingerprint = _summary_fingerprint('Synthetic Default Header', REGION_TOP)
+    return {
+        'decisions': [
+            _review_decision(
+                'synthetic-default-header',
+                fingerprint,
+                'approve_exclude'),
+        ],
+        'summary': {
+            'candidate_count': 1,
+            'decision_counts': {'approve_exclude': 1},
+        },
     }
 
 

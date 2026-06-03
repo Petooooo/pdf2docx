@@ -725,3 +725,47 @@ Phase 4J should remain internal. The next safe direction is to decide whether a
 bounded local-corpus `word_field` smoke is useful for default-policy samples,
 without changing default conversion, adding public API/CLI exposure, or
 broadening migration behavior.
+
+## Phase 4J: Internal Migration Profile
+
+Phase 4J consolidates the reviewed header/footer migration controls into a
+single internal migration profile. The profile is JSON-serializable,
+non-public, and disabled by default. It does not wire migration into normal PDF
+conversion.
+
+Profile behavior:
+
+- `enabled=False` remains the default.
+- The parse mode is `filtered_parse_experiment`.
+- Explicit `approve_exclude` review decisions are required.
+- Raw `would_exclude`, rejected candidates, and unsure candidates remain
+  blocked.
+- Body-region candidates and layout placeholders remain protected.
+- Only the `default` header/footer policy is allowed for the current simple
+  writer.
+- Non-default policies remain fail-closed until future phases explicitly add
+  support.
+- `placeholder_only` remains the default page-number behavior.
+- `word_field` is explicit and internal-only.
+- `static_text` remains diagnostic-only.
+- `unsupported` page-number behavior fails closed.
+- Normalized token/ngram body signature is the primary local migration gate.
+- Strict exact-fragment mismatch remains diagnostic-only.
+- Local output is limited to temporary or ignored paths.
+- Public exposure remains `none`; no public CLI flag or public API option is
+  added.
+
+Safety interpretation:
+
+- Default conversion remains unchanged.
+- Public CLI/API remains closed.
+- DOCX header/footer generation remains disabled by default.
+- Production/default integration remains future work.
+- Body/table/callout/list text loss, residual header/footer pollution, unsafe
+  policy, unsafe page-number behavior, and missing review decisions remain
+  fail-closed conditions.
+
+Phase 5A should keep the profile internal and use it as the single entry point
+for any next bounded smoke path. A sensible next step is a profile-driven,
+default-policy local smoke that reuses the existing normalized gate, still
+without default conversion changes or public exposure.

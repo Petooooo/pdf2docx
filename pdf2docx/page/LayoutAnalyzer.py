@@ -38,6 +38,21 @@ PAGE_NUMBER_BEHAVIORS = {
     PAGE_NUMBER_BEHAVIOR_WORD_FIELD,
     PAGE_NUMBER_BEHAVIOR_UNSUPPORTED,
 }
+MIGRATION_PROFILE_BODY_SIGNATURE_GATE = 'normalized_token_ngram'
+MIGRATION_PROFILE_STRICT_EXACT_FRAGMENT_GATE = 'diagnostic_only'
+MIGRATION_PROFILE_LOCAL_OUTPUT_POLICY = 'temp_or_ignored_only'
+MIGRATION_PROFILE_PUBLIC_EXPOSURE = 'none'
+MIGRATION_PROFILE_REQUIRED_POLICY = 'default'
+MIGRATION_PROFILE_FAIL_CLOSED_ON = (
+    'true_body_text_loss',
+    'table_text_loss',
+    'callout_text_loss',
+    'list_text_loss',
+    'residual_header_footer_pollution',
+    'unsafe_policy',
+    'unsafe_page_number_behavior',
+    'missing_review_decisions',
+)
 DECISION_APPROVE_EXCLUDE = 'approve_exclude'
 DECISION_REJECT_EXCLUDE = 'reject_exclude'
 DECISION_UNSURE = 'unsure'
@@ -641,6 +656,247 @@ def reviewed_filtering_config_to_document_parse_settings(
     if mode == REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT:
         settings['_document_parse_filtered_parse_experiment_enabled'] = True
     return settings
+
+
+def build_reviewed_header_footer_migration_profile(
+        config: dict = None,
+        **overrides) -> dict:
+    '''Build an internal reviewed header/footer migration profile.
+
+    The profile is diagnostic and private. It consolidates the reviewed
+    filtering config, DOCX header/footer writer requirements, page-number mode,
+    and local migration gates without wiring any behavior into default
+    conversion.
+    '''
+    profile = _reviewed_header_footer_migration_profile_payload(
+        config,
+        overrides)
+    reviewed_filtering_config = _migration_profile_reviewed_filtering_config(
+        profile)
+    summary = summarize_reviewed_header_footer_migration_profile(profile)
+    validation = validate_reviewed_header_footer_migration_profile(profile)
+    return {
+        'enabled': bool(profile.get('enabled', False)),
+        'policy': 'internal_reviewed_header_footer_migration_profile_only',
+        'profile': profile,
+        'summary': summary,
+        'reviewed_filtering_internal_config': reviewed_filtering_config,
+        'document_parse_settings': reviewed_filtering_config_to_document_parse_settings(
+            reviewed_filtering_config,
+            review_decisions=reviewed_filtering_config.get('review_decisions')),
+        'docx_header_footer_generation_plan_requirements': (
+            _migration_profile_docx_plan_requirements(profile)),
+        'writer_settings': _migration_profile_writer_settings(profile),
+        'migration_gate_expectations': (
+            _migration_profile_gate_expectations(profile)),
+        'validation': validation,
+        'recommendation': {
+            'safe_for_internal_migration_profile': bool(
+                validation.get('summary', {}).get('safe_for_internal_migration_profile')),
+            'reason': validation.get('recommendation', {}).get('reason', ''),
+        },
+    }
+
+
+def summarize_reviewed_header_footer_migration_profile(
+        profile: dict = None) -> dict:
+    '''Return a compact JSON-serializable summary of the internal profile.'''
+    normalized = _reviewed_header_footer_migration_profile_from_input(profile)
+    return {
+        'enabled': bool(normalized.get('enabled', False)),
+        'default_enabled': False,
+        'parse_mode': normalized.get('parse_mode', ''),
+        'reviewed_filtering_enabled': bool(normalized.get('enabled', False)),
+        'docx_header_footer_generation_enabled': bool(normalized.get('enabled', False)),
+        'require_explicit_approval': bool(
+            normalized.get('require_explicit_approval', True)),
+        'allow_raw_would_exclude': bool(
+            normalized.get('allow_raw_would_exclude', False)),
+        'allow_rejected': bool(normalized.get('allow_rejected', False)),
+        'allow_unsure': bool(normalized.get('allow_unsure', False)),
+        'protect_body_region': bool(normalized.get('protect_body_region', True)),
+        'protect_layout_placeholders': bool(
+            normalized.get('protect_layout_placeholders', True)),
+        'header_footer_policy_required': normalized.get(
+            'header_footer_policy_required', ''),
+        'allow_non_default_policy': bool(
+            normalized.get('allow_non_default_policy', False)),
+        'page_number_behavior': normalized.get('page_number_behavior', ''),
+        'page_number_behavior_explicitly_requested': bool(
+            normalized.get('page_number_behavior_explicitly_requested', False)),
+        'page_number_word_field_selected': (
+            normalized.get('page_number_behavior') ==
+            PAGE_NUMBER_BEHAVIOR_WORD_FIELD),
+        'body_signature_gate': normalized.get('body_signature_gate', ''),
+        'strict_exact_fragment_gate': normalized.get(
+            'strict_exact_fragment_gate', ''),
+        'strict_exact_fragment_gate_blocks': False,
+        'fail_closed_on': list(normalized.get('fail_closed_on', []) or []),
+        'local_output_policy': normalized.get('local_output_policy', ''),
+        'public_exposure': normalized.get('public_exposure', ''),
+        'public_cli_exposed': bool(normalized.get('public_cli_exposed', False)),
+        'public_api_exposed': bool(normalized.get('public_api_exposed', False)),
+        'production_default_enabled': bool(
+            normalized.get('production_default_enabled', False)),
+        'default_conversion_changed': bool(
+            normalized.get('default_conversion_changed', False)),
+    }
+
+
+def validate_reviewed_header_footer_migration_profile(
+        profile: dict = None,
+        reviewed_filtering_config: dict = None,
+        docx_header_footer_plan: dict = None,
+        migration_gate_report: dict = None) -> dict:
+    '''Validate that internal migration wiring remains conservative.
+
+    Optional existing reports can be supplied to validate that they match the
+    consolidated profile. Blocking issues are reported as fail-closed warnings;
+    strict exact-fragment mismatches remain diagnostics when the normalized
+    token/ngram gate passes.
+    '''
+    normalized = _reviewed_header_footer_migration_profile_from_input(profile)
+    warnings = []
+    diagnostics = []
+
+    if not normalized.get('enabled', False):
+        diagnostics.append({'type': 'migration_profile_disabled'})
+    if normalized.get('parse_mode') != REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT:
+        warnings.append({
+            'type': 'unsafe_parse_mode',
+            'parse_mode': normalized.get('parse_mode', ''),
+        })
+    if not normalized.get('require_explicit_approval', True):
+        warnings.append({'type': 'explicit_review_approval_not_required'})
+    if normalized.get('allow_raw_would_exclude', False):
+        warnings.append({'type': 'raw_would_exclude_allowed'})
+    if normalized.get('allow_rejected', False):
+        warnings.append({'type': 'rejected_candidates_allowed'})
+    if normalized.get('allow_unsure', False):
+        warnings.append({'type': 'unsure_candidates_allowed'})
+    if not normalized.get('protect_body_region', True):
+        warnings.append({'type': 'body_region_not_protected'})
+    if not normalized.get('protect_layout_placeholders', True):
+        warnings.append({'type': 'layout_placeholders_not_protected'})
+    if (
+            normalized.get('header_footer_policy_required') !=
+            MIGRATION_PROFILE_REQUIRED_POLICY or
+            normalized.get('allow_non_default_policy', False)):
+        warnings.append({
+            'type': 'unsafe_policy',
+            'policy_required': normalized.get('header_footer_policy_required', ''),
+            'allow_non_default_policy': bool(
+                normalized.get('allow_non_default_policy', False)),
+        })
+
+    page_number_behavior = normalized.get('page_number_behavior')
+    if page_number_behavior == PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        warnings.append({'type': 'unsafe_page_number_behavior'})
+    elif page_number_behavior == PAGE_NUMBER_BEHAVIOR_STATIC_TEXT:
+        diagnostics.append({
+            'type': 'static_text_page_number_behavior_diagnostic_only',
+        })
+    elif (
+            page_number_behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD and
+            not normalized.get('page_number_behavior_explicitly_requested', False)):
+        warnings.append({
+            'type': 'unsafe_page_number_behavior',
+            'reason': 'word_field_not_explicitly_requested',
+        })
+
+    if (
+            normalized.get('enabled', False) and
+            not normalized.get('review_decisions') and
+            not normalized.get('review_decisions_path')):
+        warnings.append({'type': 'missing_review_decisions'})
+    if normalized.get('body_signature_gate') != MIGRATION_PROFILE_BODY_SIGNATURE_GATE:
+        warnings.append({
+            'type': 'unsafe_body_signature_gate',
+            'body_signature_gate': normalized.get('body_signature_gate', ''),
+        })
+    if (
+            normalized.get('strict_exact_fragment_gate') !=
+            MIGRATION_PROFILE_STRICT_EXACT_FRAGMENT_GATE):
+        warnings.append({
+            'type': 'strict_exact_fragment_gate_not_diagnostic_only',
+            'strict_exact_fragment_gate': normalized.get(
+                'strict_exact_fragment_gate', ''),
+        })
+    if normalized.get('local_output_policy') != MIGRATION_PROFILE_LOCAL_OUTPUT_POLICY:
+        warnings.append({
+            'type': 'local_output_not_temp_or_ignored_only',
+            'local_output_policy': normalized.get('local_output_policy', ''),
+        })
+    if (
+            normalized.get('public_exposure') != MIGRATION_PROFILE_PUBLIC_EXPOSURE or
+            normalized.get('public_cli_exposed', False) or
+            normalized.get('public_api_exposed', False)):
+        warnings.append({'type': 'public_exposure_enabled'})
+    if (
+            normalized.get('production_default_enabled', False) or
+            normalized.get('default_conversion_changed', False)):
+        warnings.append({'type': 'production_default_conversion_changed'})
+
+    missing_fail_closed = [
+        item for item in MIGRATION_PROFILE_FAIL_CLOSED_ON
+        if item not in set(normalized.get('fail_closed_on', []) or [])
+    ]
+    if missing_fail_closed:
+        warnings.append({
+            'type': 'fail_closed_conditions_incomplete',
+            'missing': missing_fail_closed,
+        })
+
+    _extend_profile_filtering_config_warnings(
+        warnings,
+        normalized,
+        reviewed_filtering_config)
+    _extend_profile_docx_plan_warnings(
+        warnings,
+        diagnostics,
+        normalized,
+        docx_header_footer_plan)
+    _extend_profile_migration_gate_warnings(
+        warnings,
+        diagnostics,
+        migration_gate_report)
+
+    blocking_warning_count = len(warnings)
+    if not normalized.get('enabled', False):
+        status = 'disabled'
+    elif blocking_warning_count:
+        status = 'blocked'
+    else:
+        status = 'ready_for_internal_migration_profile'
+
+    return {
+        'enabled': bool(normalized.get('enabled', False)),
+        'policy': 'internal_reviewed_header_footer_migration_profile_validation_only',
+        'summary': {
+            'status': status,
+            'blocking_warning_count': blocking_warning_count,
+            'diagnostic_warning_count': len(diagnostics),
+            'safe_for_internal_migration_profile': (
+                status == 'ready_for_internal_migration_profile'),
+            'strict_exact_fragment_gate_blocks': False,
+            'normalized_body_signature_gate_primary': (
+                normalized.get('body_signature_gate') ==
+                MIGRATION_PROFILE_BODY_SIGNATURE_GATE),
+            'public_exposure': normalized.get('public_exposure', ''),
+            'production_default_enabled': bool(
+                normalized.get('production_default_enabled', False)),
+        },
+        'warnings': warnings,
+        'diagnostics': diagnostics,
+        'fail_closed_on': list(normalized.get('fail_closed_on', []) or []),
+        'recommendation': {
+            'safe_for_internal_migration_profile': (
+                status == 'ready_for_internal_migration_profile'),
+            'reason': _reviewed_header_footer_migration_profile_recommendation(
+                status,
+                warnings),
+        },
+    }
 
 
 def build_reviewed_header_footer_filter_report(
@@ -3117,6 +3373,382 @@ def _default_reviewed_filtering_internal_config() -> dict:
         'page_subset': [],
         'fail_closed_on_warning': True,
     }
+
+
+def _default_reviewed_header_footer_migration_profile() -> dict:
+    return {
+        'enabled': False,
+        'parse_mode': REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT,
+        'review_decisions_path': '',
+        'review_decisions': None,
+        'require_explicit_approval': True,
+        'allow_raw_would_exclude': False,
+        'allow_rejected': False,
+        'allow_unsure': False,
+        'protect_body_region': True,
+        'protect_layout_placeholders': True,
+        'header_footer_policy_required': MIGRATION_PROFILE_REQUIRED_POLICY,
+        'allow_non_default_policy': False,
+        'page_number_behavior': PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        'page_number_behavior_explicitly_requested': False,
+        'require_dynamic_page_number': False,
+        'body_signature_gate': MIGRATION_PROFILE_BODY_SIGNATURE_GATE,
+        'strict_exact_fragment_gate': MIGRATION_PROFILE_STRICT_EXACT_FRAGMENT_GATE,
+        'fail_closed_on': list(MIGRATION_PROFILE_FAIL_CLOSED_ON),
+        'local_output_policy': MIGRATION_PROFILE_LOCAL_OUTPUT_POLICY,
+        'public_exposure': MIGRATION_PROFILE_PUBLIC_EXPOSURE,
+        'public_cli_exposed': False,
+        'public_api_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+        'collect_diagnostics': True,
+        'write_local_reports': False,
+        'max_pages': None,
+        'page_subset': [],
+        'fail_closed_on_warning': True,
+    }
+
+
+def _reviewed_header_footer_migration_profile_payload(
+        config: dict = None,
+        overrides: dict = None) -> dict:
+    config = dict(config or {})
+    overrides = dict(overrides or {})
+    merged = _default_reviewed_header_footer_migration_profile()
+    merged.update(config)
+    merged.update(overrides)
+
+    explicit_page_number = (
+        'page_number_behavior' in config or
+        'page_number_behavior' in overrides or
+        bool(merged.get('page_number_behavior_explicitly_requested', False)))
+    page_number_behavior = _normalize_docx_page_number_behavior(
+        merged.get('page_number_behavior'))
+    if page_number_behavior != PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        explicit_page_number = bool(
+            explicit_page_number and
+            page_number_behavior != PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY)
+
+    page_subset = merged.get('page_subset', [])
+    if page_subset is None:
+        page_subset = []
+    elif isinstance(page_subset, (tuple, set)):
+        page_subset = list(page_subset)
+    elif not isinstance(page_subset, list):
+        page_subset = [page_subset]
+
+    max_pages = merged.get('max_pages')
+    if max_pages in ('', None):
+        max_pages = None
+    else:
+        max_pages = _reviewed_filtering_config_int_or_none(max_pages)
+
+    fail_closed_on = _migration_profile_fail_closed_on(
+        merged.get('fail_closed_on'))
+
+    return {
+        'enabled': bool(merged.get('enabled', False)),
+        'parse_mode': normalize_text(
+            merged.get('parse_mode') or
+            REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT),
+        'review_decisions_path': normalize_text(
+            merged.get('review_decisions_path', '')),
+        'review_decisions': merged.get('review_decisions'),
+        'require_explicit_approval': bool(
+            merged.get('require_explicit_approval', True)),
+        'allow_raw_would_exclude': bool(
+            merged.get('allow_raw_would_exclude', False)),
+        'allow_rejected': bool(merged.get('allow_rejected', False)),
+        'allow_unsure': bool(merged.get('allow_unsure', False)),
+        'protect_body_region': bool(merged.get('protect_body_region', True)),
+        'protect_layout_placeholders': bool(
+            merged.get('protect_layout_placeholders', True)),
+        'header_footer_policy_required': normalize_text(
+            merged.get('header_footer_policy_required') or
+            MIGRATION_PROFILE_REQUIRED_POLICY),
+        'allow_non_default_policy': bool(
+            merged.get('allow_non_default_policy', False)),
+        'page_number_behavior': page_number_behavior,
+        'page_number_behavior_explicitly_requested': bool(explicit_page_number),
+        'require_dynamic_page_number': bool(
+            merged.get('require_dynamic_page_number', False)),
+        'body_signature_gate': normalize_text(
+            merged.get('body_signature_gate') or
+            MIGRATION_PROFILE_BODY_SIGNATURE_GATE),
+        'strict_exact_fragment_gate': normalize_text(
+            merged.get('strict_exact_fragment_gate') or
+            MIGRATION_PROFILE_STRICT_EXACT_FRAGMENT_GATE),
+        'fail_closed_on': fail_closed_on,
+        'local_output_policy': normalize_text(
+            merged.get('local_output_policy') or
+            MIGRATION_PROFILE_LOCAL_OUTPUT_POLICY),
+        'public_exposure': normalize_text(
+            merged.get('public_exposure') or
+            MIGRATION_PROFILE_PUBLIC_EXPOSURE),
+        'public_cli_exposed': bool(merged.get('public_cli_exposed', False)),
+        'public_api_exposed': bool(merged.get('public_api_exposed', False)),
+        'production_default_enabled': bool(
+            merged.get('production_default_enabled', False)),
+        'default_conversion_changed': bool(
+            merged.get('default_conversion_changed', False)),
+        'collect_diagnostics': bool(merged.get('collect_diagnostics', True)),
+        'write_local_reports': bool(merged.get('write_local_reports', False)),
+        'max_pages': max_pages,
+        'page_subset': page_subset,
+        'fail_closed_on_warning': bool(
+            merged.get('fail_closed_on_warning', True)),
+    }
+
+
+def _reviewed_header_footer_migration_profile_from_input(profile: dict = None) -> dict:
+    profile = profile or {}
+    if isinstance(profile, dict) and 'profile' in profile:
+        profile = profile.get('profile') or {}
+    return _reviewed_header_footer_migration_profile_payload(profile)
+
+
+def _migration_profile_fail_closed_on(value) -> list:
+    if value in (None, ''):
+        values = list(MIGRATION_PROFILE_FAIL_CLOSED_ON)
+    elif isinstance(value, str):
+        values = [normalize_text(value)]
+    else:
+        values = [normalize_text(item) for item in value or []]
+
+    result = []
+    for item in values:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _migration_profile_reviewed_filtering_config(profile: dict) -> dict:
+    return build_reviewed_filtering_internal_config({
+        'enabled': bool(profile.get('enabled', False)),
+        'mode': profile.get('parse_mode'),
+        'review_decisions_path': profile.get('review_decisions_path', ''),
+        'review_decisions': profile.get('review_decisions'),
+        'require_explicit_approval': profile.get('require_explicit_approval', True),
+        'allow_raw_would_exclude': profile.get('allow_raw_would_exclude', False),
+        'allow_rejected': profile.get('allow_rejected', False),
+        'allow_unsure': profile.get('allow_unsure', False),
+        'protect_body_region': profile.get('protect_body_region', True),
+        'protect_layout_placeholders': profile.get(
+            'protect_layout_placeholders', True),
+        'collect_diagnostics': profile.get('collect_diagnostics', True),
+        'write_local_reports': profile.get('write_local_reports', False),
+        'max_pages': profile.get('max_pages'),
+        'page_subset': list(profile.get('page_subset', []) or []),
+        'fail_closed_on_warning': profile.get('fail_closed_on_warning', True),
+    })
+
+
+def _migration_profile_docx_plan_requirements(profile: dict) -> dict:
+    return {
+        'enabled': bool(profile.get('enabled', False)),
+        'plan_helper': 'build_docx_header_footer_generation_plan',
+        'required_policy_type': profile.get('header_footer_policy_required', ''),
+        'allow_non_default_policy': bool(
+            profile.get('allow_non_default_policy', False)),
+        'page_number_behavior': profile.get('page_number_behavior', ''),
+        'require_dynamic_page_number': bool(
+            profile.get('require_dynamic_page_number', False)),
+        'body_region_candidates_protected': bool(
+            profile.get('protect_body_region', True)),
+        'layout_placeholders_protected': bool(
+            profile.get('protect_layout_placeholders', True)),
+        'requires_explicit_review_approval': bool(
+            profile.get('require_explicit_approval', True)),
+    }
+
+
+def _migration_profile_writer_settings(profile: dict) -> dict:
+    return {
+        'enabled': bool(profile.get('enabled', False)),
+        'writer_helper': 'apply_header_footer_text_plan',
+        'allowed_policy_type': profile.get('header_footer_policy_required', ''),
+        'allow_non_default_policy': bool(
+            profile.get('allow_non_default_policy', False)),
+        'page_number_behavior': profile.get('page_number_behavior', ''),
+        'page_number_behavior_explicitly_requested': bool(
+            profile.get('page_number_behavior_explicitly_requested', False)),
+        'simple_default_writer_only': True,
+    }
+
+
+def _migration_profile_gate_expectations(profile: dict) -> dict:
+    return {
+        'body_signature_gate': profile.get('body_signature_gate', ''),
+        'primary_body_gate': MIGRATION_PROFILE_BODY_SIGNATURE_GATE,
+        'strict_exact_fragment_gate': profile.get(
+            'strict_exact_fragment_gate', ''),
+        'strict_exact_fragment_gate_blocks': False,
+        'fail_closed_on': list(profile.get('fail_closed_on', []) or []),
+        'local_output_policy': profile.get('local_output_policy', ''),
+    }
+
+
+def _extend_profile_filtering_config_warnings(
+        warnings: list,
+        profile: dict,
+        reviewed_filtering_config: dict):
+    if not reviewed_filtering_config:
+        return
+
+    expected = _migration_profile_reviewed_filtering_config(profile)
+    comparisons = (
+        ('enabled', 'reviewed_filtering_config_enabled_mismatch'),
+        ('mode', 'reviewed_filtering_config_mode_mismatch'),
+        ('require_explicit_approval', 'reviewed_filtering_config_approval_gate_mismatch'),
+        ('allow_raw_would_exclude', 'reviewed_filtering_config_raw_gate_mismatch'),
+        ('allow_rejected', 'reviewed_filtering_config_rejected_gate_mismatch'),
+        ('allow_unsure', 'reviewed_filtering_config_unsure_gate_mismatch'),
+        ('protect_body_region', 'reviewed_filtering_config_body_protection_mismatch'),
+        ('protect_layout_placeholders', 'reviewed_filtering_config_placeholder_protection_mismatch'),
+    )
+    for key, warning_type in comparisons:
+        if reviewed_filtering_config.get(key) != expected.get(key):
+            warnings.append({
+                'type': warning_type,
+                'expected': expected.get(key),
+                'actual': reviewed_filtering_config.get(key),
+            })
+
+
+def _extend_profile_docx_plan_warnings(
+        warnings: list,
+        diagnostics: list,
+        profile: dict,
+        docx_header_footer_plan: dict):
+    if not docx_header_footer_plan:
+        return
+
+    plan = docx_header_footer_plan or {}
+    policy = plan.get('header_footer_policy') or {}
+    summary = plan.get('summary') or {}
+    policy_type = policy.get(
+        'policy_type',
+        summary.get('header_footer_policy_type', ''))
+    if (
+            policy_type and
+            policy_type != profile.get('header_footer_policy_required') and
+            not profile.get('allow_non_default_policy', False)):
+        warnings.append({
+            'type': 'unsafe_policy',
+            'policy_type': policy_type,
+        })
+    if (
+            policy.get('fail_closed') and
+            policy_type != profile.get('header_footer_policy_required')):
+        warnings.append({
+            'type': 'unsafe_policy',
+            'reason': 'docx_header_footer_policy_fail_closed',
+            'policy_type': policy_type or 'unknown',
+        })
+
+    plan_page_behavior = (
+        summary.get('page_number_behavior') or
+        policy.get('page_number_behavior') or
+        PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY)
+    if plan_page_behavior != profile.get('page_number_behavior'):
+        warnings.append({
+            'type': 'unsafe_page_number_behavior',
+            'expected': profile.get('page_number_behavior'),
+            'actual': plan_page_behavior,
+        })
+    for warning in plan.get('safety_warnings', []) or []:
+        warning_type = warning.get('type')
+        if warning_type in {
+                'unsupported_page_number_behavior',
+                'dynamic_page_number_field_required'}:
+            warnings.append({
+                'type': 'unsafe_page_number_behavior',
+                'source_warning': warning_type,
+            })
+        elif warning_type in {
+                'first_page_docx_header_footer_writing_deferred',
+                'odd_even_docx_header_footer_writing_deferred',
+                'section_scoped_docx_header_footer_mapping_deferred',
+                'ambiguous_header_footer_policy'}:
+            warnings.append({
+                'type': 'unsafe_policy',
+                'source_warning': warning_type,
+            })
+        else:
+            diagnostics.append({
+                'type': 'docx_header_footer_plan_diagnostic',
+                'source_warning': warning_type,
+            })
+
+
+def _extend_profile_migration_gate_warnings(
+        warnings: list,
+        diagnostics: list,
+        migration_gate_report: dict):
+    if not migration_gate_report:
+        return
+
+    summary = migration_gate_report.get('summary') or {}
+    normalized_gate_passed = bool(
+        summary.get('normalized_body_signature_gate_passed', False))
+    strict_gate_passed = bool(
+        summary.get('strict_exact_fragment_gate_passed', False))
+    if normalized_gate_passed and not strict_gate_passed:
+        diagnostics.append({
+            'type': 'strict_exact_fragment_mismatch_diagnostic_only',
+            'strict_missing_fragment_count': int(
+                summary.get('strict_missing_fragment_count', 0) or 0),
+        })
+    if not normalized_gate_passed:
+        warnings.append({'type': 'true_body_text_loss'})
+
+    for count_key, warning_type in (
+            ('true_body_text_loss_count', 'true_body_text_loss'),
+            ('table_text_loss_count', 'table_text_loss'),
+            ('callout_text_loss_count', 'callout_text_loss'),
+            ('list_text_loss_count', 'list_text_loss')):
+        if int(summary.get(count_key, 0) or 0):
+            warnings.append({
+                'type': warning_type,
+                'count': int(summary.get(count_key, 0) or 0),
+            })
+    residual_count = int(
+        summary.get(
+            'true_residual_header_footer_pollution_count',
+            summary.get('body_residual_header_footer_pollution_count', 0)) or 0)
+    if residual_count:
+        warnings.append({
+            'type': 'residual_header_footer_pollution',
+            'count': residual_count,
+        })
+    for warning in migration_gate_report.get('safety_warnings', []) or []:
+        warning_type = warning.get('type')
+        if warning_type in {
+                'true_body_text_loss',
+                'table_text_loss',
+                'callout_text_loss',
+                'list_text_loss',
+                'true_residual_header_footer_pollution',
+                'residual_header_footer_pollution',
+                'missing_docx_body_signature_evidence',
+                'raw_body_signature_not_preserved'}:
+            warnings.append({
+                'type': (
+                    'residual_header_footer_pollution'
+                    if warning_type == 'true_residual_header_footer_pollution' else
+                    warning_type),
+            })
+
+
+def _reviewed_header_footer_migration_profile_recommendation(
+        status: str,
+        warnings: list) -> str:
+    if status == 'disabled':
+        return 'Reviewed header/footer migration profile remains disabled by default.'
+    if status == 'ready_for_internal_migration_profile':
+        return 'Internal migration profile is ready for a private default-policy experiment only.'
+    warning_types = sorted({warning.get('type') for warning in warnings or []})
+    return f'Internal migration profile is fail-closed; resolve warnings first: {warning_types}.'
 
 
 def _reviewed_filtering_config_int_or_none(value):

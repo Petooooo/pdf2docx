@@ -5530,3 +5530,135 @@ Phase 4J should remain internal. The next safe direction is an optional
 bounded local-corpus `word_field` smoke for default-policy samples, still
 without public CLI/API exposure, default conversion changes, or broader
 migration behavior.
+
+## Phase 4J
+
+Phase 4J consolidates the reviewed header/footer migration controls into a
+single internal migration profile. The profile is diagnostic, JSON-serializable,
+private, and disabled by default.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Migration profile behavior
+
+Default profile:
+
+- `enabled=False`.
+- Parse mode: `filtered_parse_experiment`.
+- Page-number behavior: `placeholder_only`.
+- Body signature gate: `normalized_token_ngram`.
+- Strict exact-fragment gate: `diagnostic_only`.
+- Local output policy: `temp_or_ignored_only`.
+- Public exposure: `none`.
+
+Enabled profile:
+
+- Requires explicit review approvals.
+- Blocks raw `would_exclude`, rejected, and unsure candidates.
+- Protects body-region candidates and layout placeholders.
+- Produces the existing internal filtered parse config for
+  `filtered_parse_experiment`.
+- Records DOCX header/footer plan requirements for the simple default-policy
+  writer.
+- Keeps normalized token/ngram signature as the primary migration gate.
+
+Policy and page-number behavior:
+
+- Only `default` policy is allowed for the current simple writer.
+- Non-default and unsupported policies fail closed.
+- `placeholder_only` is the default page-number behavior.
+- `word_field` can be selected only explicitly and remains internal-only.
+- `static_text` is diagnostic-only.
+- Unsupported page-number behavior fails closed.
+
+Fail-closed conditions:
+
+- `true_body_text_loss`
+- `table_text_loss`
+- `callout_text_loss`
+- `list_text_loss`
+- `residual_header_footer_pollution`
+- `unsafe_policy`
+- `unsafe_page_number_behavior`
+- `missing_review_decisions`
+
+Generated ignored local report:
+
+- `local_reports/phase4j-internal-migration-profile-report.md`
+
+### Tests added
+
+- Default profile is disabled and JSON-serializable.
+- Enabled profile builds the internal filtered parse config.
+- Missing review decisions fail closed.
+- Raw `would_exclude`, rejected, unsure, body-region, and layout-placeholder
+  candidates remain blocked/protected.
+- Only default policy is accepted by the profile validation.
+- Explicit `word_field` behavior is supported and not the default.
+- Unsupported page-number behavior fails closed.
+- Strict exact-fragment mismatch is diagnostic-only when the normalized
+  token/ngram body gate passes.
+- Body/table/callout/list loss and residual header/footer pollution are
+  fail-closed conditions.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "migration_profile"
+```
+
+Result: passed. 7 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 314 tests and 10 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 314 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: modified files were limited to Phase 4J code, tests, and committed
+documentation. `.venv/`, caches, `local_samples/`, `local_reports/`, and test
+outputs remained ignored.
+
+### Phase 4J recommendation
+
+Phase 5A should keep this profile internal and use it as the single entry point
+for any next bounded default-policy smoke path. Production/default conversion,
+public CLI/API exposure, non-default policy writing, and cross-page paragraph
+merge should remain out of scope until a later explicit phase.
