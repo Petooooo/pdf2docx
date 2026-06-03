@@ -37,6 +37,7 @@ build_reviewed_header_footer_migration_profile = LayoutAnalyzer.build_reviewed_h
 summarize_reviewed_header_footer_migration_profile = LayoutAnalyzer.summarize_reviewed_header_footer_migration_profile
 validate_reviewed_header_footer_migration_profile = LayoutAnalyzer.validate_reviewed_header_footer_migration_profile
 build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
+build_local_corpus_quality_review_summary_report = LayoutAnalyzer.build_local_corpus_quality_review_summary_report
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
@@ -6779,6 +6780,197 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(page_number['static_text'], 'diagnostic_static_only')
         self.assertEqual(page_number['unsupported_behavior'], 'fail_closed')
 
+    def test_local_corpus_quality_review_classifies_passed_samples(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample('input.pdf', status='passed'),
+                _local_quality_evidence_sample('input3.pdf', status='passed'),
+            ])
+        classifications = {
+            sample['sample_name']: sample['final_local_quality_classification']
+            for sample in report['samples']
+        }
+
+        self.assertEqual(
+            classifications['input.pdf'],
+            'passed_internal_migration_smoke')
+        self.assertEqual(
+            classifications['input3.pdf'],
+            'passed_internal_migration_smoke')
+        self.assertEqual(
+            report['summary']['passed_internal_migration_smoke_count'],
+            2)
+        self.assertFalse(report['warnings'])
+
+    def test_local_corpus_quality_review_classifies_no_candidate_controls(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample(
+                    'input2.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=3,
+                    eligible_candidate_count=0),
+                _local_quality_evidence_sample(
+                    'input4.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=1,
+                    eligible_candidate_count=0),
+                _local_quality_evidence_sample(
+                    'input5.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=2,
+                    eligible_candidate_count=0),
+            ])
+
+        self.assertEqual(
+            report['summary']['negative_control_no_candidates_count'],
+            3)
+        self.assertEqual(
+            set(report['classification_counts']),
+            {'negative_control_no_candidates'})
+
+    def test_local_corpus_quality_review_keeps_bounded_large_sample_bounded_only(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample(
+                    'input6_large.pdf',
+                    status='skipped',
+                    page_count=756,
+                    pages_analyzed=15,
+                    policy_type='unsupported',
+                    bounded_subset_only=True,
+                    full_document_skipped=True,
+                    repeated_text_candidate_count=3,
+                    eligible_candidate_count=2,
+                    explicit_approvals_exist=True,
+                    review_pack_exists=True),
+            ])
+        sample = report['samples'][0]
+
+        self.assertEqual(
+            sample['final_local_quality_classification'],
+            'bounded_subset_only')
+        self.assertEqual(sample['policy_type'], 'unsupported')
+        self.assertEqual(report['summary']['bounded_subset_only_count'], 1)
+        self.assertEqual(report['summary']['unsupported_policy_sample_count'], 1)
+
+    def test_local_corpus_quality_review_reports_missing_artifacts(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[],
+            expected_sample_names=['missing.pdf'])
+        sample = report['samples'][0]
+
+        self.assertEqual(
+            sample['final_local_quality_classification'],
+            'missing_artifact')
+        self.assertIn(
+            'missing_local_quality_artifact',
+            {warning['type'] for warning in report['warnings']})
+
+    def test_local_corpus_quality_review_blocks_body_table_callout_list_loss(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample(
+                    'input-loss.pdf',
+                    status='passed',
+                    body_text_loss_count=1,
+                    table_text_loss_count=1,
+                    callout_text_loss_count=1,
+                    list_text_loss_count=1),
+            ])
+        warning_types = {warning['type'] for warning in report['warnings']}
+
+        self.assertEqual(
+            report['samples'][0]['final_local_quality_classification'],
+            'reviewed_but_blocked')
+        self.assertIn('true_body_text_loss', warning_types)
+        self.assertIn('table_text_loss', warning_types)
+        self.assertIn('callout_text_loss', warning_types)
+        self.assertIn('list_text_loss', warning_types)
+
+    def test_local_corpus_quality_review_blocks_residual_pollution(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample(
+                    'input-residual.pdf',
+                    status='passed',
+                    residual_header_footer_pollution_count=1),
+            ])
+        warning_types = {warning['type'] for warning in report['warnings']}
+
+        self.assertEqual(
+            report['samples'][0]['final_local_quality_classification'],
+            'reviewed_but_blocked')
+        self.assertIn('residual_header_footer_pollution', warning_types)
+
+    def test_local_corpus_quality_review_does_not_pass_unsupported_policy(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample(
+                    'input-unsupported.pdf',
+                    status='passed',
+                    policy_type='odd_even'),
+            ])
+
+        self.assertEqual(
+            report['samples'][0]['final_local_quality_classification'],
+            'unsupported_policy')
+        self.assertEqual(
+            report['summary']['passed_internal_migration_smoke_count'],
+            0)
+
+    def test_local_corpus_quality_review_summary_is_json_serializable(self):
+        report = build_local_corpus_quality_review_summary_report(
+            sample_evidence=[
+                _local_quality_evidence_sample('input.pdf', status='passed'),
+                _local_quality_evidence_sample(
+                    'input2.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=3,
+                    eligible_candidate_count=0),
+                _local_quality_evidence_sample('input3.pdf', status='passed'),
+                _local_quality_evidence_sample(
+                    'input4.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=1,
+                    eligible_candidate_count=0),
+                _local_quality_evidence_sample(
+                    'input5.pdf',
+                    status='analysis_only',
+                    repeated_text_candidate_count=2,
+                    eligible_candidate_count=0),
+                _local_quality_evidence_sample(
+                    'input6_large.pdf',
+                    status='skipped',
+                    page_count=756,
+                    pages_analyzed=15,
+                    policy_type='unsupported',
+                    bounded_subset_only=True,
+                    full_document_skipped=True,
+                    repeated_text_candidate_count=3,
+                    eligible_candidate_count=2,
+                    explicit_approvals_exist=True,
+                    review_pack_exists=True),
+            ],
+            expected_sample_names=[
+                'input.pdf',
+                'input2.pdf',
+                'input3.pdf',
+                'input4.pdf',
+                'input5.pdf',
+                'input6_large.pdf',
+            ])
+
+        self.assertEqual(report['summary']['sample_count'], 6)
+        self.assertEqual(report['summary']['passed_internal_migration_smoke_count'], 2)
+        self.assertEqual(report['summary']['negative_control_no_candidates_count'], 3)
+        self.assertEqual(report['summary']['bounded_subset_only_count'], 1)
+        self.assertEqual(report['summary']['true_body_text_loss_count'], 0)
+        self.assertEqual(report['summary']['residual_header_footer_pollution_count'], 0)
+        self.assertEqual(report['summary']['public_exposure'], 'none')
+        self.assertFalse(report['summary']['production_default_enabled'])
+        json.dumps(report)
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -9916,6 +10108,49 @@ def _quality_synthetic_evidence(test_count=10, passed_count=None):
             'body_region_protection': True,
             'fail_closed_regressions': True,
         },
+    }
+
+
+def _local_quality_evidence_sample(
+        sample_name,
+        status='passed',
+        page_count=5,
+        pages_analyzed=None,
+        policy_type='default',
+        page_number_behavior='placeholder_only',
+        repeated_text_candidate_count=3,
+        eligible_candidate_count=3,
+        approved_candidate_count=3,
+        explicit_approvals_exist=True,
+        review_pack_exists=True,
+        bounded_subset_only=False,
+        full_document_skipped=False,
+        body_text_loss_count=0,
+        table_text_loss_count=0,
+        callout_text_loss_count=0,
+        list_text_loss_count=0,
+        residual_header_footer_pollution_count=0):
+    return {
+        'sample_name': sample_name,
+        'status': status,
+        'page_count': page_count,
+        'pages_analyzed': pages_analyzed,
+        'corpus_analysis_exists': True,
+        'repeated_text_candidate_count': repeated_text_candidate_count,
+        'eligible_candidate_count': eligible_candidate_count,
+        'approved_candidate_count': approved_candidate_count,
+        'explicit_approvals_exist': explicit_approvals_exist,
+        'review_pack_exists': review_pack_exists,
+        'policy_type': policy_type,
+        'page_number_behavior': page_number_behavior,
+        'bounded_subset_only': bounded_subset_only,
+        'full_document_skipped': full_document_skipped,
+        'body_text_loss_count': body_text_loss_count,
+        'table_text_loss_count': table_text_loss_count,
+        'callout_text_loss_count': callout_text_loss_count,
+        'list_text_loss_count': list_text_loss_count,
+        'residual_header_footer_pollution_count': (
+            residual_header_footer_pollution_count),
     }
 
 

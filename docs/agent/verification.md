@@ -5812,3 +5812,143 @@ Phase 5B should stay internal and bounded. Use the quality pack as the
 checklist for any next profile-driven default-policy smoke. Public/default
 integration, non-default policy writing, image/logo migration, paragraph merge,
 and table parser changes remain future work.
+
+## Phase 5B
+
+Phase 5B expands the internal quality evaluation over available ignored local
+corpus reports. It classifies local samples without adding production behavior
+or rerunning heavy full-document local conversions.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Quality evaluation document:
+
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+
+Generated ignored local report:
+
+- `local_reports/phase5b-local-corpus-quality-review-report.md`
+
+### Local corpus summary
+
+Local corpus samples summarized:
+
+- `input.pdf`
+- `input2.pdf`
+- `input3.pdf`
+- `input4.pdf`
+- `input5.pdf`
+- `input6_large.pdf`
+
+Passed/internal migration smoke samples:
+
+- `input.pdf`
+- `input3.pdf`
+
+Negative/control samples:
+
+- `input2.pdf`
+- `input4.pdf`
+- `input5.pdf`
+
+Bounded/skipped samples:
+
+- `input6_large.pdf`
+
+Unsupported/missing samples:
+
+- `input6_large.pdf` remains unsupported under bounded coverage.
+- Missing expected local sample artifacts: 0.
+
+Loss and pollution summary:
+
+- True body text loss count: 0.
+- Table text loss count: 0.
+- Callout text loss count: 0.
+- List text loss count: 0.
+- Residual header/footer pollution count: 0.
+
+Fail-closed safety summary:
+
+- Positive local smoke remains limited to default-policy samples.
+- Negative/control samples are not treated as migration passes.
+- Bounded `input6_large.pdf` evidence is not treated as full-document pass.
+- Unsupported policy evidence is not treated as pass.
+- Body/table/callout/list loss and residual pollution remain blockers.
+- Public/default readiness remains blocked.
+
+Remaining gaps:
+
+- Local corpus evidence remains ignored and non-committed.
+- Large document evidence remains bounded for `input6_large`.
+- Public CLI/API option is not exposed.
+- Production/default migration is not enabled.
+- First-page, odd/even, and section-scoped Word header/footer writing are not
+  implemented.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph continuation merge is not implemented.
+
+### Tests added
+
+- Local corpus quality summary classifies passed samples.
+- No-candidate samples are classified as negative/control.
+- Bounded large sample remains bounded-only.
+- Missing artifacts are reported clearly.
+- Body/table/callout/list loss blocks pass classification.
+- Residual header/footer pollution blocks pass classification.
+- Unsupported policy is not treated as pass.
+- Local corpus quality summary is JSON-serializable.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "local_corpus_quality_review"
+```
+
+Result: passed. 8 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 328 tests and 10 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 328 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Phase 5B recommendation
+
+Phase 5C should remain internal and evidence-driven. Keep default conversion
+closed while deciding whether to extend bounded local quality evidence,
+formalize additional negative controls, or design a separately approved
+non-default-policy investigation.

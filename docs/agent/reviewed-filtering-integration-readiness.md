@@ -802,3 +802,30 @@ committed fixture coverage.
 Phase 5B should remain bounded and internal. The safest next direction is to
 use the quality pack as a checklist for a profile-driven default-policy smoke,
 without public/default integration or broader migration behavior.
+
+## Phase 5B: Local Corpus Quality Review
+
+Phase 5B expands the internal quality evaluation over the available ignored
+local corpus reports. It classifies local samples as passed internal migration
+smoke, negative/control evidence, bounded-only, unsupported, missing, or
+skipped without changing converter behavior.
+
+Committed evaluation document:
+
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+
+Phase 5B status:
+
+- The feature remains internal-only.
+- Public CLI/API exposure remains closed.
+- Production/default integration is still not enabled.
+- Normal conversion output remains unchanged.
+- Local corpus evidence remains ignored and non-committed.
+- `input.pdf` and `input3.pdf` remain the positive default-policy local smoke
+  samples.
+- `input2.pdf`, `input4.pdf`, and `input5.pdf` are negative/control samples.
+- `input6_large.pdf` remains bounded-only and unsupported for full migration.
+
+Phase 5C should continue to use the quality evaluation as an internal checklist
+only. Public/default integration, non-default policy writing, image/logo
+migration, paragraph merge, and table parser changes remain future work.

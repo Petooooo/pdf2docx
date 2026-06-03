@@ -55,6 +55,51 @@ Local ignored evidence from Phase 4G records:
 Local evidence is ignored/non-committed and must not be treated as production
 fixture coverage.
 
+## Phase 5B Local Corpus Review
+
+Phase 5B expands the quality evaluation over the available ignored local
+corpus reports without rerunning heavy full-document conversions and without
+promoting local PDFs into committed fixtures.
+
+Local corpus classifications:
+
+| Sample | Local classification | Evidence summary |
+| --- | --- | --- |
+| `input.pdf` | `passed_internal_migration_smoke` | Default policy local migration smoke passed the normalized body signature gate. |
+| `input2.pdf` | `negative_control_no_candidates` | Corpus analysis found repeated review-only/page-number signals but no eligible reviewed migration candidates. |
+| `input3.pdf` | `passed_internal_migration_smoke` | Default policy local migration smoke passed the normalized body signature gate. |
+| `input4.pdf` | `negative_control_no_candidates` | Corpus analysis found layout-placeholder style repetition only; no eligible reviewed migration candidates. |
+| `input5.pdf` | `negative_control_no_candidates` | Corpus analysis found layout-placeholder/review-only repetition only; no eligible reviewed migration candidates. |
+| `input6_large.pdf` | `bounded_subset_only` | Only a bounded subset was analyzed; policy remained `unsupported` under incomplete coverage, so full migration remains skipped. |
+
+Phase 5B safety summary:
+
+- Local samples summarized: 6.
+- Passed internal migration smoke samples: 2 (`input.pdf`, `input3.pdf`).
+- Negative/control samples: 3 (`input2.pdf`, `input4.pdf`, `input5.pdf`).
+- Bounded/skipped samples: 1 (`input6_large.pdf`).
+- Unsupported policy evidence: `input6_large.pdf` only, and it remains
+  bounded/skipped rather than pass-classified.
+- Body text loss count: 0.
+- Table text loss count: 0.
+- Callout text loss count: 0.
+- List text loss count: 0.
+- Residual header/footer pollution count: 0.
+
+Remaining local evidence gaps:
+
+- Local corpus evidence is ignored and non-committed.
+- `input6_large.pdf` remains bounded-only; full-document behavior is not
+  claimed.
+- Negative/control samples help show fail-closed behavior but do not expand the
+  positive migration evidence set.
+- Non-default policy writing is still not supported.
+
+Public/default readiness remains blocked because Phase 5B is evaluation-only:
+normal conversion is unchanged, the public CLI/API remains closed, migration is
+still internal-only and disabled by default, and only default-policy simple text
+header/footer writing has internal smoke evidence.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:
@@ -130,11 +175,11 @@ header/footer migration.
 
 ## Recommended Next Phases
 
-Recommended Phase 5B direction:
+Recommended Phase 5C direction:
 
 - Keep the migration profile internal and disabled by default.
-- Use the Phase 5A quality pack as the evidence checklist for any next bounded
-  smoke.
+- Use the Phase 5A/5B quality pack as the evidence checklist for any next
+  bounded smoke.
 - If local work continues, prefer a profile-driven default-policy smoke that
   reuses the normalized gate.
 - Do not broaden into public/default integration, non-default policy writing,

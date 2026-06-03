@@ -53,6 +53,16 @@ MIGRATION_PROFILE_FAIL_CLOSED_ON = (
     'unsafe_page_number_behavior',
     'missing_review_decisions',
 )
+LOCAL_CORPUS_QUALITY_CLASSIFICATIONS = (
+    'passed_internal_migration_smoke',
+    'negative_control_no_candidates',
+    'candidate_detected_needs_review',
+    'reviewed_but_blocked',
+    'bounded_subset_only',
+    'unsupported_policy',
+    'missing_artifact',
+    'skipped',
+)
 DECISION_APPROVE_EXCLUDE = 'approve_exclude'
 DECISION_REJECT_EXCLUDE = 'reject_exclude'
 DECISION_UNSURE = 'unsure'
@@ -993,6 +1003,62 @@ def build_reviewed_header_footer_quality_evaluation_pack(
                 readiness_status == 'ready_for_internal_quality_review'),
             'public_default_ready': False,
             'reason': _quality_recommendation(readiness_status, warnings),
+        },
+    }
+
+
+def build_local_corpus_quality_review_summary_report(
+        sample_evidence=None,
+        expected_sample_names: list = None,
+        enabled: bool = True) -> dict:
+    '''Classify ignored local corpus quality evidence without reading PDFs.'''
+    samples = _local_quality_sample_evidence_list(sample_evidence)
+    expected_names = [
+        normalize_text(name)
+        for name in expected_sample_names or []
+        if normalize_text(name)
+    ]
+    evidence_by_name = {
+        normalize_text(sample.get('sample_name') or sample.get('name')): sample
+        for sample in samples
+        if normalize_text(sample.get('sample_name') or sample.get('name'))
+    }
+    ordered_names = []
+    for name in expected_names + sorted(evidence_by_name):
+        if name and name not in ordered_names:
+            ordered_names.append(name)
+
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'local_corpus_quality_review_summary_only',
+            'summary': _local_quality_disabled_summary(len(ordered_names)),
+            'samples': [],
+            'classification_counts': {},
+            'warnings': [],
+            'recommendation': {
+                'ready_for_internal_local_quality_review': False,
+                'reason': 'Local corpus quality review is disabled.',
+            },
+        }
+
+    rows = [
+        _local_quality_sample_row(
+            dict(evidence_by_name.get(name, {'sample_name': name})))
+        for name in ordered_names
+    ]
+    summary = _local_quality_summary(rows)
+    warnings = _local_quality_warnings(summary, rows)
+    return {
+        'enabled': True,
+        'policy': 'local_corpus_quality_review_summary_only',
+        'summary': summary,
+        'samples': rows,
+        'classification_counts': summary.get('classification_counts', {}),
+        'warnings': warnings,
+        'recommendation': {
+            'ready_for_internal_local_quality_review': not warnings,
+            'reason': _local_quality_recommendation(summary, warnings),
         },
     }
 
@@ -4175,6 +4241,325 @@ def _quality_int(value) -> int:
     except (TypeError, ValueError):
         return 0
     return parsed if parsed > 0 else 0
+
+
+def _local_quality_sample_evidence_list(sample_evidence) -> list:
+    if not sample_evidence:
+        return []
+    if isinstance(sample_evidence, list):
+        return [dict(item) for item in sample_evidence or []]
+    if isinstance(sample_evidence, dict):
+        samples = (
+            sample_evidence.get('samples') or
+            sample_evidence.get('sample_evidence') or
+            [])
+        return [dict(item) for item in samples or []]
+    return []
+
+
+def _local_quality_disabled_summary(expected_count: int) -> dict:
+    return {
+        'sample_count': _quality_int(expected_count),
+        'classification_counts': {},
+        'passed_internal_migration_smoke_count': 0,
+        'negative_control_no_candidates_count': 0,
+        'candidate_detected_needs_review_count': 0,
+        'reviewed_but_blocked_count': 0,
+        'bounded_subset_only_count': 0,
+        'unsupported_policy_count': 0,
+        'missing_artifact_count': 0,
+        'skipped_count': 0,
+    }
+
+
+def _local_quality_sample_row(sample: dict) -> dict:
+    nested_summary = dict(sample.get('summary') or {})
+    name = normalize_text(sample.get('sample_name') or sample.get('name'))
+    status = normalize_text(sample.get('status', ''))
+    candidate_count = _quality_int(
+        sample.get(
+            'candidate_count',
+            sample.get('repeated_text_candidate_count')))
+    review_candidate_count = _quality_int(
+        sample.get('review_candidate_count', sample.get('repeated_candidate_count')))
+    approved_candidate_count = _quality_int(sample.get('approved_candidate_count'))
+    would_exclude_candidate_count = _quality_int(
+        sample.get(
+            'would_exclude_candidate_count',
+            sample.get('would_exclude_count')))
+    would_remove_block_count = _quality_int(sample.get('would_remove_block_count'))
+    eligible_candidate_count = _quality_int(
+        sample.get(
+            'eligible_candidate_count',
+            sample.get(
+                'eligible_migration_candidate_count',
+                max(would_exclude_candidate_count, approved_candidate_count))))
+    candidates_detected = _local_quality_bool(
+        sample,
+        'candidates_detected',
+        bool(candidate_count or review_candidate_count or eligible_candidate_count))
+    explicit_approvals_exist = _local_quality_bool(
+        sample,
+        'explicit_approvals_exist',
+        approved_candidate_count > 0)
+    corpus_analysis_exists = _local_quality_bool(
+        sample,
+        'corpus_analysis_exists',
+        bool(
+            sample.get('page_count') or
+            sample.get('pages_analyzed') or
+            sample.get('total_pages') or
+            candidates_detected or
+            status))
+    review_pack_exists = _local_quality_bool(
+        sample,
+        'review_pack_exists',
+        bool(sample.get('manual_review_pack_exists', False)))
+    smoke_attempted = _local_quality_bool(
+        sample,
+        'internal_migration_smoke_attempted',
+        status in {'passed', 'blocked', 'bounded_subset_passed'} or
+        'default_policy_migration_smoke_passed' in nested_summary)
+    smoke_passed = _local_quality_bool(
+        sample,
+        'internal_migration_smoke_passed',
+        status in {'passed', 'bounded_subset_passed'} or
+        bool(
+            nested_summary.get('default_policy_migration_smoke_passed') or
+            nested_summary.get('normalized_body_signature_gate_passed')))
+    bounded_subset_only = _local_quality_bool(
+        sample,
+        'bounded_subset_only',
+        status == 'bounded_subset_passed')
+    full_document_skipped = _local_quality_bool(
+        sample,
+        'full_document_skipped',
+        False)
+    policy_type = normalize_text(sample.get('policy_type', ''))
+    page_number_behavior = normalize_text(
+        sample.get('page_number_behavior') or
+        nested_summary.get('page_number_behavior') or
+        PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY)
+    body_loss_count = _quality_int(
+        sample.get(
+            'true_body_text_loss_count',
+            sample.get(
+                'body_text_loss_count',
+                sample.get(
+                    'body_text_loss_warning_count',
+                    nested_summary.get('body_text_loss_warning_count')))))
+    table_loss_count = _quality_int(
+        sample.get(
+            'table_text_loss_count',
+            sample.get(
+                'table_text_loss_warning_count',
+                nested_summary.get('table_text_loss_warning_count'))))
+    callout_loss_count = _quality_int(
+        sample.get(
+            'callout_text_loss_count',
+            sample.get(
+                'callout_text_loss_warning_count',
+                nested_summary.get('callout_text_loss_warning_count'))))
+    list_loss_count = _quality_int(
+        sample.get(
+            'list_text_loss_count',
+            sample.get(
+                'list_text_loss_warning_count',
+                nested_summary.get('list_text_loss_warning_count'))))
+    residual_count = _quality_int(
+        sample.get(
+            'residual_header_footer_pollution_count',
+            sample.get(
+                'true_residual_header_footer_pollution_count',
+                nested_summary.get('body_residual_header_footer_pollution_count'))))
+    missing_artifact = _local_quality_bool(
+        sample,
+        'missing_artifact',
+        bool(sample.get('missing_artifacts')) or
+        (not corpus_analysis_exists and not smoke_attempted))
+    skipped_reason = normalize_text(sample.get('skipped_reason', ''))
+
+    row = {
+        'sample_name': name,
+        'page_count': _local_quality_page_count(sample),
+        'corpus_analysis_exists': corpus_analysis_exists,
+        'candidates_detected': candidates_detected,
+        'candidate_count': candidate_count or review_candidate_count,
+        'eligible_migration_candidate_count': eligible_candidate_count,
+        'would_exclude_candidate_count': would_exclude_candidate_count,
+        'would_remove_block_count': would_remove_block_count,
+        'review_pack_exists': review_pack_exists,
+        'explicit_approvals_exist': explicit_approvals_exist,
+        'approved_candidate_count': approved_candidate_count,
+        'internal_migration_smoke_attempted': smoke_attempted,
+        'internal_migration_smoke_passed': smoke_passed,
+        'skipped_reason': skipped_reason,
+        'body_text_loss_count': body_loss_count,
+        'table_text_loss_count': table_loss_count,
+        'callout_text_loss_count': callout_loss_count,
+        'list_text_loss_count': list_loss_count,
+        'residual_header_footer_pollution_count': residual_count,
+        'policy_type': policy_type,
+        'page_number_behavior': page_number_behavior,
+        'bounded_subset_only': bounded_subset_only,
+        'full_document_skipped': full_document_skipped,
+        'missing_artifact': missing_artifact,
+    }
+    row['final_local_quality_classification'] = _local_quality_classification(row)
+    return row
+
+
+def _local_quality_page_count(sample: dict):
+    page_count = sample.get('page_count')
+    if page_count not in (None, ''):
+        return _quality_int(page_count)
+    total_pages = sample.get('total_pages')
+    if total_pages not in (None, ''):
+        return _quality_int(total_pages)
+    pages = sample.get('pages')
+    if isinstance(pages, (list, tuple)):
+        return len(pages)
+    if isinstance(pages, int):
+        return pages
+    return _quality_int(sample.get('pages_analyzed'))
+
+
+def _local_quality_bool(sample: dict, key: str, default: bool) -> bool:
+    if key not in sample:
+        return bool(default)
+    value = sample.get(key)
+    if isinstance(value, str):
+        return normalize_text(value).lower() in {'true', 'yes', '1', 'passed'}
+    return bool(value)
+
+
+def _local_quality_classification(row: dict) -> str:
+    if row.get('missing_artifact'):
+        return 'missing_artifact'
+    if _local_quality_loss_or_pollution_count(row):
+        return 'reviewed_but_blocked'
+    if row.get('bounded_subset_only'):
+        return 'bounded_subset_only'
+    policy_type = row.get('policy_type', '')
+    if policy_type and policy_type != 'default':
+        return 'unsupported_policy'
+    if row.get('internal_migration_smoke_passed'):
+        return 'passed_internal_migration_smoke'
+    if row.get('internal_migration_smoke_attempted'):
+        return 'reviewed_but_blocked'
+    if row.get('skipped_reason'):
+        return 'skipped'
+    if not row.get('eligible_migration_candidate_count', 0):
+        return 'negative_control_no_candidates'
+    if row.get('candidates_detected') and not row.get('explicit_approvals_exist'):
+        return 'candidate_detected_needs_review'
+    if row.get('explicit_approvals_exist'):
+        return 'reviewed_but_blocked'
+    return 'skipped'
+
+
+def _local_quality_loss_or_pollution_count(row: dict) -> int:
+    return sum(
+        _quality_int(row.get(key))
+        for key in (
+            'body_text_loss_count',
+            'table_text_loss_count',
+            'callout_text_loss_count',
+            'list_text_loss_count',
+            'residual_header_footer_pollution_count'))
+
+
+def _local_quality_summary(rows: list) -> dict:
+    classification_counts = Counter(
+        row.get('final_local_quality_classification', 'skipped')
+        for row in rows or [])
+    summary = {
+        'sample_count': len(rows or []),
+        'classification_counts': dict(sorted(classification_counts.items())),
+        'passed_internal_migration_smoke_count': classification_counts.get(
+            'passed_internal_migration_smoke', 0),
+        'negative_control_no_candidates_count': classification_counts.get(
+            'negative_control_no_candidates', 0),
+        'candidate_detected_needs_review_count': classification_counts.get(
+            'candidate_detected_needs_review', 0),
+        'reviewed_but_blocked_count': classification_counts.get(
+            'reviewed_but_blocked', 0),
+        'bounded_subset_only_count': classification_counts.get(
+            'bounded_subset_only', 0),
+        'unsupported_policy_count': classification_counts.get(
+            'unsupported_policy', 0),
+        'missing_artifact_count': classification_counts.get(
+            'missing_artifact', 0),
+        'skipped_count': classification_counts.get('skipped', 0),
+        'candidate_detected_count': sum(
+            1 for row in rows or [] if row.get('candidates_detected')),
+        'corpus_analysis_sample_count': sum(
+            1 for row in rows or [] if row.get('corpus_analysis_exists')),
+        'review_pack_sample_count': sum(
+            1 for row in rows or [] if row.get('review_pack_exists')),
+        'explicit_approval_sample_count': sum(
+            1 for row in rows or [] if row.get('explicit_approvals_exist')),
+        'internal_migration_smoke_attempted_count': sum(
+            1 for row in rows or []
+            if row.get('internal_migration_smoke_attempted')),
+        'bounded_or_skipped_sample_count': sum(
+            1 for row in rows or []
+            if (
+                row.get('bounded_subset_only') or
+                row.get('full_document_skipped') or
+                row.get('skipped_reason'))),
+        'unsupported_policy_sample_count': sum(
+            1 for row in rows or []
+            if row.get('policy_type') and row.get('policy_type') != 'default'),
+        'true_body_text_loss_count': sum(
+            _quality_int(row.get('body_text_loss_count')) for row in rows or []),
+        'table_text_loss_count': sum(
+            _quality_int(row.get('table_text_loss_count')) for row in rows or []),
+        'callout_text_loss_count': sum(
+            _quality_int(row.get('callout_text_loss_count')) for row in rows or []),
+        'list_text_loss_count': sum(
+            _quality_int(row.get('list_text_loss_count')) for row in rows or []),
+        'residual_header_footer_pollution_count': sum(
+            _quality_int(row.get('residual_header_footer_pollution_count'))
+            for row in rows or []),
+        'public_exposure': MIGRATION_PROFILE_PUBLIC_EXPOSURE,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+    }
+    return summary
+
+
+def _local_quality_warnings(summary: dict, rows: list) -> list:
+    warnings = []
+    for count_key, warning_type in (
+            ('true_body_text_loss_count', 'true_body_text_loss'),
+            ('table_text_loss_count', 'table_text_loss'),
+            ('callout_text_loss_count', 'callout_text_loss'),
+            ('list_text_loss_count', 'list_text_loss'),
+            ('residual_header_footer_pollution_count', 'residual_header_footer_pollution')):
+        count = _quality_int(summary.get(count_key))
+        if count:
+            warnings.append({'type': warning_type, 'count': count})
+    if summary.get('reviewed_but_blocked_count', 0):
+        warnings.append({
+            'type': 'reviewed_samples_blocked',
+            'count': summary.get('reviewed_but_blocked_count', 0),
+        })
+    if summary.get('missing_artifact_count', 0):
+        warnings.append({
+            'type': 'missing_local_quality_artifact',
+            'count': summary.get('missing_artifact_count', 0),
+        })
+    return warnings
+
+
+def _local_quality_recommendation(summary: dict, warnings: list) -> str:
+    if warnings:
+        warning_types = sorted({warning.get('type') for warning in warnings or []})
+        return f'Local corpus quality review is incomplete or blocked: {warning_types}.'
+    if summary.get('passed_internal_migration_smoke_count', 0):
+        return 'Local corpus quality review supports internal-only follow-up; public/default integration remains closed.'
+    return 'Local corpus quality review has no passing migration smoke evidence; keep work internal and gather more local evidence.'
 
 
 def _reviewed_filtering_config_int_or_none(value):
