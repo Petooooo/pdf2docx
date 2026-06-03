@@ -6220,3 +6220,196 @@ Phase 5E should draft public option naming and a public warning/error model
 without exposing behavior. Public/default integration, non-default policy
 writing, image/logo migration, paragraph merge, and table parser changes remain
 future work.
+
+## Phase 5E
+
+Phase 5E drafted the future public option naming and warning/error model for
+reviewed header/footer migration. The phase remains design-only and
+internal/test-only; it does not expose a CLI flag or public API option.
+
+### Default/public behavior
+
+Production/default conversion changed:
+
+- No.
+
+Public CLI/API changed:
+
+- No.
+
+Default conversion behavior:
+
+- Unchanged.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Public option/warning model document:
+
+- `docs/agent/reviewed-filtering-public-option-warning-model.md`
+
+Generated ignored local report:
+
+- `local_reports/phase5e-public-option-warning-model-report.md`
+
+### Public option draft
+
+Recommended future option name:
+
+- `reviewed_header_footer_migration`
+
+Recommended future CLI flag, not implemented:
+
+- `--reviewed-header-footer-migration`
+
+Public exposure status:
+
+- `enabled=False`
+- `implemented=False`
+- `public_option_available=False`
+- `public_cli_exposed=False`
+- `public_api_exposed=False`
+- `production_default_enabled=False`
+
+Future public modes drafted:
+
+- `disabled`
+- `diagnose`
+- `reviewed_migration`
+- future `auto_safe`
+
+Page-number behavior summary:
+
+- `placeholder_only` remains the default.
+- `word_field` is an explicit future/internal-only behavior.
+- `static_text` remains static/diagnostic.
+- `unsupported` fails closed.
+
+Policy behavior summary:
+
+- Only `default` policy is eligible for writer application.
+- `first_page`, `odd_even`, `section_scoped`, and `unsupported` remain
+  fail-closed until future phases add support.
+
+Quality gate summary:
+
+- Normalized token/ngram body signature remains the primary gate.
+- Strict exact-fragment mismatch remains diagnostic-only.
+- True body/table/callout/list loss remains fail-closed.
+- Residual header/footer pollution remains fail-closed.
+
+### Warning/error model
+
+Warning severities drafted:
+
+- `info`
+- `warning`
+- `blocked`
+- `error`
+
+Warning entry fields:
+
+- `severity`
+- `code`
+- `message`
+- `phase`
+- `source`
+- `affected_pages`
+- `affected_candidates`
+- `safe_to_continue`
+- `user_action_required`
+- `diagnostic_only`
+- `blocking`
+
+Blocking warning codes:
+
+- `missing_review_decisions`
+- `raw_would_exclude_not_allowed`
+- `rejected_candidate_blocked`
+- `unsure_candidate_blocked`
+- `body_region_candidate_blocked`
+- `layout_placeholder_blocked`
+- `non_default_policy_unsupported`
+- `unsafe_page_number_behavior`
+- `body_text_loss_detected`
+- `table_text_loss_detected`
+- `callout_text_loss_detected`
+- `list_text_loss_detected`
+- `residual_header_footer_pollution`
+- `large_document_bounded_only`
+
+Diagnostic-only warning codes:
+
+- `strict_exact_fragment_mismatch_diagnostic`
+- `diagnostic_report_local_only`
+- `public_api_not_enabled`
+
+### Tests added
+
+- Public option draft is disabled/not implemented.
+- Public option draft states public CLI/API is not exposed.
+- Recommended option name is stable and JSON-serializable.
+- Warning entries include severity/code/message/safe-to-continue/user-action
+  fields.
+- Warning model includes blocking codes for body/table/callout/list loss.
+- Warning model includes blocking codes for missing review decisions.
+- Warning model records strict exact-fragment mismatch as diagnostic-only.
+- Warning model includes unsupported policy and unsafe page-number behavior
+  codes.
+- Warning model summary is JSON-serializable.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "public_option_draft or warning_model"
+```
+
+Result: passed. 8 selected tests and 21 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 352 tests and 31 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 352 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: modified files were limited to Phase 5E helper code, tests, and
+committed documentation. `.venv/`, caches, `local_samples/`, `local_reports/`,
+and test outputs remained ignored.
+
+### Phase 5E recommendation
+
+Phase 5F should expand committed public-safe fixtures and public-facing
+warning/error expectations before any public opt-in implementation is
+considered. Public/default integration, non-default policy writing,
+image/logo migration, paragraph merge, and table parser changes remain future
+work.

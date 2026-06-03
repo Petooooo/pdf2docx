@@ -66,6 +66,21 @@ INTERNAL_REQUEST_DISABLED_FUTURE_MODES = (
     'section_scoped_migration_smoke',
     'production_default_migration',
 )
+PUBLIC_OPTION_RECOMMENDED_NAME = 'reviewed_header_footer_migration'
+PUBLIC_OPTION_DRAFT_MODES = (
+    'disabled',
+    'diagnose',
+    'reviewed_migration',
+)
+PUBLIC_OPTION_FUTURE_MODES = (
+    'auto_safe',
+)
+PUBLIC_WARNING_SEVERITIES = (
+    'info',
+    'warning',
+    'blocked',
+    'error',
+)
 LOCAL_CORPUS_QUALITY_CLASSIFICATIONS = (
     'passed_internal_migration_smoke',
     'negative_control_no_candidates',
@@ -1251,6 +1266,183 @@ def build_reviewed_header_footer_public_readiness_checklist(
             'reason': (
                 'Internal MVP is ready for private review only; public opt-in '
                 'and default-on behavior remain blocked by checklist items.'),
+        },
+    }
+
+
+def build_reviewed_header_footer_public_option_draft(
+        enabled: bool = False) -> dict:
+    '''Draft future public option naming and warning semantics.
+
+    This is design/test-only. It does not expose CLI/API options or connect to
+    default conversion.
+    '''
+    warning_model = build_reviewed_header_footer_warning_model()
+    validation = validate_reviewed_header_footer_warning_model(warning_model)
+    option_shape = _public_option_shape()
+    summary = {
+        'enabled': bool(enabled),
+        'implemented': False,
+        'public_option_available': False,
+        'recommended_option_name': PUBLIC_OPTION_RECOMMENDED_NAME,
+        'recommended_cli_flag': '--reviewed-header-footer-migration',
+        'recommended_api_key': PUBLIC_OPTION_RECOMMENDED_NAME,
+        'public_cli_exposed': False,
+        'public_api_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+        'default_mode': 'disabled',
+        'warning_model_status': validation.get('summary', {}).get('status', ''),
+        'blocking_warning_code_count': (
+            warning_model.get('summary', {}).get('blocking_code_count', 0)),
+        'diagnostic_only_code_count': (
+            warning_model.get('summary', {}).get('diagnostic_only_code_count', 0)),
+        'recommended_next_phase': 'Phase 5F',
+    }
+    return {
+        'enabled': bool(enabled),
+        'policy': 'reviewed_header_footer_public_option_warning_model_draft_only',
+        'implemented': False,
+        'summary': summary,
+        'option_naming': {
+            'recommended': PUBLIC_OPTION_RECOMMENDED_NAME,
+            'recommended_cli_flag': '--reviewed-header-footer-migration',
+            'recommended_api_key': PUBLIC_OPTION_RECOMMENDED_NAME,
+            'alternatives_considered': [
+                'semantic_header_footer_migration',
+                'header_footer_migration',
+            ],
+            'rationale': (
+                'The recommended name keeps the human-reviewed safety contract '
+                'visible and avoids implying automatic/default migration.'),
+        },
+        'option_shape': option_shape,
+        'warning_model': warning_model,
+        'validation': validation,
+        'public_exposure': {
+            'public_cli_exposed': False,
+            'public_api_exposed': False,
+            'production_default_enabled': False,
+            'default_conversion_changed': False,
+        },
+        'recommendation': {
+            'safe_to_expose_public_option': False,
+            'safe_for_default_on': False,
+            'next_phase': 'Phase 5F',
+            'reason': (
+                'This draft defines names and warnings only; public exposure '
+                'and default integration remain blocked.'),
+        },
+    }
+
+
+def build_reviewed_header_footer_warning_model() -> dict:
+    '''Return the draft future public warning/error response model.'''
+    warnings = _public_warning_model_entries()
+    blocking_codes = [
+        item['code']
+        for item in warnings
+        if not item.get('safe_to_continue', False)
+    ]
+    diagnostic_only_codes = [
+        item['code']
+        for item in warnings
+        if item.get('diagnostic_only', False)
+    ]
+    return {
+        'policy': 'reviewed_header_footer_public_warning_model_draft_only',
+        'implemented': False,
+        'severity_values': list(PUBLIC_WARNING_SEVERITIES),
+        'required_fields': [
+            'severity',
+            'code',
+            'message',
+            'phase',
+            'source',
+            'affected_pages',
+            'affected_candidates',
+            'safe_to_continue',
+            'user_action_required',
+            'diagnostic_only',
+            'blocking',
+        ],
+        'summary': {
+            'warning_code_count': len(warnings),
+            'blocking_code_count': len(blocking_codes),
+            'diagnostic_only_code_count': len(diagnostic_only_codes),
+            'blocking_codes': blocking_codes,
+            'diagnostic_only_codes': diagnostic_only_codes,
+        },
+        'warnings': warnings,
+    }
+
+
+def validate_reviewed_header_footer_warning_model(
+        warning_model: dict = None) -> dict:
+    '''Validate the draft warning model shape without exposing it publicly.'''
+    model = warning_model or build_reviewed_header_footer_warning_model()
+    required_fields = set(model.get('required_fields', []) or [])
+    known_severities = set(model.get('severity_values', []) or [])
+    warnings = [dict(item) for item in model.get('warnings', []) or []]
+    errors = []
+    seen_codes = set()
+
+    if model.get('implemented', False):
+        errors.append({'type': 'warning_model_must_remain_unimplemented'})
+    for item in warnings:
+        missing = sorted(field for field in required_fields if field not in item)
+        if missing:
+            errors.append({
+                'type': 'warning_model_entry_missing_fields',
+                'code': item.get('code', ''),
+                'missing': missing,
+            })
+        code = item.get('code', '')
+        if not code:
+            errors.append({'type': 'warning_model_entry_missing_code'})
+        elif code in seen_codes:
+            errors.append({
+                'type': 'warning_model_duplicate_code',
+                'code': code,
+            })
+        seen_codes.add(code)
+        if item.get('severity') not in known_severities:
+            errors.append({
+                'type': 'warning_model_unknown_severity',
+                'code': code,
+                'severity': item.get('severity', ''),
+            })
+
+    missing_required_codes = [
+        code for code in _public_warning_required_codes()
+        if code not in seen_codes
+    ]
+    if missing_required_codes:
+        errors.append({
+            'type': 'warning_model_required_codes_missing',
+            'missing': missing_required_codes,
+        })
+
+    status = 'valid_public_warning_model_draft' if not errors else 'blocked'
+    return {
+        'enabled': True,
+        'policy': 'reviewed_header_footer_public_warning_model_validation_only',
+        'summary': {
+            'status': status,
+            'implemented': False,
+            'error_count': len(errors),
+            'warning_code_count': len(warnings),
+            'public_cli_exposed': False,
+            'public_api_exposed': False,
+        },
+        'errors': errors,
+        'recommendation': {
+            'safe_to_expose_public_option': False,
+            'reason': (
+                'Warning model draft is structurally valid but remains '
+                'unimplemented and not public.'
+                if not errors else
+                'Resolve warning model draft shape errors before future review.'),
         },
     }
 
@@ -4309,6 +4501,223 @@ def _public_readiness_remaining_risks() -> list:
         'local_report_privacy',
         'large_document_performance',
     ]
+
+
+def _public_option_shape() -> dict:
+    return {
+        'top_level_option': PUBLIC_OPTION_RECOMMENDED_NAME,
+        'mode_values': list(PUBLIC_OPTION_DRAFT_MODES),
+        'future_mode_values': list(PUBLIC_OPTION_FUTURE_MODES),
+        'default_mode': 'disabled',
+        'review_decision_input': {
+            'path_key': 'review_decisions_path',
+            'object_key': 'review_decisions',
+            'required_for_reviewed_migration': True,
+            'rejected_unsure_behavior': 'blocked',
+        },
+        'header_footer_policy_behavior': {
+            'current': 'default_only',
+            'future': ['first_page', 'odd_even', 'section_scoped'],
+            'unsupported': 'fail_closed',
+        },
+        'page_number_behavior': {
+            'default': PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+            'allowed': [
+                PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+                PAGE_NUMBER_BEHAVIOR_WORD_FIELD,
+                PAGE_NUMBER_BEHAVIOR_STATIC_TEXT,
+            ],
+            'unsupported': 'fail_closed',
+        },
+        'quality_gate': {
+            'primary': MIGRATION_PROFILE_BODY_SIGNATURE_GATE,
+            'strict_exact_fragment': MIGRATION_PROFILE_STRICT_EXACT_FRAGMENT_GATE,
+            'fail_closed_on_safety_warnings': True,
+        },
+        'report_output': {
+            'diagnostic_report_path_key': 'diagnostic_report_path',
+            'local_only': True,
+            'privacy_warning_required': True,
+        },
+        'public_exposure': {
+            'implemented': False,
+            'public_cli_exposed': False,
+            'public_api_exposed': False,
+            'default_conversion_changed': False,
+        },
+    }
+
+
+def _public_warning_required_codes() -> list:
+    return [
+        'missing_review_decisions',
+        'raw_would_exclude_not_allowed',
+        'rejected_candidate_blocked',
+        'unsure_candidate_blocked',
+        'body_region_candidate_blocked',
+        'layout_placeholder_blocked',
+        'non_default_policy_unsupported',
+        'unsafe_page_number_behavior',
+        'body_text_loss_detected',
+        'table_text_loss_detected',
+        'callout_text_loss_detected',
+        'list_text_loss_detected',
+        'residual_header_footer_pollution',
+        'large_document_bounded_only',
+        'strict_exact_fragment_mismatch_diagnostic',
+        'diagnostic_report_local_only',
+        'public_api_not_enabled',
+    ]
+
+
+def _public_warning_model_entries() -> list:
+    return [
+        _public_warning_entry(
+            'blocked',
+            'missing_review_decisions',
+            'Explicit review decisions are required before migration can run.',
+            'review_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'raw_would_exclude_not_allowed',
+            'Raw would-exclude detection is diagnostic and cannot remove content.',
+            'review_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'rejected_candidate_blocked',
+            'A rejected candidate was requested for migration and remains blocked.',
+            'review_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'unsure_candidate_blocked',
+            'An unsure candidate was requested for migration and remains blocked.',
+            'review_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'body_region_candidate_blocked',
+            'Body-region content is protected from header/footer migration.',
+            'candidate_filtering',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'layout_placeholder_blocked',
+            'Layout placeholders are protected from header/footer migration.',
+            'candidate_filtering',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'non_default_policy_unsupported',
+            'Only default header/footer policy migration is currently supported.',
+            'policy_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'unsafe_page_number_behavior',
+            'Requested page-number behavior is unsupported or unsafe.',
+            'page_number_validation',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'body_text_loss_detected',
+            'Body text loss was detected by the quality gate.',
+            'quality_gate',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'table_text_loss_detected',
+            'Table text loss was detected by the quality gate.',
+            'quality_gate',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'callout_text_loss_detected',
+            'Callout text loss was detected by the quality gate.',
+            'quality_gate',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'list_text_loss_detected',
+            'List text loss was detected by the quality gate.',
+            'quality_gate',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'blocked',
+            'residual_header_footer_pollution',
+            'Residual header/footer pollution was detected after migration.',
+            'quality_gate',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'warning',
+            'large_document_bounded_only',
+            'Large-document evidence is bounded and cannot justify default behavior.',
+            'evidence_review',
+            safe_to_continue=False,
+            user_action_required=True),
+        _public_warning_entry(
+            'warning',
+            'strict_exact_fragment_mismatch_diagnostic',
+            'Strict exact-fragment mismatch is diagnostic when normalized gate passes.',
+            'quality_gate',
+            safe_to_continue=True,
+            user_action_required=False,
+            diagnostic_only=True),
+        _public_warning_entry(
+            'warning',
+            'diagnostic_report_local_only',
+            'Diagnostic reports may contain local document metadata and must stay local.',
+            'report_output',
+            safe_to_continue=True,
+            user_action_required=True,
+            diagnostic_only=True),
+        _public_warning_entry(
+            'info',
+            'public_api_not_enabled',
+            'Public reviewed header/footer migration API is not implemented.',
+            'public_exposure',
+            safe_to_continue=True,
+            user_action_required=False,
+            diagnostic_only=True),
+    ]
+
+
+def _public_warning_entry(
+        severity: str,
+        code: str,
+        message: str,
+        phase: str,
+        safe_to_continue: bool,
+        user_action_required: bool,
+        diagnostic_only: bool = False) -> dict:
+    return {
+        'severity': severity,
+        'code': code,
+        'message': message,
+        'phase': phase,
+        'source': 'reviewed_header_footer_migration',
+        'affected_pages': [],
+        'affected_candidates': [],
+        'safe_to_continue': bool(safe_to_continue),
+        'user_action_required': bool(user_action_required),
+        'diagnostic_only': bool(diagnostic_only),
+        'blocking': not bool(safe_to_continue),
+    }
 
 
 def _reviewed_header_footer_migration_profile_payload(

@@ -894,3 +894,31 @@ Phase 5D status:
 
 Recommended next direction is Phase 5E: draft public option naming and a
 public warning/error model without enabling public behavior.
+
+## Phase 5E: Public Option and Warning Model Draft
+
+Phase 5E drafts future public option naming and a public warning/error response
+model for reviewed header/footer migration. This phase is design-only: it does
+not expose a public CLI flag, does not add a public API option, and does not
+change default conversion behavior.
+
+Committed draft document:
+
+- `docs/agent/reviewed-filtering-public-option-warning-model.md`
+
+Phase 5E status:
+
+- Recommended future option name: `reviewed_header_footer_migration`.
+- Recommended future CLI flag: `--reviewed-header-footer-migration`.
+- Public CLI/API exposure remains closed.
+- Production/default conversion remains unchanged.
+- The draft warning model includes `info`, `warning`, `blocked`, and `error`
+  severity values.
+- Blocking codes cover missing review decisions, unsafe candidate decisions,
+  unsupported policy, unsafe page-number behavior, body/table/callout/list
+  loss, and residual header/footer pollution.
+- Diagnostic-only codes include strict exact-fragment mismatch diagnostics,
+  local-only diagnostic report warnings, and public API not enabled.
+
+Recommended next direction is Phase 5F: expand committed public-safe fixtures
+without enabling public behavior.

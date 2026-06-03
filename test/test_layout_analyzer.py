@@ -40,6 +40,9 @@ build_reviewed_header_footer_internal_request = LayoutAnalyzer.build_reviewed_he
 summarize_reviewed_header_footer_internal_request = LayoutAnalyzer.summarize_reviewed_header_footer_internal_request
 validate_reviewed_header_footer_internal_request = LayoutAnalyzer.validate_reviewed_header_footer_internal_request
 build_reviewed_header_footer_public_readiness_checklist = LayoutAnalyzer.build_reviewed_header_footer_public_readiness_checklist
+build_reviewed_header_footer_public_option_draft = LayoutAnalyzer.build_reviewed_header_footer_public_option_draft
+build_reviewed_header_footer_warning_model = LayoutAnalyzer.build_reviewed_header_footer_warning_model
+validate_reviewed_header_footer_warning_model = LayoutAnalyzer.validate_reviewed_header_footer_warning_model
 build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
 build_local_corpus_quality_review_summary_report = LayoutAnalyzer.build_local_corpus_quality_review_summary_report
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
@@ -6970,6 +6973,114 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'Phase 5E')
         json.dumps(checklist)
 
+    def test_reviewed_header_footer_public_option_draft_is_not_implemented_or_exposed(self):
+        draft = build_reviewed_header_footer_public_option_draft()
+        summary = draft['summary']
+
+        self.assertFalse(draft['enabled'])
+        self.assertFalse(summary['enabled'])
+        self.assertFalse(draft['implemented'])
+        self.assertFalse(summary['implemented'])
+        self.assertFalse(summary['public_option_available'])
+        self.assertFalse(summary['public_cli_exposed'])
+        self.assertFalse(summary['public_api_exposed'])
+        self.assertFalse(summary['production_default_enabled'])
+        self.assertFalse(summary['default_conversion_changed'])
+        self.assertEqual(summary['default_mode'], 'disabled')
+
+    def test_reviewed_header_footer_public_option_draft_recommends_stable_option_name(self):
+        draft = build_reviewed_header_footer_public_option_draft()
+        naming = draft['option_naming']
+        shape = draft['option_shape']
+
+        self.assertEqual(
+            draft['summary']['recommended_option_name'],
+            'reviewed_header_footer_migration')
+        self.assertEqual(naming['recommended'], 'reviewed_header_footer_migration')
+        self.assertEqual(shape['top_level_option'], 'reviewed_header_footer_migration')
+        self.assertEqual(shape['mode_values'], [
+            'disabled',
+            'diagnose',
+            'reviewed_migration',
+        ])
+        self.assertIn('auto_safe', shape['future_mode_values'])
+        json.dumps(draft)
+
+    def test_reviewed_header_footer_warning_model_entries_have_public_response_fields(self):
+        model = build_reviewed_header_footer_warning_model()
+        required_fields = set(model['required_fields'])
+
+        for warning in model['warnings']:
+            with self.subTest(code=warning['code']):
+                self.assertTrue(required_fields.issubset(set(warning)))
+                self.assertIn(warning['severity'], model['severity_values'])
+                self.assertIsInstance(warning['safe_to_continue'], bool)
+                self.assertIsInstance(warning['user_action_required'], bool)
+                self.assertIsInstance(warning['diagnostic_only'], bool)
+
+    def test_reviewed_header_footer_warning_model_blocks_body_table_callout_list_loss(self):
+        warnings = _public_warning_model_by_code()
+
+        for code in {
+                'body_text_loss_detected',
+                'table_text_loss_detected',
+                'callout_text_loss_detected',
+                'list_text_loss_detected'}:
+            with self.subTest(code=code):
+                self.assertEqual(warnings[code]['severity'], 'blocked')
+                self.assertFalse(warnings[code]['safe_to_continue'])
+                self.assertTrue(warnings[code]['user_action_required'])
+
+    def test_reviewed_header_footer_warning_model_blocks_missing_review_decisions(self):
+        warning = _public_warning_model_by_code()['missing_review_decisions']
+
+        self.assertEqual(warning['severity'], 'blocked')
+        self.assertFalse(warning['safe_to_continue'])
+        self.assertTrue(warning['user_action_required'])
+
+    def test_reviewed_header_footer_warning_model_records_strict_exact_fragment_as_diagnostic_only(self):
+        warning = _public_warning_model_by_code()[
+            'strict_exact_fragment_mismatch_diagnostic']
+
+        self.assertEqual(warning['severity'], 'warning')
+        self.assertTrue(warning['safe_to_continue'])
+        self.assertFalse(warning['user_action_required'])
+        self.assertTrue(warning['diagnostic_only'])
+        self.assertFalse(warning['blocking'])
+
+    def test_reviewed_header_footer_warning_model_blocks_unsupported_policy_and_page_numbers(self):
+        warnings = _public_warning_model_by_code()
+
+        self.assertEqual(
+            warnings['non_default_policy_unsupported']['severity'],
+            'blocked')
+        self.assertFalse(
+            warnings['non_default_policy_unsupported']['safe_to_continue'])
+        self.assertEqual(
+            warnings['unsafe_page_number_behavior']['severity'],
+            'blocked')
+        self.assertFalse(
+            warnings['unsafe_page_number_behavior']['safe_to_continue'])
+
+    def test_reviewed_header_footer_warning_model_summary_is_json_serializable(self):
+        model = build_reviewed_header_footer_warning_model()
+        validation = validate_reviewed_header_footer_warning_model(model)
+        summary = model['summary']
+
+        self.assertEqual(
+            validation['summary']['status'],
+            'valid_public_warning_model_draft')
+        self.assertIn('missing_review_decisions', summary['blocking_codes'])
+        self.assertIn('body_text_loss_detected', summary['blocking_codes'])
+        self.assertIn(
+            'strict_exact_fragment_mismatch_diagnostic',
+            summary['diagnostic_only_codes'])
+        self.assertIn(
+            'diagnostic_report_local_only',
+            summary['diagnostic_only_codes'])
+        json.dumps(model)
+        json.dumps(validation)
+
     def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
             synthetic_coverage=_quality_synthetic_evidence(),
@@ -10439,6 +10550,13 @@ def _local_quality_evidence_sample(
         'list_text_loss_count': list_text_loss_count,
         'residual_header_footer_pollution_count': (
             residual_header_footer_pollution_count),
+    }
+
+
+def _public_warning_model_by_code():
+    return {
+        warning['code']: warning
+        for warning in build_reviewed_header_footer_warning_model()['warnings']
     }
 
 
