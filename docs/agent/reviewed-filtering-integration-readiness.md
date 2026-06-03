@@ -829,3 +829,40 @@ Phase 5B status:
 Phase 5C should continue to use the quality evaluation as an internal checklist
 only. Public/default integration, non-default policy writing, image/logo
 migration, paragraph merge, and table parser changes remain future work.
+
+## Phase 5C: Internal API Surface Draft
+
+Phase 5C drafts a coherent internal request/config surface for future reviewed
+header/footer migration callers. The surface validates request shape only; it
+does not execute migration, alter normal conversion, or expose public options.
+
+Committed design document:
+
+- `docs/agent/reviewed-filtering-internal-api-surface.md`
+
+Phase 5C status:
+
+- The surface is internal-only.
+- `enabled=False` remains the default.
+- Public CLI/API exposure remains closed.
+- Production/default conversion remains unchanged.
+- Reviewed filtering and DOCX header/footer generation remain disabled by
+  default.
+- Enabled requests require explicit review decisions.
+- Raw `would_exclude`, rejected, and unsure candidates remain blocked.
+- The request embeds or auto-builds the Phase 4J migration profile from safe
+  defaults.
+- Supported request modes are `default_policy_migration_smoke` and
+  `filtered_parse_experiment`.
+- Future modes remain documented but disabled.
+- Only `default` policy is allowed for writer application.
+- `placeholder_only` remains the default page-number behavior.
+- `word_field` remains explicit and internal-only.
+- Normalized token/ngram body signature remains the primary quality gate.
+- Strict exact-fragment mismatch remains diagnostic-only.
+- Local outputs remain limited to temporary or ignored paths.
+
+Phase 5D should keep this request surface private. A later bounded phase may
+wire a private adapter to consume the request summary, but public/default
+integration, non-default policy writing, image/logo migration, paragraph merge,
+and table parser changes remain future work.

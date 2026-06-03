@@ -5952,3 +5952,140 @@ Phase 5C should remain internal and evidence-driven. Keep default conversion
 closed while deciding whether to extend bounded local quality evidence,
 formalize additional negative controls, or design a separately approved
 non-default-policy investigation.
+
+## Phase 5C
+
+Phase 5C drafts and validates an internal-only request/config surface for the
+reviewed header/footer migration MVP. The surface describes how future private
+callers can request migration safely, but it does not execute migration or
+change default conversion behavior.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+Internal API/config surface document:
+
+- `docs/agent/reviewed-filtering-internal-api-surface.md`
+
+Generated ignored local report:
+
+- `local_reports/phase5c-internal-api-surface-report.md`
+
+### Internal request summary
+
+Default enabled state:
+
+- `enabled=False`.
+- `surface=internal_only`.
+- `mode=default_policy_migration_smoke`.
+- The request does not execute migration.
+
+Review-decision requirement:
+
+- Enabled requests require explicit review decisions through `review_decisions`
+  or `review_decisions_path`.
+- Raw `would_exclude` remains blocked.
+- Rejected and unsure candidates remain blocked.
+
+Migration profile relationship:
+
+- The request embeds or auto-builds the Phase 4J migration profile from safe
+  defaults.
+- The generated profile keeps `filtered_parse_experiment` as the parse mode.
+- The derived reviewed-filtering config remains private/internal.
+
+Page-number behavior:
+
+- `placeholder_only` remains the default.
+- `word_field` can be selected explicitly for internal-only requests.
+- Unsupported page-number behavior fails closed.
+- `static_text` remains diagnostic/static only.
+
+Quality gate:
+
+- Normalized token/ngram body signature remains primary.
+- Strict exact-fragment mismatch remains diagnostic-only.
+- Body/table/callout/list loss and residual header/footer pollution remain
+  fail-closed blockers.
+
+Policy and local output:
+
+- Only `default` policy is allowed for writer application.
+- Non-default and future modes remain fail-closed/disabled.
+- Local output policy remains `temp_or_ignored_only`.
+
+Public exposure status:
+
+- Public CLI: false.
+- Public API: false.
+- Public exposure: `none`.
+- Production/default integration: false.
+
+### Tests added
+
+- Internal request is disabled by default.
+- Internal request requires explicit enablement and review decisions.
+- Internal request refuses raw `would_exclude`-only input.
+- Internal request embeds the migration profile and private reviewed-filtering
+  config.
+- Internal request defaults to `placeholder_only`.
+- Internal request can explicitly select `word_field`.
+- Unsupported page-number behavior fails closed.
+- Only default policy is allowed for writer application.
+- Future/non-default modes remain fail-closed.
+- Normalized body signature and strict exact-fragment gates are recorded.
+- Public CLI/API remain false.
+- Request summary and validation are JSON-serializable.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "internal_request"
+```
+
+Result: passed. 9 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 337 tests and 10 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 337 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Phase 5C recommendation
+
+Phase 5D should keep this surface private and validation-only unless a later
+phase explicitly adds a private adapter. Public/default integration,
+non-default policy writing, image/logo migration, paragraph merge, and table
+parser changes remain future work.

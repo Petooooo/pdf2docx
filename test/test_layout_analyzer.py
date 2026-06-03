@@ -36,6 +36,9 @@ build_reviewed_filtering_internal_config_report = LayoutAnalyzer.build_reviewed_
 build_reviewed_header_footer_migration_profile = LayoutAnalyzer.build_reviewed_header_footer_migration_profile
 summarize_reviewed_header_footer_migration_profile = LayoutAnalyzer.summarize_reviewed_header_footer_migration_profile
 validate_reviewed_header_footer_migration_profile = LayoutAnalyzer.validate_reviewed_header_footer_migration_profile
+build_reviewed_header_footer_internal_request = LayoutAnalyzer.build_reviewed_header_footer_internal_request
+summarize_reviewed_header_footer_internal_request = LayoutAnalyzer.summarize_reviewed_header_footer_internal_request
+validate_reviewed_header_footer_internal_request = LayoutAnalyzer.validate_reviewed_header_footer_internal_request
 build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
 build_local_corpus_quality_review_summary_report = LayoutAnalyzer.build_local_corpus_quality_review_summary_report
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
@@ -6681,6 +6684,198 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn(
             'residual_header_footer_pollution',
             {warning['type'] for warning in residual_validation['warnings']})
+
+    def test_reviewed_header_footer_internal_request_default_is_disabled(self):
+        request = build_reviewed_header_footer_internal_request()
+        summary = request['summary']
+
+        self.assertFalse(request['enabled'])
+        self.assertEqual(request['surface'], 'internal_only')
+        self.assertEqual(request['mode'], 'default_policy_migration_smoke')
+        self.assertFalse(summary['enabled'])
+        self.assertTrue(summary['requires_explicit_enablement'])
+        self.assertFalse(summary['executes_migration'])
+        self.assertTrue(summary['requires_review_decisions'])
+        self.assertFalse(summary['review_decisions_present'])
+        self.assertEqual(summary['page_number_behavior'], 'placeholder_only')
+        self.assertEqual(summary['quality_gate'], 'normalized_token_ngram')
+        self.assertEqual(summary['strict_exact_fragment_gate'], 'diagnostic_only')
+        self.assertFalse(summary['strict_exact_fragment_gate_blocks'])
+        self.assertEqual(summary['local_output_policy'], 'temp_or_ignored_only')
+        self.assertEqual(summary['public_exposure'], 'none')
+        self.assertFalse(summary['public_cli'])
+        self.assertFalse(summary['public_api'])
+        self.assertFalse(summary['production_default_enabled'])
+        self.assertFalse(summary['default_conversion_changed'])
+        self.assertEqual(
+            request['validation']['summary']['status'],
+            'disabled')
+        json.dumps(request)
+
+    def test_reviewed_header_footer_internal_request_enabled_requires_review_decisions(self):
+        request = build_reviewed_header_footer_internal_request({'enabled': True})
+        warning_types = {warning['type'] for warning in request['warnings']}
+
+        self.assertEqual(
+            request['validation']['summary']['status'],
+            'blocked')
+        self.assertIn('missing_review_decisions', warning_types)
+        self.assertFalse(
+            request['recommendation']['safe_for_internal_request'])
+
+    def test_reviewed_header_footer_internal_request_refuses_raw_would_exclude_only_input(self):
+        request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'allow_raw_would_exclude': True,
+        })
+
+        self.assertEqual(
+            request['validation']['summary']['status'],
+            'blocked')
+        self.assertIn(
+            'raw_would_exclude_allowed',
+            {warning['type'] for warning in request['warnings']})
+
+    def test_reviewed_header_footer_internal_request_embeds_migration_profile(self):
+        request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        profile_summary = request['migration_profile_summary']
+        filtering_config = request['reviewed_filtering_internal_config']
+
+        self.assertEqual(
+            request['validation']['summary']['status'],
+            'ready_for_internal_request')
+        self.assertTrue(request['migration_profile']['enabled'])
+        self.assertTrue(profile_summary['enabled'])
+        self.assertEqual(profile_summary['parse_mode'], 'filtered_parse_experiment')
+        self.assertEqual(filtering_config['mode'], 'filtered_parse_experiment')
+        self.assertTrue(filtering_config['require_explicit_approval'])
+        self.assertFalse(filtering_config['allow_raw_would_exclude'])
+
+    def test_reviewed_header_footer_internal_request_page_number_behavior_is_explicit(self):
+        default_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        word_field_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'word_field',
+        })
+        unsupported_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'future_dynamic_mode',
+        })
+
+        self.assertEqual(
+            default_request['summary']['page_number_behavior'],
+            'placeholder_only')
+        self.assertFalse(
+            default_request['summary']['page_number_word_field_selected'])
+        self.assertEqual(
+            word_field_request['summary']['page_number_behavior'],
+            'word_field')
+        self.assertTrue(
+            word_field_request['summary']['page_number_word_field_selected'])
+        self.assertTrue(
+            word_field_request['summary']['page_number_behavior_explicitly_requested'])
+        self.assertEqual(
+            word_field_request['validation']['summary']['status'],
+            'ready_for_internal_request')
+        self.assertIn(
+            'unsafe_page_number_behavior',
+            {warning['type'] for warning in unsupported_request['warnings']})
+
+    def test_reviewed_header_footer_internal_request_allows_only_default_policy(self):
+        default_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'requested_policy_type': 'default',
+        })
+        first_page_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'requested_policy_type': 'first_page',
+        })
+        future_mode_request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'mode': 'odd_even_migration_smoke',
+        })
+
+        self.assertEqual(
+            default_request['validation']['summary']['status'],
+            'ready_for_internal_request')
+        self.assertEqual(
+            default_request['summary']['allowed_writer_policy'],
+            'default')
+        self.assertTrue(default_request['summary']['non_default_policy_fail_closed'])
+        self.assertEqual(
+            first_page_request['validation']['summary']['status'],
+            'blocked')
+        self.assertIn(
+            'unsafe_policy',
+            {warning['type'] for warning in first_page_request['warnings']})
+        self.assertIn(
+            'future_internal_request_mode_disabled',
+            {warning['type'] for warning in future_mode_request['warnings']})
+
+    def test_reviewed_header_footer_internal_request_records_quality_gate_and_public_closure(self):
+        request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+        })
+        quality_gate = request['quality_gate_summary']
+        summary = request['summary']
+
+        self.assertEqual(request['quality_gate'], 'normalized_token_ngram')
+        self.assertTrue(quality_gate['normalized_body_signature_primary'])
+        self.assertEqual(
+            quality_gate['strict_exact_fragment_gate'],
+            'diagnostic_only')
+        self.assertTrue(quality_gate['strict_exact_fragment_diagnostic_only'])
+        self.assertFalse(quality_gate['strict_exact_fragment_gate_blocks'])
+        self.assertEqual(summary['public_exposure'], 'none')
+        self.assertFalse(summary['public_cli'])
+        self.assertFalse(summary['public_api'])
+        self.assertFalse(summary['production_default_enabled'])
+
+    def test_reviewed_header_footer_internal_request_public_exposure_fails_closed(self):
+        request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'public_cli': True,
+        })
+
+        self.assertEqual(
+            request['validation']['summary']['status'],
+            'blocked')
+        self.assertIn(
+            'public_exposure_enabled',
+            {warning['type'] for warning in request['warnings']})
+
+    def test_reviewed_header_footer_internal_request_summary_is_json_serializable(self):
+        request = build_reviewed_header_footer_internal_request({
+            'enabled': True,
+            'review_decisions': _profile_review_decisions(),
+            'page_number_behavior': 'word_field',
+        })
+        summary = summarize_reviewed_header_footer_internal_request(request)
+        validation = validate_reviewed_header_footer_internal_request(request)
+
+        self.assertEqual(summary['surface'], 'internal_only')
+        self.assertEqual(summary['mode'], 'default_policy_migration_smoke')
+        self.assertEqual(summary['validation_status'], 'ready_for_internal_request')
+        self.assertEqual(
+            validation['summary']['status'],
+            'ready_for_internal_request')
+        json.dumps(request)
+        json.dumps(summary)
+        json.dumps(validation)
 
     def test_reviewed_header_footer_quality_evaluation_marks_public_default_not_ready(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
