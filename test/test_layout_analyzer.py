@@ -5889,6 +5889,113 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'missing_docx_body_signature_evidence',
             {warning['type'] for warning in report['safety_warnings']})
 
+    def test_local_corpus_gate_passes_strict_mismatch_with_normalized_signature(self):
+        smoke_summary = _default_policy_migration_smoke_summary(
+            smoke_passed=False,
+            body_text_signature_preserved=False,
+            body_text_loss_warning_count=3)
+        normalized_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha beta'),
+            _body_signature_metric('body alpha beta'),
+            strict_missing_fragments=['body   alpha beta'],
+            removed_texts=[])
+
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            smoke_summary,
+            normalized_signature_report=normalized_report)
+
+        self.assertEqual(report['status'], 'passed')
+        self.assertTrue(report['summary']['normalized_body_signature_gate_passed'])
+        self.assertFalse(report['summary']['strict_exact_fragment_gate_passed'])
+        self.assertEqual(report['summary']['body_text_loss_warning_count'], 0)
+        self.assertIn(
+            'strict_exact_fragment_mismatch_diagnostic',
+            {warning['type'] for warning in report['diagnostic_warnings']})
+
+    def test_local_corpus_gate_fail_closes_true_body_loss_after_normalization(self):
+        smoke_summary = _default_policy_migration_smoke_summary()
+        normalized_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha missing sentence'),
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=['missing sentence'],
+            removed_texts=[])
+
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            smoke_summary,
+            normalized_signature_report=normalized_report)
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'true_body_text_loss',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_local_corpus_gate_fail_closes_table_callout_list_loss_after_normalization(self):
+        smoke_summary = _default_policy_migration_smoke_summary()
+        normalized_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body table row alpha callout panel item one'),
+            _body_signature_metric('body table row alpha'),
+            strict_missing_fragments=['callout panel item one'],
+            removed_texts=[],
+            table_watch_texts=['body table row alpha'],
+            callout_watch_texts=['callout panel'],
+            list_watch_texts=['item one'])
+
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            smoke_summary,
+            normalized_signature_report=normalized_report)
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('callout_text_loss', warning_types)
+        self.assertIn('list_text_loss', warning_types)
+
+    def test_local_corpus_gate_fail_closes_residual_header_footer_pollution(self):
+        smoke_summary = _default_policy_migration_smoke_summary(
+            true_residual_header_footer_pollution_count=1)
+        normalized_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha'),
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=[],
+            removed_texts=[])
+
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input.pdf',
+            'default',
+            smoke_summary,
+            normalized_signature_report=normalized_report)
+
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn(
+            'true_residual_header_footer_pollution',
+            {warning['type'] for warning in report['safety_warnings']})
+
+    def test_local_corpus_gate_keeps_non_default_and_bounded_samples_skipped(self):
+        normalized_report = _docx_body_signature_mismatch_investigation_report(
+            _body_signature_metric('body alpha'),
+            _body_signature_metric('body alpha'),
+            strict_missing_fragments=[],
+            removed_texts=[])
+        report = _local_corpus_default_policy_migration_sample_report(
+            'input6_large.pdf',
+            'unsupported',
+            _default_policy_migration_smoke_summary(),
+            normalized_signature_report=normalized_report,
+            bounded_subset_only=True,
+            full_document_skipped=True,
+            skipped_reason='policy_not_default')
+
+        self.assertEqual(report['status'], 'skipped')
+        self.assertTrue(report['bounded_subset_only'])
+        self.assertIn(
+            'non_default_policy_skipped',
+            {warning['type'] for warning in report['diagnostic_warnings']})
+
     def test_synthetic_repeated_header_footer_fixture_supports_reviewed_filtering(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -8059,15 +8166,41 @@ def _local_corpus_default_policy_migration_sample_report(
         sample_name,
         policy_type,
         smoke_summary=None,
+        normalized_signature_report=None,
         approval_artifacts_available=True,
         bounded_subset_only=False,
         full_document_skipped=False,
         generated_paths=None,
         skipped_reason=''):
     smoke_summary = dict(smoke_summary or {})
+    normalized_signature_report = dict(normalized_signature_report or {})
+    normalized_summary = normalized_signature_report.get('summary') or {}
     generated_paths = list(generated_paths or [])
     diagnostic_warnings = []
     safety_warnings = []
+    has_normalized_report = bool(normalized_signature_report)
+    normalized_gate_passed = bool(
+        normalized_summary.get('normalized_body_signature_gate_passed', False))
+    strict_exact_gate_passed = bool(
+        normalized_summary.get(
+            'strict_exact_fragment_gate_passed',
+            smoke_summary.get('body_text_signature_preserved', False)))
+    strict_missing_count = int(
+        normalized_summary.get(
+            'strict_missing_fragment_count',
+            smoke_summary.get('body_text_loss_warning_count', 0)) or 0)
+    true_body_text_loss_count = int(
+        normalized_summary.get(
+            'true_body_text_loss_count',
+            smoke_summary.get('body_text_loss_warning_count', 0)) or 0)
+    table_text_loss_count = int(
+        normalized_summary.get(
+            'table_text_loss_count',
+            smoke_summary.get('table_text_loss_warning_count', 0)) or 0)
+    callout_text_loss_count = int(
+        normalized_summary.get('callout_text_loss_count', 0) or 0)
+    list_text_loss_count = int(
+        normalized_summary.get('list_text_loss_count', 0) or 0)
     if not approval_artifacts_available:
         safety_warnings.append({'type': 'missing_approval_artifacts'})
     if policy_type != 'default':
@@ -8080,34 +8213,67 @@ def _local_corpus_default_policy_migration_sample_report(
             'type': 'sample_skipped',
             'reason': skipped_reason,
         })
+    if has_normalized_report and not strict_exact_gate_passed:
+        diagnostic_warnings.append({
+            'type': 'strict_exact_fragment_mismatch_diagnostic',
+            'count': strict_missing_count,
+        })
     if (
             policy_type == 'default' and
             smoke_summary and
-            not smoke_summary.get('smoke_passed', False)):
+            not smoke_summary.get('smoke_passed', False) and
+            not (has_normalized_report and normalized_gate_passed)):
         safety_warnings.append({'type': 'default_policy_migration_smoke_failed'})
-    if smoke_summary and not smoke_summary.get('body_text_signature_preserved', False):
+    if (
+            has_normalized_report and
+            policy_type == 'default' and
+            not normalized_gate_passed):
+        safety_warnings.append({'type': 'normalized_body_signature_not_preserved'})
+    if (
+            not has_normalized_report and
+            smoke_summary and
+            not smoke_summary.get('body_text_signature_preserved', False)):
         safety_warnings.append({'type': 'body_text_signature_not_preserved'})
     if int(smoke_summary.get('body_residual_header_footer_pollution_count', 0) or 0):
         safety_warnings.append({
             'type': 'true_residual_header_footer_pollution',
             'count': int(smoke_summary.get('body_residual_header_footer_pollution_count', 0)),
         })
-    if int(smoke_summary.get('body_text_loss_warning_count', 0) or 0):
+    if true_body_text_loss_count:
         safety_warnings.append({
-            'type': 'body_text_loss',
-            'count': int(smoke_summary.get('body_text_loss_warning_count', 0)),
+            'type': 'true_body_text_loss' if has_normalized_report else 'body_text_loss',
+            'count': true_body_text_loss_count,
         })
-    if int(smoke_summary.get('table_text_loss_warning_count', 0) or 0):
+    if table_text_loss_count:
         safety_warnings.append({
             'type': 'table_text_loss',
-            'count': int(smoke_summary.get('table_text_loss_warning_count', 0)),
+            'count': table_text_loss_count,
         })
+    if callout_text_loss_count:
+        safety_warnings.append({
+            'type': 'callout_text_loss',
+            'count': callout_text_loss_count,
+        })
+    if list_text_loss_count:
+        safety_warnings.append({
+            'type': 'list_text_loss',
+            'count': list_text_loss_count,
+        })
+    for warning in normalized_signature_report.get('safety_warnings', []) or []:
+        if warning.get('type') == 'missing_docx_body_signature_evidence':
+            safety_warnings.append({'type': 'missing_docx_body_signature_evidence'})
+        elif warning.get('type') == 'raw_body_signature_not_preserved':
+            safety_warnings.append({'type': 'raw_body_signature_not_preserved'})
     if generated_paths and not _local_generated_paths_are_local_only(generated_paths):
         safety_warnings.append({'type': 'generated_docx_path_not_local_only'})
 
     if safety_warnings:
         status = 'blocked'
-    elif policy_type == 'default' and smoke_summary.get('smoke_passed', False):
+    elif (
+            policy_type == 'default' and
+            (
+                smoke_summary.get('smoke_passed', False) or
+                (has_normalized_report and normalized_gate_passed))):
         status = 'bounded_subset_passed' if bounded_subset_only else 'passed'
     else:
         status = 'skipped'
@@ -8130,14 +8296,26 @@ def _local_corpus_default_policy_migration_sample_report(
                 smoke_summary.get('docx_footer_xml_contains_page_placeholder', False)),
             'docx_footer_xml_page_placeholder_expected': bool(
                 smoke_summary.get('docx_footer_xml_page_placeholder_expected', False)),
+            'strict_exact_fragment_gate_passed': strict_exact_gate_passed,
+            'strict_missing_fragment_count': strict_missing_count,
+            'normalized_body_signature_gate_passed': normalized_gate_passed,
+            'normalized_final_classification': normalized_summary.get(
+                'final_classification', ''),
+            'approved_migration_explained_missing_text_count': int(
+                normalized_summary.get(
+                    'approved_migration_explained_missing_text_count', 0) or 0),
+            'serialization_normalization_mismatch_count': int(
+                normalized_summary.get(
+                    'serialization_normalization_mismatch_count', 0) or 0),
             'body_residual_header_footer_pollution_count': int(
                 smoke_summary.get('body_residual_header_footer_pollution_count', 0) or 0),
             'body_text_signature_preserved': bool(
+                normalized_gate_passed if has_normalized_report else
                 smoke_summary.get('body_text_signature_preserved', False)),
-            'body_text_loss_warning_count': int(
-                smoke_summary.get('body_text_loss_warning_count', 0) or 0),
-            'table_text_loss_warning_count': int(
-                smoke_summary.get('table_text_loss_warning_count', 0) or 0),
+            'body_text_loss_warning_count': true_body_text_loss_count,
+            'table_text_loss_warning_count': table_text_loss_count,
+            'callout_text_loss_warning_count': callout_text_loss_count,
+            'list_text_loss_warning_count': list_text_loss_count,
             'page_number_behavior': smoke_summary.get('page_number_behavior', ''),
             'page_number_field_generation': smoke_summary.get(
                 'page_number_field_generation', ''),
@@ -8197,6 +8375,7 @@ def _local_corpus_default_policy_migration_summary_report(sample_reports):
         ],
         'recommendation': {
             'safe_for_phase_4f': not blocked,
+            'safe_for_phase_4h': not blocked,
             'reason': (
                 'Local default-policy migration smoke completed or skipped fail-closed.'
                 if not blocked else

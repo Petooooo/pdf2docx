@@ -5159,3 +5159,135 @@ corpus validation gate so it uses normalized body-signature evidence as a
 supplement to strict exact-fragment diagnostics, while retaining fail-closed
 behavior for true body text loss, table/callout/list loss, residual
 header/footer pollution, and missing evidence.
+
+## Phase 4G
+
+Date: 2026-06-03
+
+### Scope
+
+Phase 4G refined the local/test-only default-policy migration smoke gate to use
+Phase 4F normalized token/ngram body-signature evidence as the primary local
+DOCX body preservation criterion. The strict exact-fragment result remains
+reported as a diagnostic.
+
+Production/default behavior did not change:
+
+- No `Converter.convert()` default behavior changed.
+- No public CLI behavior changed.
+- No public API option was added.
+- Reviewed filtering remains private/internal and disabled by default.
+- DOCX header/footer generation remains disabled by default.
+- No content is moved into DOCX headers/footers during normal conversion.
+- No cross-page paragraph merge was added.
+- No production table parsing behavior was changed.
+
+### Local normalized gate result
+
+Samples evaluated:
+
+- `input.pdf`
+- `input3.pdf`
+- `input6_large.pdf` bounded subset only
+
+Final gate status:
+
+- `input.pdf`: passed.
+- `input3.pdf`: passed.
+- `input6_large.pdf`: skipped because bounded subset policy coverage remained
+  `unsupported`; full 756-page migration and DOCX generation remained skipped.
+
+Gate metrics:
+
+- Strict exact-fragment gate failed for 2 eligible samples and was recorded as
+  diagnostic warnings.
+- Normalized body-signature gate passed for 2 eligible samples.
+- True body text loss count: 0.
+- Table text loss count: 0.
+- Callout text loss count: 0.
+- List text loss count: 0.
+- Residual header/footer pollution count: 0.
+- Blocked sample count: 0.
+- Skipped sample count: 1.
+
+Generated ignored local report:
+
+- `local_reports/phase4g-local-corpus-normalized-migration-gate-report.md`
+
+Generated ignored DOCX artifacts:
+
+- `local_reports/phase4g/input/*.docx`
+- `local_reports/phase4g/input3/*.docx`
+
+Fail-closed behavior remains:
+
+- True body text loss blocks.
+- Table text loss blocks.
+- Callout/list text loss blocks.
+- Residual header/footer pollution blocks.
+- Missing normalized evidence blocks.
+- Non-default policies remain skipped or blocked.
+- Bounded large-document evidence does not pass as full-document evidence.
+
+### Tests added
+
+- Local corpus gate passes when strict exact-fragment matching fails but the
+  normalized body-signature gate passes.
+- Strict exact-fragment mismatch is recorded as a diagnostic warning.
+- True body text loss remains fail-closed.
+- Table/callout/list text loss remains fail-closed.
+- Residual header/footer pollution remains fail-closed.
+- Non-default bounded samples remain skipped and are not promoted to
+  full-document evidence.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "local_corpus_gate or local_corpus_default_policy_migration or docx_body_signature_mismatch"
+```
+
+Result: passed. 15 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 297 tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/converter.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m unittest discover -s test -p 'test_layout_analyzer.py'
+```
+
+Result: passed. 297 tests ran successfully.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+```bash
+git status --short --ignored
+```
+
+Result: local sample PDFs, generated local reports, generated local DOCX files,
+`.venv/`, caches, and test outputs remained ignored. Only Phase 4G test and
+documentation files were modified.
+
+### Phase 4G recommendation
+
+Phase 4H should remain internal. The next safe direction is to build on the
+normalized local corpus gate without proceeding to page-number handling, public
+API exposure, default integration, or broader migration.

@@ -595,3 +595,42 @@ Phase 4G should remain internal and should refine the local corpus validation
 gate to combine strict diagnostics with normalized body-signature evidence,
 without enabling broader migration, page-number handling, public API, or
 default behavior.
+
+## Phase 4G Normalized Local Corpus Migration Gate
+
+Phase 4G updates the local/test-only default-policy migration smoke gate so the
+strict exact-fragment result remains visible as a diagnostic, while normalized
+token/ngram DOCX body-signature preservation becomes the primary local DOCX
+body preservation gate.
+
+Local corpus gate result:
+
+- `input.pdf` passed the updated local gate.
+- `input3.pdf` passed the updated local gate.
+- `input6_large.pdf` remained bounded-subset-only and skipped because the
+  policy was `unsupported` from incomplete page coverage.
+- Strict exact-fragment matching still failed for the two eligible samples and
+  is reported as a diagnostic warning.
+- Normalized body-signature validation passed for the two eligible samples.
+- True body text loss count was 0.
+- Table, callout, and list text loss counts were 0.
+- Residual header/footer pollution count was 0.
+
+Safety interpretation:
+
+- Strict exact-fragment mismatch is no longer automatically blocking when the
+  normalized body-signature gate passes.
+- Strict mismatch remains visible as a diagnostic warning.
+- True body text loss remains fail-closed.
+- Table, callout, and list text loss remain fail-closed.
+- Residual header/footer pollution remains fail-closed.
+- Non-default policies remain skipped or fail-closed.
+- Bounded large-document evidence is not promoted to full-document evidence.
+- Local corpus evidence remains ignored, internal, and non-committed.
+- Default conversion remains unchanged.
+- Public CLI/API exposure remains closed.
+- Page-number field handling remains future work.
+
+Phase 4H should remain internal. The next safe direction is to decide the next
+private experiment using the normalized gate without proceeding to page-number
+handling, public API exposure, default integration, or broader migration.
