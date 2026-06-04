@@ -147,6 +147,19 @@ Local corpus evidence remains ignored/non-committed. Phase 5F improves public
 regression coverage, but it does not promote local samples into fixtures and
 does not unblock public/default integration by itself.
 
+## Header/Footer Role Mapping Follow-Up
+
+A later local quality review reported a possible header/footer role swap in
+generated DOCX output. OpenXML inspection showed that the default batch DOCX did
+not contain Word header/footer parts, while the Phase 4G internal migration
+DOCX for `input.pdf` kept top header text in header XML and bottom footer text
+in footer XML.
+
+The investigation still exposed an internal safety gap: plan generation and
+writer application trusted `proposed_role` without a final role-vs-region
+consistency check. Regression coverage now validates header/footer/page-number
+OpenXML parts separately, and role/region mismatches fail closed before writing.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

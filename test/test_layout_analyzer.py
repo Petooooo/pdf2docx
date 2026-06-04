@@ -5043,6 +5043,95 @@ class TestLayoutAnalyzer(unittest.TestCase):
                 'unsupported',
                 word_field_plan['summary']['supported_page_number_behaviors'])
 
+    def test_docx_header_footer_role_region_mismatch_fails_closed(self):
+        bottom_header_fingerprint = _summary_fingerprint(
+            'BOTTOM FOOTER TEXT',
+            REGION_BOTTOM)
+        top_footer_fingerprint = _summary_fingerprint(
+            'TOP HEADER TEXT',
+            REGION_TOP)
+        top_page_number_fingerprint = _summary_fingerprint(
+            'Page 1 of 1',
+            REGION_TOP)
+        page_summaries = [{
+            'page_index': 0,
+            'text_blocks': [
+                _mapping_summary_block(
+                    0,
+                    bottom_header_fingerprint,
+                    REGION_BOTTOM,
+                    'BOTTOM FOOTER TEXT'),
+                _mapping_summary_block(
+                    1,
+                    top_footer_fingerprint,
+                    REGION_TOP,
+                    'TOP HEADER TEXT'),
+                _mapping_summary_block(
+                    2,
+                    top_page_number_fingerprint,
+                    REGION_TOP,
+                    'Page 1 of 1'),
+            ],
+        }]
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'bottom-as-header',
+                    bottom_header_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_BOTTOM]),
+                _dry_run_candidate(
+                    'top-as-footer',
+                    top_footer_fingerprint,
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'top-page-number',
+                    top_page_number_fingerprint,
+                    ROLE_PAGE_NUMBER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0],
+                    [REGION_TOP]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision(
+                    'bottom-as-header',
+                    bottom_header_fingerprint,
+                    'approve_exclude'),
+                _review_decision(
+                    'top-as-footer',
+                    top_footer_fingerprint,
+                    'approve_exclude'),
+                _review_decision(
+                    'top-page-number',
+                    top_page_number_fingerprint,
+                    'approve_exclude'),
+            ],
+        }
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True,
+            page_number_behavior='word_field')
+        warning_types = {warning['type'] for warning in plan['safety_warnings']}
+
+        self.assertEqual(plan['summary']['representable_entry_count'], 0)
+        self.assertEqual(plan['summary']['unrepresentable_approved_candidate_count'], 3)
+        self.assertIn('header_role_region_mismatch', warning_types)
+        self.assertIn('footer_role_region_mismatch', warning_types)
+        self.assertIn('page_number_region_not_supported', warning_types)
+        self.assertEqual(plan['header_footer_policy']['policy_type'], 'unsupported')
+        self.assertFalse(
+            plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
+
     def test_docx_header_footer_plan_requires_dynamic_page_number_field_when_requested(self):
         _require_synthetic_pdf_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -5393,6 +5482,99 @@ class TestLayoutAnalyzer(unittest.TestCase):
             self.assertEqual(
                 report['summary']['page_number_field_generation'],
                 'deferred_placeholder_only')
+
+    def test_internal_docx_header_footer_role_mapping_keeps_openxml_parts_separate(self):
+        _require_docx_header_footer_support(self)
+        plan = _docx_header_footer_policy_plan_for_page_texts(
+            headers=[
+                'TOP HEADER TEXT',
+                'TOP HEADER TEXT',
+                'TOP HEADER TEXT',
+            ],
+            footers=[
+                'BOTTOM FOOTER TEXT',
+                'BOTTOM FOOTER TEXT',
+                'BOTTOM FOOTER TEXT',
+            ],
+            page_numbers=[
+                PAGE_NUMBER_PLACEHOLDER,
+                PAGE_NUMBER_PLACEHOLDER,
+                PAGE_NUMBER_PLACEHOLDER,
+            ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'role-separated.docx'
+            document = DocxDocument()
+            document.add_paragraph('BODY TEXT MUST REMAIN')
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('TOP HEADER TEXT', openxml['header_xml'])
+        self.assertNotIn('BOTTOM FOOTER TEXT', openxml['header_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['header_xml'])
+        self.assertIn('BOTTOM FOOTER TEXT', openxml['footer_xml'])
+        self.assertIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+        self.assertNotIn('TOP HEADER TEXT', openxml['footer_xml'])
+        self.assertIn('BODY TEXT MUST REMAIN', openxml['body_xml'])
+        self.assertNotIn('TOP HEADER TEXT', openxml['body_xml'])
+        self.assertNotIn('BOTTOM FOOTER TEXT', openxml['body_xml'])
+
+    def test_internal_docx_header_footer_writer_blocks_role_target_mismatch(self):
+        _require_docx_header_footer_support(self)
+        unsafe_plan = {
+            'sections': [{
+                'header_texts': ['BOTTOM FOOTER TEXT'],
+                'footer_texts': ['TOP HEADER TEXT'],
+                'page_number_placeholders': [PAGE_NUMBER_PLACEHOLDER],
+            }],
+            'entries': [
+                {
+                    'candidate_id': 'footer-in-header',
+                    'role': ROLE_FOOTER,
+                    'target_part': 'header',
+                    'regions': [REGION_BOTTOM],
+                    'text': 'BOTTOM FOOTER TEXT',
+                },
+                {
+                    'candidate_id': 'header-in-footer',
+                    'role': ROLE_HEADER,
+                    'target_part': 'footer',
+                    'regions': [REGION_TOP],
+                    'text': 'TOP HEADER TEXT',
+                },
+            ],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'unsafe-role-target.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                unsafe_plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+        warning_types = {warning['type'] for warning in report['safety_warnings']}
+
+        self.assertFalse(report['applied'])
+        self.assertEqual(report['summary']['header_paragraphs_written'], 0)
+        self.assertEqual(report['summary']['footer_paragraphs_written'], 0)
+        self.assertIn('footer_entry_target_part_mismatch', warning_types)
+        self.assertIn('header_entry_target_part_mismatch', warning_types)
+        self.assertNotIn('BOTTOM FOOTER TEXT', openxml['header_xml'])
+        self.assertNotIn('TOP HEADER TEXT', openxml['footer_xml'])
 
     def test_internal_docx_header_footer_word_page_field_writes_openxml(self):
         _require_docx_header_footer_support(self)

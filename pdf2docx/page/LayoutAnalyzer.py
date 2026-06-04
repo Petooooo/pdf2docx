@@ -6069,6 +6069,12 @@ def _docx_header_footer_plan_entry(
             candidate,
             'role_not_supported_for_docx_header_footer',
             'Only header, footer, and page-number candidates are represented in Phase 4A.')
+    role_region_warning = _docx_header_footer_role_region_warning(
+        candidate,
+        role,
+        regions)
+    if role_region_warning:
+        return None, role_region_warning
 
     text = _docx_header_footer_candidate_text(candidate, text_lookup)
     if role == ROLE_PAGE_NUMBER:
@@ -6107,6 +6113,38 @@ def _docx_header_footer_plan_entry(
         'generation_status': (
             page_number_behavior if role == ROLE_PAGE_NUMBER else 'planned_text_only'),
     }, None
+
+
+def _docx_header_footer_role_region_warning(
+        candidate: dict,
+        role: str,
+        regions: set) -> dict:
+    regions = set(regions or [])
+    if role == ROLE_HEADER and (
+            REGION_TOP not in regions or
+            REGION_BOTTOM in regions or
+            REGION_BODY in regions):
+        return _docx_header_footer_warning(
+            candidate,
+            'header_role_region_mismatch',
+            'Header candidates must have unambiguous top-region evidence.')
+    if role == ROLE_FOOTER and (
+            REGION_BOTTOM not in regions or
+            REGION_TOP in regions or
+            REGION_BODY in regions):
+        return _docx_header_footer_warning(
+            candidate,
+            'footer_role_region_mismatch',
+            'Footer candidates must have unambiguous bottom-region evidence.')
+    if role == ROLE_PAGE_NUMBER and (
+            REGION_BOTTOM not in regions or
+            REGION_TOP in regions or
+            REGION_BODY in regions):
+        return _docx_header_footer_warning(
+            candidate,
+            'page_number_region_not_supported',
+            'Simple page-number migration currently supports bottom-region page numbers only.')
+    return None
 
 
 def _docx_header_footer_candidate_text(candidate: dict, text_lookup: dict) -> str:

@@ -6858,3 +6858,130 @@ Ignore verification:
 Phase 6B should run the same wheelhouse install and conversion smoke on the
 actual closed-network target OS/Python matrix, record dependency wheel
 availability, and define checksum/transfer procedures for the offline bundle.
+
+## Header/Footer Role Mapping Bugfix
+
+Date: 2026-06-04
+
+### Observed bug summary
+
+A local quality review reported that bottom footer text appeared to behave like
+Word header content, while expected top header content was missing from the DOCX
+header. Packaging Phase 6B was stopped so the internal reviewed header/footer
+migration path could be inspected first.
+
+### Files inspected
+
+- `docs/agent/verification.md`
+- `docs/agent/reviewed-filtering-integration-readiness.md`
+- `docs/agent/reviewed-filtering-quality-evaluation.md`
+- `pdf2docx/page/LayoutAnalyzer.py`
+- `pdf2docx/common/docx.py`
+- `test/test_layout_analyzer.py`
+- `scripts/smoke_convert_pdf_to_docx.py`
+- `local_reports/quality_batch_convert/output_docx/input.docx`
+- `local_reports/phase4g/input/filtered-body-with-header-footer.docx`
+- `local_reports/phase4g/input3/filtered-body-with-header-footer.docx`
+
+### OpenXML inspection result
+
+- The default batch DOCX for `input.pdf` had no `word/header*.xml` or
+  `word/footer*.xml` parts, so its visual editing behavior is outside the
+  internal migration writer path.
+- The Phase 4G internal migration DOCX for `input.pdf` had top header text in
+  `word/header1.xml` and bottom footer/page-number placeholder text in
+  `word/footer1.xml`.
+- The Phase 4G internal migration DOCX for `input3.pdf` had footer text in
+  `word/footer1.xml` and an empty header part. The top repeated strings were
+  `review_only`/`action=review`, so they stayed blocked rather than becoming
+  representable header entries.
+
+Local ignored investigation reports:
+
+- `local_reports/header_footer_role_bug/docx-openxml-role-inspection.md`
+- `local_reports/header_footer_role_bug/header-footer-plan-inspection.json`
+- `local_reports/header_footer_role_bug/role-mapping-root-cause.md`
+
+### Root cause
+
+The current local OpenXML artifacts did not reproduce a completed
+header/footer role swap. However, the internal plan/writer path trusted
+`proposed_role` too much: a bottom-region candidate mislabeled as `header`, or
+a top-region candidate mislabeled as `footer`, could be represented and written
+to the wrong DOCX part.
+
+That was unsafe for the reviewed migration MVP because role assignment and
+y-position evidence must agree before content is moved into DOCX header/footer
+parts.
+
+### Fix summary
+
+- `build_docx_header_footer_generation_plan()` now fails closed when
+  header/footer/page-number roles conflict with top/bottom/body region
+  evidence.
+- `apply_header_footer_text_plan()` now validates plan `entries` before writing
+  and fails closed on role/target-part/region mismatches.
+- Page-number entries remain footer-targeted and bottom-region-only for the
+  current simple writer.
+- Default conversion behavior remains unchanged.
+- Public CLI/API remains unchanged and closed.
+
+### New regression tests
+
+- Role/region mismatch candidates fail closed at plan generation.
+- Writer blocks an unsafe plan that would put footer text in header XML or
+  header text in footer XML.
+- Role-specific OpenXML assertions verify top header text appears only in
+  header XML, bottom footer text appears only in footer XML, page-number
+  placeholder appears only in footer XML, and body text remains in body XML.
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "header_footer_role or default_policy_migration or word_field"
+```
+
+Result: passed. 16 selected tests and 4 subtests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 364 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Remaining risks
+
+- The default converter still does not migrate PDF headers/footers into Word
+  header/footer parts.
+- `input3.pdf` top repeated text remains blocked because it is review-only, not
+  an eligible header candidate under the current safety policy.
+- First-page, odd/even, section-scoped, image/logo, and paragraph continuation
+  behavior remains out of scope.

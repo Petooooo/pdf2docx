@@ -91,6 +91,14 @@ _PAGE_NUMBER_BEHAVIORS = {
     _PAGE_NUMBER_BEHAVIOR_WORD_FIELD,
     _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED,
 }
+_HEADER_FOOTER_PLAN_ROLE_HEADER = 'header'
+_HEADER_FOOTER_PLAN_ROLE_FOOTER = 'footer'
+_HEADER_FOOTER_PLAN_ROLE_PAGE_NUMBER = 'page_number'
+_HEADER_FOOTER_PLAN_TARGET_HEADER = 'header'
+_HEADER_FOOTER_PLAN_TARGET_FOOTER = 'footer'
+_HEADER_FOOTER_PLAN_REGION_TOP = 'top'
+_HEADER_FOOTER_PLAN_REGION_BODY = 'body'
+_HEADER_FOOTER_PLAN_REGION_BOTTOM = 'bottom'
 
 
 def apply_header_footer_text_plan(
@@ -129,6 +137,7 @@ def apply_header_footer_text_plan(
     recommendation = (plan or {}).get('recommendation') or {}
     header_footer_policy = (plan or {}).get('header_footer_policy') or {}
     policy_type = header_footer_policy.get('policy_type')
+    warnings.extend(_header_footer_plan_role_warnings(plan))
     if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
         warnings.append({'type': 'unsupported_page_number_behavior'})
     if policy_type and policy_type != 'default':
@@ -222,6 +231,85 @@ def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
         if text:
             values.append(text)
     return values
+
+
+def _header_footer_plan_role_warnings(plan: dict) -> list:
+    warnings = []
+    for entry in (plan or {}).get('entries', []) or []:
+        role = str(entry.get('role', '')).strip().lower()
+        target_part = str(entry.get('target_part', '')).strip().lower()
+        regions = {
+            str(region).strip().lower()
+            for region in entry.get('regions', []) or []
+            if str(region).strip()
+        }
+        if role == _HEADER_FOOTER_PLAN_ROLE_HEADER:
+            if target_part and target_part != _HEADER_FOOTER_PLAN_TARGET_HEADER:
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'header_entry_target_part_mismatch'))
+            if _header_footer_plan_regions_mismatch(
+                    regions,
+                    required=_HEADER_FOOTER_PLAN_REGION_TOP,
+                    forbidden={
+                        _HEADER_FOOTER_PLAN_REGION_BODY,
+                        _HEADER_FOOTER_PLAN_REGION_BOTTOM,
+                    }):
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'header_entry_region_mismatch'))
+        elif role == _HEADER_FOOTER_PLAN_ROLE_FOOTER:
+            if target_part and target_part != _HEADER_FOOTER_PLAN_TARGET_FOOTER:
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'footer_entry_target_part_mismatch'))
+            if _header_footer_plan_regions_mismatch(
+                    regions,
+                    required=_HEADER_FOOTER_PLAN_REGION_BOTTOM,
+                    forbidden={
+                        _HEADER_FOOTER_PLAN_REGION_BODY,
+                        _HEADER_FOOTER_PLAN_REGION_TOP,
+                    }):
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'footer_entry_region_mismatch'))
+        elif role == _HEADER_FOOTER_PLAN_ROLE_PAGE_NUMBER:
+            if target_part and target_part != _HEADER_FOOTER_PLAN_TARGET_FOOTER:
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'page_number_entry_target_part_mismatch'))
+            if _header_footer_plan_regions_mismatch(
+                    regions,
+                    required=_HEADER_FOOTER_PLAN_REGION_BOTTOM,
+                    forbidden={
+                        _HEADER_FOOTER_PLAN_REGION_BODY,
+                        _HEADER_FOOTER_PLAN_REGION_TOP,
+                    }):
+                warnings.append(_header_footer_plan_entry_warning(
+                    entry,
+                    'page_number_entry_region_mismatch'))
+    return warnings
+
+
+def _header_footer_plan_regions_mismatch(
+        regions: set,
+        required: str,
+        forbidden: set) -> bool:
+    return required not in regions or bool(regions.intersection(forbidden))
+
+
+def _header_footer_plan_entry_warning(entry: dict, warning_type: str) -> dict:
+    return {
+        'type': warning_type,
+        'candidate_id': entry.get('candidate_id', ''),
+        'role': entry.get('role', ''),
+        'target_part': entry.get('target_part', ''),
+        'regions': sorted({
+            str(region).strip().lower()
+            for region in entry.get('regions', []) or []
+            if str(region).strip()
+        }),
+    }
 
 
 def _append_page_number_fields(part, placeholders: list) -> int:
