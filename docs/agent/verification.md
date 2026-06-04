@@ -7242,3 +7242,148 @@ artifacts remain ignored.
 - Image/logo header/footer migration is not implemented.
 - First-page, odd/even, and section-scoped writer application remains
   fail-closed.
+
+## Header/Footer Pagination Follow-up
+
+### Observed issues
+
+Manual inspection after page-number fidelity improvements showed that layout and
+pagination fidelity were still imperfect:
+
+- DOCX body reflow can create extra Word pages, causing dynamic PAGE fields to
+  drift from original PDF page labels.
+- Footer text and the page-number field were written as separate paragraphs even
+  when their PDF bboxes shared the same bottom-line baseline.
+- First-page top clipping remained a visual concern.
+
+### Footer line grouping root cause
+
+The internal plan had individual `footer_items` and `page_number_items`, and the
+writer emitted one paragraph per item. For `input.pdf`, the left footer,
+center page number, and right footer share the same vertical center, but the
+writer produced three footer paragraphs. This made the page number appear one
+line lower and added avoidable footer height.
+
+### Implementation summary
+
+- Added internal `header_line_groups` and `footer_line_groups` to the generation
+  plan while preserving existing text/item fields.
+- Footer line groups can combine footer text and page-number items only within
+  the footer part when their y centers are close.
+- Header items group only with header items.
+- Line groups are sorted top-to-bottom; items are sorted left-to-right.
+- The writer now uses one paragraph per line group.
+- Grouped paragraphs use approximate center/right tab stops based on section
+  writable width.
+- `Page { PAGE }`, cached `123`, and `w:start="123"` remain preserved.
+- Default conversion remains unchanged.
+- Public CLI/API remains unchanged and closed.
+
+### Pagination drift explanation
+
+The Word PAGE field is dynamic Word pagination. It follows Word-generated page
+breaks, not source PDF page boundaries. Preserving `Page 123` and
+`w:start="123"` fixes the template and start number, but it cannot guarantee
+source PDF page labels when DOCX body layout reflows. Exact source-label
+preservation remains future work and likely requires stronger page-boundary
+fidelity, a source-static/page-label mode, or per-page section mapping.
+
+The plan summary now records:
+
+- `page_number_semantics`: `word_dynamic`
+- `page_number_drift_risk`: `depends_on_word_pagination`
+
+### Clipping follow-up
+
+- Generated header/footer paragraphs continue to normalize spacing before/after
+  to 0.
+- Generated header/footer XML does not contain unsafe exact line-height.
+- Same-line footer grouping reduces footer paragraph count and footer height
+  pressure.
+- No broad header/footer distance rewrite was added because changing section
+  margins can affect body layout and needs a separate explicit policy.
+
+Ignored local investigation reports:
+
+- `local_reports/header_footer_pagination_followup/footer-line-grouping-report.md`
+- `local_reports/header_footer_pagination_followup/pagination-drift-root-cause.md`
+- `local_reports/header_footer_pagination_followup/header-clipping-followup.md`
+
+### Tests added
+
+- Same-baseline footer text and page-number items group into one footer
+  paragraph.
+- Distinct footer y centers remain separate line groups.
+- Header line grouping does not pollute footer XML.
+- Plan summary documents dynamic Word PAGE semantics and drift risk.
+- Existing clipping, style, role, and word-field tests still inspect
+  role-specific OpenXML.
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "footer_line_grouping or pagination_drift or clipping or header_footer_fidelity or word_field"
+```
+
+Result: passed. 17 selected tests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 379 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Local reviewed smoke:
+
+```bash
+.venv/bin/python local_reports/reviewed_migration_batch_compare/batch_compare_reviewed_migration.py --overwrite --allow-source-tree --page-number-behavior word_field --default-output-dir local_reports/header_footer_pagination_followup/smoke/output_docx_default --reviewed-output-dir local_reports/header_footer_pagination_followup/smoke/output_docx_reviewed --report-dir local_reports/header_footer_pagination_followup/smoke/reports --log-dir local_reports/header_footer_pagination_followup/smoke/logs
+```
+
+Result: passed. Reviewed converted count was 1 and failed count was 0.
+
+Local OpenXML inspection confirmed:
+
+- footer paragraph count: 1
+- same paragraph contains left footer text, `Page ` prefix, PAGE field, cached
+  `123`, and right footer text
+- center/right tab stops are present
+- literal `<PAGE_NUMBER>` is absent
+- `w:pgNumType w:start="123"` is present
+- unsafe exact line-height is absent
+
+### Remaining limitations
+
+- Dynamic PAGE labels can still drift when Word pagination differs from source
+  PDF pagination.
+- Exact PDF absolute positioning is not implemented.
+- Static/source page-label mode is not implemented.
+- Per-page section mapping is not implemented.
+- Image/logo migration remains out of scope.

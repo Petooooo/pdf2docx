@@ -6147,6 +6147,140 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertNotIn('w:lineRule="exact"', openxml['header_xml'])
         self.assertNotIn('w:line=', openxml['header_xml'])
 
+    def test_footer_line_grouping_keeps_same_baseline_page_number_in_one_paragraph(self):
+        _require_docx_header_footer_support(self)
+        plan = _line_grouping_plan(
+            footer_rows=[
+                [
+                    (ROLE_FOOTER, 'LEFT FOOTER', [50, 760, 140, 778], 'left'),
+                    (ROLE_PAGE_NUMBER, 'Page 123', [260, 760, 340, 778], 'center'),
+                    (ROLE_FOOTER, 'RIGHT FOOTER', [460, 760, 560, 778], 'right'),
+                ],
+                [
+                    (ROLE_FOOTER, 'LEFT FOOTER', [50, 760, 140, 778], 'left'),
+                    (ROLE_PAGE_NUMBER, 'Page 124', [260, 760, 340, 778], 'center'),
+                    (ROLE_FOOTER, 'RIGHT FOOTER', [460, 760, 560, 778], 'right'),
+                ],
+                [
+                    (ROLE_FOOTER, 'LEFT FOOTER', [50, 760, 140, 778], 'left'),
+                    (ROLE_PAGE_NUMBER, 'Page 125', [260, 760, 340, 778], 'center'),
+                    (ROLE_FOOTER, 'RIGHT FOOTER', [460, 760, 560, 778], 'right'),
+                ],
+            ],
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+
+        self.assertEqual(plan['summary']['footer_line_group_count'], 1)
+        self.assertEqual(plan['summary']['page_number_grouped_with_footer_count'], 1)
+        self.assertEqual(plan['summary']['page_number_semantics'], 'word_dynamic')
+        self.assertEqual(
+            plan['summary']['page_number_drift_risk'],
+            'depends_on_word_pagination')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'grouped-footer.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        footer_paragraphs = _docx_xml_paragraphs(openxml['footer_xml'])
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['footer_paragraphs_written'], 1)
+        self.assertEqual(report['summary']['line_groups_written'], 1)
+        self.assertEqual(report['summary']['grouped_line_item_count'], 3)
+        self.assertEqual(report['summary']['page_number_fields_written'], 1)
+        self.assertGreaterEqual(report['summary']['tab_runs_written'], 2)
+        self.assertEqual(len(footer_paragraphs), 1)
+        self.assertIn('LEFT FOOTER', footer_paragraphs[0])
+        self.assertIn('RIGHT FOOTER', footer_paragraphs[0])
+        self.assertIn('Page ', footer_paragraphs[0])
+        self.assertIn(' PAGE ', footer_paragraphs[0])
+        self.assertIn('w:tabs', footer_paragraphs[0])
+        self.assertIn('w:tab', footer_paragraphs[0])
+        self.assertNotIn('LEFT FOOTER', openxml['header_xml'])
+        self.assertNotIn('RIGHT FOOTER', openxml['header_xml'])
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_footer_line_grouping_keeps_distinct_y_centers_separate(self):
+        plan = _line_grouping_plan(
+            footer_rows=[
+                [
+                    (ROLE_FOOTER, 'TOP FOOTER LINE', [50, 740, 180, 758], 'left'),
+                    (ROLE_PAGE_NUMBER, 'Page 10', [260, 780, 340, 798], 'center'),
+                ],
+                [
+                    (ROLE_FOOTER, 'TOP FOOTER LINE', [50, 740, 180, 758], 'left'),
+                    (ROLE_PAGE_NUMBER, 'Page 11', [260, 780, 340, 798], 'center'),
+                ],
+            ],
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+
+        self.assertEqual(plan['summary']['footer_line_group_count'], 2)
+        self.assertEqual(plan['summary']['page_number_grouped_with_footer_count'], 0)
+        group_sizes = [
+            group['item_count']
+            for group in plan['sections'][0]['footer_line_groups']
+        ]
+        self.assertEqual(group_sizes, [1, 1])
+
+    def test_header_footer_line_grouping_groups_header_items_only_with_header_items(self):
+        _require_docx_header_footer_support(self)
+        plan = _line_grouping_plan(
+            header_rows=[
+                [
+                    (ROLE_HEADER, 'LEFT HEADER', [50, 40, 150, 58], 'left'),
+                    (ROLE_HEADER, 'RIGHT HEADER', [430, 40, 560, 58], 'right'),
+                ],
+                [
+                    (ROLE_HEADER, 'LEFT HEADER', [50, 40, 150, 58], 'left'),
+                    (ROLE_HEADER, 'RIGHT HEADER', [430, 40, 560, 58], 'right'),
+                ],
+            ])
+
+        self.assertEqual(plan['summary']['header_line_group_count'], 1)
+        self.assertEqual(plan['summary']['footer_line_group_count'], 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'grouped-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        header_paragraphs = _docx_xml_paragraphs(openxml['header_xml'])
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['header_paragraphs_written'], 1)
+        self.assertEqual(len(header_paragraphs), 1)
+        self.assertIn('LEFT HEADER', header_paragraphs[0])
+        self.assertIn('RIGHT HEADER', header_paragraphs[0])
+        self.assertIn('w:tabs', header_paragraphs[0])
+        self.assertNotIn('LEFT HEADER', openxml['footer_xml'])
+        self.assertNotIn('RIGHT HEADER', openxml['footer_xml'])
+
+    def test_pagination_drift_summary_documents_word_dynamic_page_semantics(self):
+        plan = _line_grouping_plan(
+            footer_rows=[
+                [(ROLE_PAGE_NUMBER, 'Page 123', [260, 760, 340, 778], 'center')],
+                [(ROLE_PAGE_NUMBER, 'Page 124', [260, 760, 340, 778], 'center')],
+            ],
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+
+        self.assertEqual(plan['summary']['page_number_semantics'], 'word_dynamic')
+        self.assertEqual(
+            plan['summary']['page_number_drift_risk'],
+            'depends_on_word_pagination')
+
     def test_internal_docx_header_footer_word_page_field_writes_openxml(self):
         _require_docx_header_footer_support(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -9988,6 +10122,80 @@ def _docx_header_footer_policy_plan_for_page_texts(
         require_dynamic_page_number=require_dynamic_page_number)
 
 
+def _line_grouping_plan(
+        header_rows=None,
+        footer_rows=None,
+        page_number_behavior='placeholder_only',
+        require_dynamic_page_number=False):
+    header_rows = list(header_rows or [])
+    footer_rows = list(footer_rows or [])
+    page_count = max(len(header_rows), len(footer_rows), 1)
+    page_summaries = []
+    candidate_groups = {}
+
+    for page_index in range(page_count):
+        blocks = []
+        block_index = 0
+        rows = []
+        if page_index < len(header_rows):
+            rows.extend(header_rows[page_index])
+        if page_index < len(footer_rows):
+            rows.extend(footer_rows[page_index])
+        for role, text, bbox, alignment in rows:
+            region = REGION_TOP if role == ROLE_HEADER else REGION_BOTTOM
+            fingerprint = _summary_fingerprint(text, region)
+            blocks.append({
+                'page_index': page_index,
+                'block_index': block_index,
+                'fingerprint': fingerprint,
+                'region': region,
+                'text': text,
+                'bbox': bbox,
+                'style_properties': {
+                    'font_name': 'Arial',
+                    'font_size': 9,
+                    'flags': 2 if role == ROLE_PAGE_NUMBER else 0,
+                    'color': 0,
+                },
+                'alignment': alignment,
+            })
+            candidate_groups.setdefault(
+                (role, region, normalize_page_number(text), fingerprint),
+                []).append(page_index)
+            block_index += 1
+        page_summaries.append({
+            'page_index': page_index,
+            'width': 600,
+            'height': 800,
+            'text_blocks': blocks,
+        })
+
+    candidates = []
+    decisions = []
+    for index, ((role, region, _text, fingerprint), pages) in enumerate(
+            sorted(candidate_groups.items(), key=lambda item: item[0])):
+        candidate_id = f'line-group-{role}-{index}'
+        candidates.append(_dry_run_candidate(
+            candidate_id,
+            fingerprint,
+            role,
+            ACTION_WOULD_EXCLUDE,
+            pages,
+            [region]))
+        decisions.append(_review_decision(
+            candidate_id,
+            fingerprint,
+            'approve_exclude'))
+
+    return build_docx_header_footer_generation_plan(
+        page_summaries,
+        {'candidates': candidates},
+        {'decisions': decisions},
+        enabled=True,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
+
+
 def _run_synthetic_filtered_docx_with_header_footer_parts(
         pdf_path,
         review_decisions,
@@ -10274,6 +10482,10 @@ def _read_docx_openxml_parts(docx_path):
             for name in names
             if name.startswith('word/footer') and name.endswith('.xml'))
     return parts
+
+
+def _docx_xml_paragraphs(xml_text):
+    return re.findall(r'<w:p[\s\S]*?</w:p>', xml_text or '')
 
 
 def _docx_openxml_contains_page_field(xml_text):

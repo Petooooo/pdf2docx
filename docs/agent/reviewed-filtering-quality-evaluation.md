@@ -191,6 +191,22 @@ sequence is consecutive. Generated header/footer paragraphs now normalize
 before/after spacing and avoid exact line-height settings. Public/default
 conversion remains unchanged and closed.
 
+## Header/Footer Pagination Follow-Up
+
+Further inspection showed that same-baseline footer text and page-number items
+were being written as separate Word paragraphs. This made the page number appear
+one line lower and added avoidable footer height. The internal plan now groups
+same-line header/footer items by target part and vertical center, and the writer
+can emit one paragraph with center/right tab stops for left, center, and right
+items. This keeps same-line footer text and `Page { PAGE }` together when the
+bbox evidence is clear.
+
+Dynamic Word PAGE fields still follow Word pagination, not original PDF page
+boundaries. If DOCX body reflow creates extra Word pages, page labels can still
+drift even when the prefix and start number are preserved. Exact source PDF page
+label preservation remains future work and likely requires stronger page-boundary
+fidelity, a source-static label mode, or per-page section mapping.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

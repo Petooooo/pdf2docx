@@ -115,6 +115,7 @@ REVIEWED_FILTERING_MODES = {
 DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
+DOCX_HEADER_FOOTER_LINE_GROUP_Y_TOLERANCE = 3.0
 MIN_MEANINGFUL_TEXT_LENGTH = 12
 MIN_MEANINGFUL_WORDS = 2
 STRONG_SENTENCE_END_PUNC = '.．。?？!！'
@@ -6537,6 +6538,21 @@ def _docx_header_footer_generation_plan_result(
             if entry.get('role') == ROLE_PAGE_NUMBER and
             entry.get('page_number_template', {}).get('consecutive')),
         'page_number_start_number': _docx_header_footer_page_number_start(entries),
+        'page_number_semantics': (
+            'word_dynamic' if page_number_behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD else
+            'diagnostic_literal'),
+        'page_number_drift_risk': (
+            'depends_on_word_pagination'
+            if page_number_behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD else
+            'static_or_placeholder_diagnostic'),
+        'header_line_group_count': len(_docx_header_footer_line_groups(
+            entries,
+            {ROLE_HEADER})),
+        'footer_line_group_count': len(_docx_header_footer_line_groups(
+            entries,
+            {ROLE_FOOTER, ROLE_PAGE_NUMBER})),
+        'page_number_grouped_with_footer_count': (
+            _docx_header_footer_page_number_grouped_with_footer_count(entries)),
         'semantic_header_footer_text_count': sum(
             1 for entry in entries
             if entry.get('text_kind') == 'semantic_text'),
@@ -6893,6 +6909,12 @@ def _docx_header_footer_section_plan(
         'footer_items': _unique_entry_items(entries, ROLE_FOOTER),
         'page_number_items': _unique_entry_items(entries, ROLE_PAGE_NUMBER),
         'page_number_start_number': _docx_header_footer_page_number_start(entries),
+        'header_line_groups': _docx_header_footer_line_groups(
+            entries,
+            {ROLE_HEADER}),
+        'footer_line_groups': _docx_header_footer_line_groups(
+            entries,
+            {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
     }
 
 
@@ -6934,13 +6956,17 @@ def _unique_entry_items(entries: list, role: str) -> list:
 
 def _docx_header_footer_item_from_entry(entry: dict) -> dict:
     style = dict(entry.get('style') or {})
+    bbox = list(entry.get('bbox', []) or [])
+    x_center, y_center = _docx_header_footer_bbox_center(bbox)
     return {
         'text': normalize_text(entry.get('text', '')),
         'role': entry.get('role', ''),
         'target_part': entry.get('target_part', ''),
         'region': entry.get('region', ''),
         'regions': list(entry.get('regions', []) or []),
-        'bbox': list(entry.get('bbox', []) or []),
+        'bbox': bbox,
+        'x_center': x_center,
+        'y_center': y_center,
         'page_width': entry.get('page_width', 0.0),
         'page_height': entry.get('page_height', 0.0),
         'font_name': style.get('font_name', entry.get('font_name', '')),
@@ -6958,6 +6984,115 @@ def _docx_header_footer_entry_has_style_metadata(entry: dict) -> bool:
     return any(
         entry.get(key) not in ('', None, [])
         for key in ('font_name', 'font_size', 'bold', 'italic', 'color'))
+
+
+def _docx_header_footer_line_groups(entries: list, roles: set) -> list:
+    items = [
+        _docx_header_footer_item_from_entry(entry)
+        for entry in entries or []
+        if entry.get('role') in roles
+    ]
+    items = [
+        item for item in items
+        if normalize_text(item.get('text', ''))
+    ]
+    if not items:
+        return []
+
+    with_y = [
+        item for item in items
+        if item.get('y_center') is not None
+    ]
+    without_y = [
+        item for item in items
+        if item.get('y_center') is None
+    ]
+    with_y.sort(key=lambda item: (
+        float(item.get('y_center') or 0.0),
+        float(item.get('x_center') or 0.0),
+        normalize_text(item.get('text', ''))))
+
+    grouped = []
+    for item in with_y:
+        y_center = float(item.get('y_center') or 0.0)
+        target = None
+        for group in grouped:
+            if abs(y_center - float(group.get('y_center') or 0.0)) <= (
+                    _docx_header_footer_line_group_tolerance(group, item)):
+                target = group
+                break
+        if target is None:
+            target = {
+                'region': item.get('region', ''),
+                'y_center': y_center,
+                'items': [],
+                'diagnostics': [],
+            }
+            grouped.append(target)
+        target['items'].append(item)
+        target['y_center'] = round(
+            sum(float(member.get('y_center') or 0.0) for member in target['items']) /
+            len(target['items']),
+            2)
+
+    for item in without_y:
+        grouped.append({
+            'region': item.get('region', ''),
+            'y_center': None,
+            'items': [item],
+            'diagnostics': ['missing_y_center_not_grouped'],
+        })
+
+    for index, group in enumerate(grouped):
+        group['line_group_index'] = index
+        group['item_count'] = len(group.get('items', []) or [])
+        group['items'] = sorted(
+            group.get('items', []) or [],
+            key=lambda item: (
+                float(item.get('x_center') or 0.0),
+                normalize_text(item.get('text', ''))))
+        group['contains_page_number'] = any(
+            item.get('role') == ROLE_PAGE_NUMBER
+            for item in group['items'])
+        group['contains_semantic_footer'] = any(
+            item.get('role') == ROLE_FOOTER
+            for item in group['items'])
+    return grouped
+
+
+def _docx_header_footer_line_group_tolerance(group: dict, item: dict) -> float:
+    sizes = [
+        _docx_header_footer_optional_float(member.get('font_size'))
+        for member in (group.get('items', []) or []) + [item]
+    ]
+    sizes = [size for size in sizes if size]
+    if sizes:
+        return max(DOCX_HEADER_FOOTER_LINE_GROUP_Y_TOLERANCE, max(sizes) * 0.45)
+    return DOCX_HEADER_FOOTER_LINE_GROUP_Y_TOLERANCE
+
+
+def _docx_header_footer_bbox_center(bbox: list) -> tuple:
+    if not bbox or len(bbox) < 4:
+        return None, None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
+    except (TypeError, ValueError):
+        return None, None
+    return round((x0 + x1) / 2.0, 2), round((y0 + y1) / 2.0, 2)
+
+
+def _docx_header_footer_page_number_grouped_with_footer_count(entries: list) -> int:
+    count = 0
+    for group in _docx_header_footer_line_groups(
+            entries,
+            {ROLE_FOOTER, ROLE_PAGE_NUMBER}):
+        roles = {
+            item.get('role')
+            for item in group.get('items', []) or []
+        }
+        if ROLE_PAGE_NUMBER in roles and ROLE_FOOTER in roles:
+            count += 1
+    return count
 
 
 def _docx_header_footer_page_number_start(entries: list):

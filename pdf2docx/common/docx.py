@@ -12,7 +12,7 @@ except ImportError:
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml.shape import CT_Picture
 from docx.oxml.xmlchemy import BaseOxmlElement, OneAndOnlyOne
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_TAB_ALIGNMENT
 from docx.image.exceptions import UnrecognizedImageError
 from docx.table import _Cell
 from docx.opc.constants import RELATIONSHIP_TYPE
@@ -138,6 +138,10 @@ def apply_header_footer_text_plan(
                 'page_number_prefix_suffix_runs_written': 0,
                 'page_number_start_number': None,
                 'page_number_start_applied': False,
+                'line_groups_written': 0,
+                'grouped_line_item_count': 0,
+                'tabbed_paragraphs_written': 0,
+                'tab_runs_written': 0,
             },
             'safety_warnings': [],
         }
@@ -186,6 +190,10 @@ def apply_header_footer_text_plan(
     page_number_prefix_suffix_runs_written = 0
     page_number_start_number = None
     page_number_start_applied = False
+    line_groups_written = 0
+    grouped_line_item_count = 0
+    tabbed_paragraphs_written = 0
+    tab_runs_written = 0
     if sections and plan_sections and not warnings:
         section = sections[0]
         section_plan = plan_sections[0]
@@ -201,15 +209,46 @@ def apply_header_footer_text_plan(
             section_plan,
             'page_number_items',
             'page_number_placeholders')
-        if page_number_behavior in {
-                _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
-                _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
-            footer_items.extend(page_number_items)
-            page_number_placeholders_written = len(page_number_items)
-        header_result = _replace_header_footer_part_items(section.header, header_items)
-        footer_result = _replace_header_footer_part_items(section.footer, footer_items)
+        header_groups = _header_footer_plan_line_groups(
+            section_plan,
+            'header_line_groups')
+        footer_groups = _header_footer_plan_line_groups(
+            section_plan,
+            'footer_line_groups')
+        page_number_start_number = _page_number_start_number(
+            page_number_items,
+            section_plan)
+        if header_groups:
+            header_result = _replace_header_footer_part_line_groups(
+                section.header,
+                header_groups,
+                section,
+                page_number_behavior,
+                page_number_start_number)
+        else:
+            header_result = _replace_header_footer_part_items(section.header, header_items)
+        if footer_groups:
+            footer_result = _replace_header_footer_part_line_groups(
+                section.footer,
+                footer_groups,
+                section,
+                page_number_behavior,
+                page_number_start_number)
+        else:
+            if page_number_behavior in {
+                    _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+                    _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
+                footer_items.extend(page_number_items)
+                page_number_placeholders_written = len(page_number_items)
+            footer_result = _replace_header_footer_part_items(section.footer, footer_items)
         header_count = header_result['paragraphs_written']
         footer_count = footer_result['paragraphs_written']
+        page_number_fields_written += (
+            header_result['fields_written'] +
+            footer_result['fields_written'])
+        page_number_placeholders_written += (
+            header_result['page_number_placeholders_written'] +
+            footer_result['page_number_placeholders_written'])
         styled_runs_written += (
             header_result['styled_runs_written'] +
             footer_result['styled_runs_written'])
@@ -222,27 +261,40 @@ def apply_header_footer_text_plan(
         paragraph_spacing_normalized_count += (
             header_result['paragraph_spacing_normalized_count'] +
             footer_result['paragraph_spacing_normalized_count'])
+        page_number_prefix_suffix_runs_written += (
+            header_result['prefix_suffix_runs_written'] +
+            footer_result['prefix_suffix_runs_written'])
+        line_groups_written += (
+            header_result['line_groups_written'] +
+            footer_result['line_groups_written'])
+        grouped_line_item_count += (
+            header_result['grouped_line_item_count'] +
+            footer_result['grouped_line_item_count'])
+        tabbed_paragraphs_written += (
+            header_result['tabbed_paragraphs_written'] +
+            footer_result['tabbed_paragraphs_written'])
+        tab_runs_written += (
+            header_result['tab_runs_written'] +
+            footer_result['tab_runs_written'])
         if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
-            page_number_start_number = _page_number_start_number(
-                page_number_items,
-                section_plan)
             page_number_start_applied = _set_section_page_number_start(
                 section,
                 page_number_start_number)
-            page_number_result = _append_page_number_fields(
-                section.footer,
-                page_number_items,
-                page_number_start_number)
-            page_number_fields_written = page_number_result['fields_written']
-            footer_count += page_number_fields_written
-            styled_runs_written += page_number_result['styled_runs_written']
-            style_properties_applied += page_number_result['style_properties_applied']
-            alignment_paragraphs_written += (
-                page_number_result['alignment_paragraphs_written'])
-            paragraph_spacing_normalized_count += (
-                page_number_result['paragraph_spacing_normalized_count'])
-            page_number_prefix_suffix_runs_written += (
-                page_number_result['prefix_suffix_runs_written'])
+            if not footer_groups:
+                page_number_result = _append_page_number_fields(
+                    section.footer,
+                    page_number_items,
+                    page_number_start_number)
+                page_number_fields_written += page_number_result['fields_written']
+                footer_count += page_number_result['fields_written']
+                styled_runs_written += page_number_result['styled_runs_written']
+                style_properties_applied += page_number_result['style_properties_applied']
+                alignment_paragraphs_written += (
+                    page_number_result['alignment_paragraphs_written'])
+                paragraph_spacing_normalized_count += (
+                    page_number_result['paragraph_spacing_normalized_count'])
+                page_number_prefix_suffix_runs_written += (
+                    page_number_result['prefix_suffix_runs_written'])
 
     return {
         'enabled': True,
@@ -265,6 +317,10 @@ def apply_header_footer_text_plan(
             'page_number_prefix_suffix_runs_written': page_number_prefix_suffix_runs_written,
             'page_number_start_number': page_number_start_number,
             'page_number_start_applied': page_number_start_applied,
+            'line_groups_written': line_groups_written,
+            'grouped_line_item_count': grouped_line_item_count,
+            'tabbed_paragraphs_written': tabbed_paragraphs_written,
+            'tab_runs_written': tab_runs_written,
         },
         'safety_warnings': warnings,
         'plan_safety_warnings': plan_safety_warnings,
@@ -312,6 +368,24 @@ def _header_footer_plan_items(
         {'text': text}
         for text in _header_footer_plan_texts(section_plan, text_key)
     ]
+
+
+def _header_footer_plan_line_groups(section_plan: dict, key: str) -> list:
+    groups = []
+    for group in section_plan.get(key, []) or []:
+        if not isinstance(group, dict):
+            continue
+        items = [
+            _normalize_header_footer_plan_item(item)
+            for item in group.get('items', []) or []
+        ]
+        items = [item for item in items if item.get('text')]
+        if not items:
+            continue
+        copied = dict(group)
+        copied['items'] = items
+        groups.append(copied)
+    return groups
 
 
 def _normalize_header_footer_plan_item(value) -> dict:
@@ -508,6 +582,55 @@ def _replace_header_footer_part_items(part, items: list) -> dict:
     return result
 
 
+def _replace_header_footer_part_line_groups(
+        part,
+        line_groups: list,
+        section,
+        page_number_behavior: str,
+        page_number_start_number=None) -> dict:
+    result = _header_footer_write_result()
+    paragraphs = list(part.paragraphs)
+    for index, group in enumerate(line_groups or []):
+        items = [
+            _normalize_header_footer_plan_item(item)
+            for item in group.get('items', []) or []
+        ]
+        items = [item for item in items if item.get('text')]
+        if not items:
+            continue
+        paragraph = paragraphs[index] if index < len(paragraphs) else part.add_paragraph()
+        _clear_paragraph_text(paragraph)
+        result['paragraph_spacing_normalized_count'] += (
+            _prepare_header_footer_paragraph(paragraph))
+        tab_count = _apply_header_footer_line_group_tabs(
+            paragraph,
+            section,
+            items)
+        if tab_count:
+            result['tabbed_paragraphs_written'] += 1
+        result['line_groups_written'] += 1
+        result['grouped_line_item_count'] += len(items)
+        previous_alignment = None
+        wrote_any = False
+        for item in _ordered_line_group_items(items):
+            tab_runs = _tabs_before_line_group_item(
+                paragraph,
+                item,
+                previous_alignment,
+                wrote_any)
+            result['tab_runs_written'] += tab_runs
+            item_result = _write_header_footer_item_runs(
+                paragraph,
+                item,
+                page_number_behavior,
+                page_number_start_number)
+            _merge_header_footer_write_result(result, item_result)
+            previous_alignment = _line_group_item_alignment(item)
+            wrote_any = True
+        result['paragraphs_written'] += 1
+    return result
+
+
 def _header_footer_write_result() -> dict:
     return {
         'paragraphs_written': 0,
@@ -517,6 +640,11 @@ def _header_footer_write_result() -> dict:
         'alignment_paragraphs_written': 0,
         'paragraph_spacing_normalized_count': 0,
         'prefix_suffix_runs_written': 0,
+        'page_number_placeholders_written': 0,
+        'line_groups_written': 0,
+        'grouped_line_item_count': 0,
+        'tabbed_paragraphs_written': 0,
+        'tab_runs_written': 0,
     }
 
 
@@ -531,6 +659,124 @@ def _prepare_header_footer_paragraph(paragraph) -> int:
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.line_spacing = None
     return 1
+
+
+def _apply_header_footer_line_group_tabs(paragraph, section, items: list) -> int:
+    alignments = {
+        _line_group_item_alignment(item)
+        for item in items or []
+    }
+    tab_count = 0
+    writable_width = _section_writable_width(section)
+    if writable_width <= 0:
+        return 0
+    tab_stops = paragraph.paragraph_format.tab_stops
+    if 'center' in alignments:
+        tab_stops.add_tab_stop(int(writable_width / 2), WD_TAB_ALIGNMENT.CENTER)
+        tab_count += 1
+    if 'right' in alignments:
+        tab_stops.add_tab_stop(int(writable_width), WD_TAB_ALIGNMENT.RIGHT)
+        tab_count += 1
+    if tab_count:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    return tab_count
+
+
+def _section_writable_width(section) -> int:
+    try:
+        return int(section.page_width - section.left_margin - section.right_margin)
+    except Exception:
+        return int(Pt(468))
+
+
+def _ordered_line_group_items(items: list) -> list:
+    return sorted(
+        items or [],
+        key=lambda item: (
+            _alignment_sort_key(_line_group_item_alignment(item)),
+            _header_footer_optional_float(item.get('x_center')) or 0.0,
+            str(item.get('text', ''))))
+
+
+def _alignment_sort_key(alignment: str) -> int:
+    return {
+        'left': 0,
+        'unknown': 0,
+        'center': 1,
+        'right': 2,
+    }.get(alignment, 0)
+
+
+def _line_group_item_alignment(item: dict) -> str:
+    alignment = str((item or {}).get('alignment', '')).strip().lower()
+    return alignment if alignment in {'left', 'center', 'right'} else 'unknown'
+
+
+def _tabs_before_line_group_item(
+        paragraph,
+        item: dict,
+        previous_alignment: str,
+        wrote_any: bool) -> int:
+    alignment = _line_group_item_alignment(item)
+    if alignment == 'center':
+        paragraph.add_run().add_tab()
+        return 1
+    if alignment == 'right':
+        paragraph.add_run().add_tab()
+        return 1
+    if wrote_any and previous_alignment in {'left', 'unknown'}:
+        paragraph.add_run(' ')
+    return 0
+
+
+def _write_header_footer_item_runs(
+        paragraph,
+        item: dict,
+        page_number_behavior: str,
+        page_number_start_number=None) -> dict:
+    result = _header_footer_write_result()
+    role = str((item or {}).get('role', '')).strip().lower()
+    text = str((item or {}).get('text', '')).strip()
+    if role == _HEADER_FOOTER_PLAN_ROLE_PAGE_NUMBER:
+        if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+            template = _page_number_template(item)
+            prefix = template.get('prefix', '')
+            suffix = template.get('suffix', '')
+            if prefix:
+                _write_styled_text_run(paragraph, prefix, item, result)
+                result['prefix_suffix_runs_written'] += 1
+            run = add_page_number_field(
+                paragraph,
+                display_text=str(page_number_start_number or 1))
+            style_count = _apply_header_footer_run_style(run, item)
+            if style_count:
+                result['styled_runs_written'] += 1
+                result['style_properties_applied'] += style_count
+            result['fields_written'] += 1
+            if suffix:
+                _write_styled_text_run(paragraph, suffix, item, result)
+                result['prefix_suffix_runs_written'] += 1
+            return result
+        _write_styled_text_run(paragraph, text, item, result)
+        result['page_number_placeholders_written'] += 1
+        return result
+
+    _write_styled_text_run(paragraph, text, item, result)
+    return result
+
+
+def _write_styled_text_run(paragraph, text: str, item: dict, result: dict):
+    run = paragraph.add_run(text)
+    style_count = _apply_header_footer_run_style(run, item)
+    if style_count:
+        result['styled_runs_written'] += 1
+        result['style_properties_applied'] += style_count
+
+
+def _merge_header_footer_write_result(target: dict, source: dict):
+    for key in source or {}:
+        if key in target and isinstance(target[key], int):
+            target[key] += source[key]
 
 
 def _apply_header_footer_paragraph_alignment(paragraph, item: dict) -> int:
