@@ -175,6 +175,22 @@ hints when they are available. `word_field` remains explicit and internal-only;
 positioning, images/logos, and non-default header/footer policies remain out of
 scope and fail closed.
 
+## Header/Footer Fidelity Follow-Up
+
+Further local inspection found three remaining fidelity questions: whether
+header/footer text was actually gray, whether `Page 123`-style page-number
+templates could be preserved, and whether generated header text was vulnerable
+to clipping.
+
+OpenXML inspection showed that the latest reviewed smoke output wrote black
+`w:color` values, so the gray appearance is consistent with Word's normal
+header/footer dimming while the body is active. The internal page-number plan
+now preserves simple consecutive templates such as `Page 123`, writes the
+prefix around a Word PAGE field, and sets a safe section start number when the
+sequence is consecutive. Generated header/footer paragraphs now normalize
+before/after spacing and avoid exact line-height settings. Public/default
+conversion remains unchanged and closed.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

@@ -134,6 +134,10 @@ def apply_header_footer_text_plan(
                 'styled_runs_written': 0,
                 'style_properties_applied': 0,
                 'alignment_paragraphs_written': 0,
+                'paragraph_spacing_normalized_count': 0,
+                'page_number_prefix_suffix_runs_written': 0,
+                'page_number_start_number': None,
+                'page_number_start_applied': False,
             },
             'safety_warnings': [],
         }
@@ -178,6 +182,10 @@ def apply_header_footer_text_plan(
     styled_runs_written = 0
     style_properties_applied = 0
     alignment_paragraphs_written = 0
+    paragraph_spacing_normalized_count = 0
+    page_number_prefix_suffix_runs_written = 0
+    page_number_start_number = None
+    page_number_start_applied = False
     if sections and plan_sections and not warnings:
         section = sections[0]
         section_plan = plan_sections[0]
@@ -211,16 +219,30 @@ def apply_header_footer_text_plan(
         alignment_paragraphs_written += (
             header_result['alignment_paragraphs_written'] +
             footer_result['alignment_paragraphs_written'])
+        paragraph_spacing_normalized_count += (
+            header_result['paragraph_spacing_normalized_count'] +
+            footer_result['paragraph_spacing_normalized_count'])
         if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+            page_number_start_number = _page_number_start_number(
+                page_number_items,
+                section_plan)
+            page_number_start_applied = _set_section_page_number_start(
+                section,
+                page_number_start_number)
             page_number_result = _append_page_number_fields(
                 section.footer,
-                page_number_items)
+                page_number_items,
+                page_number_start_number)
             page_number_fields_written = page_number_result['fields_written']
             footer_count += page_number_fields_written
             styled_runs_written += page_number_result['styled_runs_written']
             style_properties_applied += page_number_result['style_properties_applied']
             alignment_paragraphs_written += (
                 page_number_result['alignment_paragraphs_written'])
+            paragraph_spacing_normalized_count += (
+                page_number_result['paragraph_spacing_normalized_count'])
+            page_number_prefix_suffix_runs_written += (
+                page_number_result['prefix_suffix_runs_written'])
 
     return {
         'enabled': True,
@@ -239,6 +261,10 @@ def apply_header_footer_text_plan(
             'styled_runs_written': styled_runs_written,
             'style_properties_applied': style_properties_applied,
             'alignment_paragraphs_written': alignment_paragraphs_written,
+            'paragraph_spacing_normalized_count': paragraph_spacing_normalized_count,
+            'page_number_prefix_suffix_runs_written': page_number_prefix_suffix_runs_written,
+            'page_number_start_number': page_number_start_number,
+            'page_number_start_applied': page_number_start_applied,
         },
         'safety_warnings': warnings,
         'plan_safety_warnings': plan_safety_warnings,
@@ -300,6 +326,10 @@ def _normalize_header_footer_plan_item(value) -> dict:
             item.setdefault('color', style.get('color'))
         item['text'] = str(item.get('text', '')).strip()
         item['alignment'] = str(item.get('alignment', '')).strip().lower()
+        if isinstance(item.get('page_number_template'), dict):
+            item['page_number_template'] = dict(item.get('page_number_template') or {})
+        else:
+            item['page_number_template'] = {}
         return item
     return {'text': str(value or '').strip()}
 
@@ -383,25 +413,49 @@ def _header_footer_plan_entry_warning(entry: dict, warning_type: str) -> dict:
     }
 
 
-def _append_page_number_fields(part, items: list) -> dict:
+def _append_page_number_fields(
+        part,
+        items: list,
+        page_number_start_number=None) -> dict:
     result = _header_footer_write_result()
     for value in items or []:
         item = _normalize_header_footer_plan_item(value)
         if not item.get('text'):
             continue
         paragraph = part.add_paragraph()
+        result['paragraph_spacing_normalized_count'] += (
+            _prepare_header_footer_paragraph(paragraph))
         result['alignment_paragraphs_written'] += (
             _apply_header_footer_paragraph_alignment(paragraph, item))
-        run = add_page_number_field(paragraph)
+        template = _page_number_template(item)
+        prefix = template.get('prefix', '')
+        suffix = template.get('suffix', '')
+        if prefix:
+            prefix_run = paragraph.add_run(prefix)
+            style_count = _apply_header_footer_run_style(prefix_run, item)
+            if style_count:
+                result['styled_runs_written'] += 1
+                result['style_properties_applied'] += style_count
+            result['prefix_suffix_runs_written'] += 1
+        run = add_page_number_field(
+            paragraph,
+            display_text=str(page_number_start_number or 1))
         style_count = _apply_header_footer_run_style(run, item)
         if style_count:
             result['styled_runs_written'] += 1
             result['style_properties_applied'] += style_count
+        if suffix:
+            suffix_run = paragraph.add_run(suffix)
+            style_count = _apply_header_footer_run_style(suffix_run, item)
+            if style_count:
+                result['styled_runs_written'] += 1
+                result['style_properties_applied'] += style_count
+            result['prefix_suffix_runs_written'] += 1
         result['fields_written'] += 1
     return result
 
 
-def add_page_number_field(paragraph):
+def add_page_number_field(paragraph, display_text='1'):
     '''Append an internal Word PAGE field to a paragraph.
 
     This helper is intentionally low-level and internal. It is not used by the
@@ -417,7 +471,7 @@ def add_page_number_field(paragraph):
     separate = OxmlElement('w:fldChar')
     separate.set(qn('w:fldCharType'), 'separate')
     text = OxmlElement('w:t')
-    text.text = '1'
+    text.text = str(display_text or '1')
     end = OxmlElement('w:fldChar')
     end.set(qn('w:fldCharType'), 'end')
     for element in (begin, instr, separate, text, end):
@@ -441,6 +495,8 @@ def _replace_header_footer_part_items(part, items: list) -> dict:
             continue
         paragraph = paragraphs[index] if index < len(paragraphs) else part.add_paragraph()
         _clear_paragraph_text(paragraph)
+        result['paragraph_spacing_normalized_count'] += (
+            _prepare_header_footer_paragraph(paragraph))
         result['alignment_paragraphs_written'] += (
             _apply_header_footer_paragraph_alignment(paragraph, item))
         run = paragraph.add_run(text)
@@ -459,6 +515,8 @@ def _header_footer_write_result() -> dict:
         'styled_runs_written': 0,
         'style_properties_applied': 0,
         'alignment_paragraphs_written': 0,
+        'paragraph_spacing_normalized_count': 0,
+        'prefix_suffix_runs_written': 0,
     }
 
 
@@ -466,6 +524,13 @@ def _clear_paragraph_text(paragraph):
     for child in list(paragraph._p):
         if child.tag != qn('w:pPr'):
             paragraph._p.remove(child)
+
+
+def _prepare_header_footer_paragraph(paragraph) -> int:
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = None
+    return 1
 
 
 def _apply_header_footer_paragraph_alignment(paragraph, item: dict) -> int:
@@ -556,6 +621,56 @@ def _header_footer_hex_color(value) -> str:
     if len(text) == 6 and re.fullmatch(r'[0-9A-F]{6}', text):
         return text
     return ''
+
+
+def _page_number_template(item: dict) -> dict:
+    template = (item or {}).get('page_number_template') or {}
+    if not isinstance(template, dict):
+        return {}
+    if template.get('supported') and template.get('consecutive'):
+        return template
+    return {}
+
+
+def _page_number_start_number(items: list, section_plan: dict = None):
+    values = []
+    for value in items or []:
+        item = _normalize_header_footer_plan_item(value)
+        template = _page_number_template(item)
+        start = _header_footer_optional_int(template.get('start_number'))
+        if start and start > 0:
+            values.append(start)
+    section_start = _header_footer_optional_int(
+        (section_plan or {}).get('page_number_start_number'))
+    if section_start and section_start > 0:
+        values.append(section_start)
+    if len(set(values)) == 1:
+        return values[0]
+    return None
+
+
+def _header_footer_optional_int(value):
+    if value in ('', None):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_section_page_number_start(section, start_number) -> bool:
+    start = _header_footer_optional_int(start_number)
+    if not start or start <= 0:
+        return False
+    sect_pr = getattr(section, '_sectPr', None)
+    if sect_pr is None:
+        return False
+    pg_num_type = sect_pr.find(qn('w:pgNumType'))
+    if pg_num_type is None:
+        pg_num_type = OxmlElement('w:pgNumType')
+        sect_pr.append(pg_num_type)
+    pg_num_type.set(qn('w:start'), str(start))
+    return True
 
 
 def reset_paragraph_format(p, line_spacing:float=1.05):

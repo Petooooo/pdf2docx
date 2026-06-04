@@ -77,9 +77,11 @@ build_table_delta_investigation_report = LayoutAnalyzer.build_table_delta_invest
 reviewed_filtering_config_to_document_parse_settings = LayoutAnalyzer.reviewed_filtering_config_to_document_parse_settings
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
 infer_docx_header_footer_alignment = LayoutAnalyzer.infer_docx_header_footer_alignment
+infer_docx_page_number_template_sequence = LayoutAnalyzer.infer_docx_page_number_template_sequence
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
+parse_docx_page_number_template = LayoutAnalyzer.parse_docx_page_number_template
 parse_exclusion_review_markdown = LayoutAnalyzer.parse_exclusion_review_markdown
 parse_table_geometry_visual_review_markdown = LayoutAnalyzer.parse_table_geometry_visual_review_markdown
 text_block_records = LayoutAnalyzer.text_block_records
@@ -5861,6 +5863,289 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('PLAIN INTERNAL HEADER', openxml['header_xml'])
         self.assertEqual(report['summary']['styled_runs_written'], 0)
         self.assertEqual(report['summary']['alignment_paragraphs_written'], 0)
+
+    def test_header_footer_fidelity_color_preserves_black_zero_and_missing_color(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'header_items': [{
+                    'text': 'BLACK HEADER',
+                    'alignment': 'left',
+                    'font_size': 10,
+                    'color': 0,
+                }],
+                'footer_items': [{
+                    'text': 'MISSING COLOR FOOTER',
+                    'alignment': 'right',
+                    'font_size': 10,
+                }],
+            }],
+            'entries': [
+                {
+                    'candidate_id': 'black-header',
+                    'role': ROLE_HEADER,
+                    'target_part': 'header',
+                    'regions': [REGION_TOP],
+                    'text': 'BLACK HEADER',
+                },
+                {
+                    'candidate_id': 'missing-color-footer',
+                    'role': ROLE_FOOTER,
+                    'target_part': 'footer',
+                    'regions': [REGION_BOTTOM],
+                    'text': 'MISSING COLOR FOOTER',
+                },
+            ],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'black-color-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('w:color w:val="000000"', openxml['header_xml'])
+        self.assertNotIn('w:color w:val="666666"', openxml['footer_xml'])
+        self.assertNotIn('w:color w:val="808080"', openxml['footer_xml'])
+
+    def test_page_number_template_parse_supports_simple_arabic_templates(self):
+        self.assertEqual(
+            parse_docx_page_number_template('Page 123'),
+            {
+                'raw_text': 'Page 123',
+                'supported': True,
+                'prefix': 'Page ',
+                'number_text': '123',
+                'number': 123,
+                'suffix': '',
+                'start_number': 123,
+                'number_style': 'arabic',
+            })
+        self.assertEqual(
+            parse_docx_page_number_template('- 123 -')['prefix'],
+            '- ')
+        self.assertEqual(
+            parse_docx_page_number_template('- 123 -')['suffix'],
+            ' -')
+        self.assertEqual(
+            parse_docx_page_number_template('123')['prefix'],
+            '')
+        self.assertFalse(
+            parse_docx_page_number_template('Page 1 of 10')['supported'])
+
+    def test_page_number_template_sequence_detects_consecutive_and_gaps(self):
+        consecutive = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123'},
+            {'page_index': 1, 'text': 'Page 124'},
+            {'page_index': 2, 'text': 'Page 125'},
+        ])
+        gap = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123'},
+            {'page_index': 1, 'text': 'Page 125'},
+        ])
+
+        self.assertTrue(consecutive['supported'])
+        self.assertTrue(consecutive['consecutive'])
+        self.assertEqual(consecutive['start_number'], 123)
+        self.assertEqual(consecutive['prefix'], 'Page ')
+        self.assertFalse(gap['consecutive'])
+        self.assertEqual(gap['reason'], 'non_consecutive_page_number_sequence')
+
+    def test_page_number_template_generation_plan_carries_prefix_and_start(self):
+        page_summaries = []
+        fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
+        for index, text in enumerate(['Page 123', 'Page 124', 'Page 125']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [{
+                    'page_index': index,
+                    'block_index': 0,
+                    'fingerprint': fingerprint,
+                    'region': REGION_BOTTOM,
+                    'text': text,
+                    'bbox': [260, 760, 340, 778],
+                    'style_properties': {
+                        'font_name': 'Arial,Italic',
+                        'font_size': 9,
+                        'flags': 2,
+                        'color': 0,
+                    },
+                }],
+            })
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'page-number',
+                    fingerprint,
+                    ROLE_PAGE_NUMBER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0, 1, 2],
+                    [REGION_BOTTOM]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision('page-number', fingerprint, 'approve_exclude'),
+            ],
+        }
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        item = plan['sections'][0]['page_number_items'][0]
+        template = item['page_number_template']
+
+        self.assertEqual(plan['summary']['page_number_template_count'], 1)
+        self.assertEqual(plan['summary']['page_number_consecutive_template_count'], 1)
+        self.assertEqual(plan['summary']['page_number_start_number'], 123)
+        self.assertEqual(plan['sections'][0]['page_number_start_number'], 123)
+        self.assertTrue(template['consecutive'])
+        self.assertEqual(template['prefix'], 'Page ')
+        self.assertEqual(template['start_number'], 123)
+        self.assertEqual(item['color'], '#000000')
+        self.assertTrue(item['italic'])
+
+    def test_page_number_template_word_field_writes_prefix_and_start_openxml(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'page_number_placeholders': [PAGE_NUMBER_PLACEHOLDER],
+                'page_number_start_number': 123,
+                'page_number_items': [{
+                    'text': PAGE_NUMBER_PLACEHOLDER,
+                    'role': ROLE_PAGE_NUMBER,
+                    'target_part': 'footer',
+                    'regions': [REGION_BOTTOM],
+                    'alignment': 'center',
+                    'font_name': 'Arial',
+                    'font_size': 9,
+                    'italic': True,
+                    'color': '#000000',
+                    'page_number_template': {
+                        'raw_text': 'Page 123',
+                        'supported': True,
+                        'consecutive': True,
+                        'prefix': 'Page ',
+                        'number': 123,
+                        'number_text': '123',
+                        'suffix': '',
+                        'start_number': 123,
+                        'number_style': 'arabic',
+                    },
+                }],
+            }],
+            'entries': [{
+                'candidate_id': 'page-number',
+                'role': ROLE_PAGE_NUMBER,
+                'target_part': 'footer',
+                'regions': [REGION_BOTTOM],
+                'text': PAGE_NUMBER_PLACEHOLDER,
+            }],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'page-number-template.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['page_number_start_number'], 123)
+        self.assertTrue(report['summary']['page_number_start_applied'])
+        self.assertEqual(
+            report['summary']['page_number_prefix_suffix_runs_written'],
+            1)
+        self.assertIn('Page ', openxml['footer_xml'])
+        self.assertIn('w:instrText', openxml['footer_xml'])
+        self.assertIn(' PAGE ', openxml['footer_xml'])
+        self.assertIn('w:t>123</w:t', openxml['footer_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertIn('w:i', openxml['footer_xml'])
+        self.assertIn('w:sz w:val="18"', openxml['footer_xml'])
+        self.assertIn('w:color w:val="000000"', openxml['footer_xml'])
+
+    def test_header_footer_clipping_avoids_exact_line_spacing_for_large_text(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'header_items': [{
+                    'text': 'Chapter 13 HEADERS AND FOOTERS',
+                    'alignment': 'left',
+                    'font_size': 18,
+                    'bold': True,
+                    'color': '#000000',
+                }],
+            }],
+            'entries': [{
+                'candidate_id': 'large-header',
+                'role': ROLE_HEADER,
+                'target_part': 'header',
+                'regions': [REGION_TOP],
+                'text': 'Chapter 13 HEADERS AND FOOTERS',
+            }],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'large-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertGreaterEqual(
+            report['summary']['paragraph_spacing_normalized_count'],
+            1)
+        self.assertIn('Chapter 13 HEADERS AND FOOTERS', openxml['header_xml'])
+        self.assertIn('w:spacing', openxml['header_xml'])
+        self.assertIn('w:before="0"', openxml['header_xml'])
+        self.assertIn('w:after="0"', openxml['header_xml'])
+        self.assertNotIn('w:lineRule="exact"', openxml['header_xml'])
+        self.assertNotIn('w:line=', openxml['header_xml'])
 
     def test_internal_docx_header_footer_word_page_field_writes_openxml(self):
         _require_docx_header_footer_support(self)

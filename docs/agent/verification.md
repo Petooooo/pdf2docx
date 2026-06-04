@@ -7111,3 +7111,134 @@ Result: passed. Local artifacts remain ignored.
 - First-page, odd/even, and section-scoped writer application remains
   fail-closed.
 - `placeholder_only` and `static_text` remain diagnostic literal modes.
+
+## Header/Footer Fidelity Follow-up
+
+### Observed issues
+
+Manual inspection after the first fidelity improvement showed three remaining
+questions:
+
+- Header/footer text appeared gray.
+- `Page 123`-style page numbers became a bare PAGE field starting at `1`.
+- First-page header text appeared slightly clipped near the top.
+
+### Color investigation result
+
+- Latest reviewed smoke output contains `w:color w:val="000000"` in header XML.
+- Footer text and page-number runs also contain `w:color w:val="000000"`.
+- PDF layout-analysis metadata exposes black as color value `0`, and the
+  internal plan preserves it as `#000000`.
+- The gray appearance is consistent with Word's normal dimmed display for
+  header/footer content while editing the document body, not an incorrect gray
+  run color.
+
+### Page-number template/start result
+
+- The local sample page-number candidate has a consecutive sequence:
+  `Page 123`, `Page 124`, through `Page 134`.
+- The internal plan now parses simple one-number templates and records prefix,
+  suffix, start number, sequence numbers, and consecutive status.
+- For explicit `word_field`, the writer now emits prefix/suffix runs around the
+  PAGE field and sets section page numbering start when the sequence is safe.
+- Latest smoke footer XML contains `Page `, a PAGE field instruction, cached
+  field text `123`, and no literal `<PAGE_NUMBER>`.
+- Latest smoke `word/document.xml` contains `<w:pgNumType w:start="123"/>`.
+
+### Clipping investigation result
+
+- Latest smoke section margins include `w:header="720"` and `w:footer="720"`.
+- Generated header/footer paragraphs now contain
+  `<w:spacing w:before="0" w:after="0"/>`.
+- Generated header/footer XML does not contain `w:lineRule="exact"` or
+  `w:line=` exact line-height attributes.
+- This is a conservative clipping-risk reduction, not exact PDF positioning.
+
+Ignored local investigation reports:
+
+- `local_reports/header_footer_fidelity_followup/color-openxml-report.md`
+- `local_reports/header_footer_fidelity_followup/page-number-template-report.md`
+- `local_reports/header_footer_fidelity_followup/header-clipping-root-cause.md`
+
+### Implementation summary
+
+- Added simple page-number template parsing for one arabic numeric run.
+- Added consecutive page-number sequence inference for internal plan metadata.
+- Added page-number prefix/suffix and start-number metadata to plan entries and
+  section plans.
+- Updated the internal DOCX writer to write prefix/suffix around PAGE fields.
+- Updated the internal DOCX writer to set `w:pgNumType w:start` when safe.
+- Preserved black `0` as `#000000` and tested missing color does not force gray.
+- Normalized generated header/footer paragraph before/after spacing while
+  avoiding exact line-height.
+- Default conversion remains unchanged.
+- Public CLI/API remains unchanged and closed.
+
+### Tests added
+
+- Black color `0`, colored values, and missing color behavior.
+- Page-number template parsing for `Page 123`, `- 123 -`, and `123`.
+- Consecutive and non-consecutive page-number sequence inference.
+- Generation-plan metadata for `Page 123` prefix and start number.
+- Word PAGE field output with prefix, cached `123`, and `w:start="123"`.
+- Header/footer clipping guard against exact line-height.
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "header_footer_fidelity or page_number_template or word_field or clipping or color"
+```
+
+Result: passed. 16 selected tests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 375 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Local reviewed smoke:
+
+```bash
+.venv/bin/python local_reports/reviewed_migration_batch_compare/batch_compare_reviewed_migration.py --overwrite --allow-source-tree --page-number-behavior word_field --default-output-dir local_reports/header_footer_fidelity_followup/smoke/output_docx_default --reviewed-output-dir local_reports/header_footer_fidelity_followup/smoke/output_docx_reviewed --report-dir local_reports/header_footer_fidelity_followup/smoke/reports --log-dir local_reports/header_footer_fidelity_followup/smoke/logs
+```
+
+Result: passed. Reviewed converted count was 1 and failed count was 0. Local
+artifacts remain ignored.
+
+### Remaining limitations
+
+- Only simple one-number page-number templates are supported.
+- Multi-number forms such as `Page 1 of 10` remain unsupported/diagnostic.
+- Exact PDF absolute positioning is not implemented.
+- Image/logo header/footer migration is not implemented.
+- First-page, odd/even, and section-scoped writer application remains
+  fail-closed.

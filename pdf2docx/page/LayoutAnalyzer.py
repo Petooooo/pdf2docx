@@ -121,6 +121,7 @@ STRONG_SENTENCE_END_PUNC = '.．。?？!！'
 
 _SPACE_RE = re.compile(r'\s+')
 _PLACEHOLDER_RE = re.compile(r'^<[^<>]+>$')
+_DOCX_PAGE_NUMBER_TEMPLATE_RE = re.compile(r'\d+')
 _REVIEW_SECTION_RE = re.compile(
     r'^###\s+([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*$')
 _REVIEW_FIELD_RE = re.compile(r'^-\s+([a-zA-Z_]+):\s*(.*)$')
@@ -6067,6 +6068,8 @@ def _docx_header_footer_text_lookup(page_summaries: list) -> dict:
         lookup[fingerprint] = {
             'text': text,
             'metadata': metadata,
+            'records': records,
+            'page_number_template': infer_docx_page_number_template_sequence(records),
         }
     return lookup
 
@@ -6094,6 +6097,105 @@ def infer_docx_header_footer_alignment(bbox, page_width) -> str:
     if center_x > width * 2.0 / 3.0:
         return DOCX_ALIGNMENT_RIGHT
     return DOCX_ALIGNMENT_CENTER
+
+
+def parse_docx_page_number_template(text: str) -> dict:
+    '''Parse a simple visible page-number template.
+
+    Only a single arabic numeric run is supported in this internal helper. More
+    complex forms such as "Page 1 of 10" remain unsupported until a later
+    policy explicitly handles NUMPAGES or section-specific behavior.
+    '''
+    raw_text = normalize_text(text)
+    numbers = list(_DOCX_PAGE_NUMBER_TEMPLATE_RE.finditer(raw_text))
+    if len(numbers) != 1:
+        return {
+            'raw_text': raw_text,
+            'supported': False,
+            'reason': 'expected_single_arabic_number',
+        }
+    match = numbers[0]
+    number_text = match.group(0)
+    try:
+        number = int(number_text)
+    except ValueError:
+        return {
+            'raw_text': raw_text,
+            'supported': False,
+            'reason': 'invalid_arabic_number',
+        }
+    return {
+        'raw_text': raw_text,
+        'supported': True,
+        'prefix': raw_text[:match.start()],
+        'number_text': number_text,
+        'number': number,
+        'suffix': raw_text[match.end():],
+        'start_number': number,
+        'number_style': 'arabic',
+    }
+
+
+def infer_docx_page_number_template_sequence(records: list) -> dict:
+    '''Infer a safe page-number template and start value from page records.'''
+    ordered = []
+    for record in records or []:
+        text = normalize_text(record.get('text', ''))
+        if not text:
+            continue
+        parsed = parse_docx_page_number_template(text)
+        ordered.append({
+            'page_index': _readiness_int(record.get('page_index', 0)),
+            'text': text,
+            'template': parsed,
+        })
+    ordered.sort(key=lambda item: item['page_index'])
+    if not ordered:
+        return {
+            'supported': False,
+            'consecutive': False,
+            'reason': 'missing_page_number_text',
+        }
+
+    templates = [item['template'] for item in ordered]
+    unsupported = [item for item in templates if not item.get('supported')]
+    if unsupported:
+        return {
+            'raw_text': ordered[0]['text'],
+            'supported': False,
+            'consecutive': False,
+            'reason': unsupported[0].get('reason', 'unsupported_page_number_template'),
+        }
+
+    first = templates[0]
+    prefix = first.get('prefix', '')
+    suffix = first.get('suffix', '')
+    page_indices = [item['page_index'] for item in ordered]
+    numbers = [item['template'].get('number') for item in ordered]
+    same_template = all(
+        item.get('prefix', '') == prefix and item.get('suffix', '') == suffix
+        for item in templates)
+    consecutive_pages = all(
+        page_indices[index] == page_indices[index - 1] + 1
+        for index in range(1, len(page_indices)))
+    consecutive_numbers = all(
+        numbers[index] == numbers[index - 1] + 1
+        for index in range(1, len(numbers)))
+    consecutive = bool(same_template and consecutive_pages and consecutive_numbers)
+    return {
+        'raw_text': first.get('raw_text', ordered[0]['text']),
+        'supported': True,
+        'consecutive': consecutive,
+        'prefix': prefix,
+        'number_text': first.get('number_text', ''),
+        'number': first.get('number'),
+        'suffix': suffix,
+        'start_number': first.get('number'),
+        'number_style': 'arabic',
+        'observed_numbers': numbers,
+        'observed_page_indices': page_indices,
+        'reason': 'consecutive' if consecutive else 'non_consecutive_page_number_sequence',
+    }
 
 
 def _docx_header_footer_block_metadata(
@@ -6270,12 +6372,16 @@ def _docx_header_footer_plan_entry(
         'italic': metadata.get('italic'),
         'color': metadata.get('color'),
     }
+    page_number_template = (
+        _docx_header_footer_candidate_page_number_template(candidate, text_lookup)
+        if role == ROLE_PAGE_NUMBER else {})
     return {
         'candidate_id': candidate.get('candidate_id', ''),
         'fingerprint': candidate.get('fingerprint', ''),
         'role': role,
         'target_part': target_part,
         'text': normalize_text(text),
+        'raw_text': page_number_template.get('raw_text', ''),
         'text_kind': 'page_number_placeholder' if role == ROLE_PAGE_NUMBER else 'semantic_text',
         'section_scope': 'document',
         'affected_pages': list(candidate.get('affected_pages', []) or []),
@@ -6294,6 +6400,10 @@ def _docx_header_footer_plan_entry(
         'alignment': metadata.get('alignment', DOCX_ALIGNMENT_UNKNOWN),
         'line_index': metadata.get('line_index', 0),
         'style': style,
+        'page_number_template': page_number_template,
+        'page_number_template_status': (
+            page_number_template.get('reason', '')
+            if role == ROLE_PAGE_NUMBER else 'not_applicable'),
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
         'page_number_behavior': (
@@ -6357,6 +6467,15 @@ def _docx_header_footer_candidate_metadata(candidate: dict, text_lookup: dict) -
     return {}
 
 
+def _docx_header_footer_candidate_page_number_template(
+        candidate: dict,
+        text_lookup: dict) -> dict:
+    value = text_lookup.get(candidate.get('fingerprint', ''), {})
+    if isinstance(value, dict):
+        return dict(value.get('page_number_template') or {})
+    return {}
+
+
 def _docx_header_footer_warning(candidate: dict, warning_type: str, message: str) -> dict:
     return {
         'type': warning_type,
@@ -6409,6 +6528,15 @@ def _docx_header_footer_generation_plan_result(
         'footer_text_count': sum(1 for entry in entries if entry.get('role') == ROLE_FOOTER),
         'page_number_placeholder_count': sum(
             1 for entry in entries if entry.get('role') == ROLE_PAGE_NUMBER),
+        'page_number_template_count': sum(
+            1 for entry in entries
+            if entry.get('role') == ROLE_PAGE_NUMBER and
+            entry.get('page_number_template', {}).get('supported')),
+        'page_number_consecutive_template_count': sum(
+            1 for entry in entries
+            if entry.get('role') == ROLE_PAGE_NUMBER and
+            entry.get('page_number_template', {}).get('consecutive')),
+        'page_number_start_number': _docx_header_footer_page_number_start(entries),
         'semantic_header_footer_text_count': sum(
             1 for entry in entries
             if entry.get('text_kind') == 'semantic_text'),
@@ -6764,6 +6892,7 @@ def _docx_header_footer_section_plan(
         'header_items': _unique_entry_items(entries, ROLE_HEADER),
         'footer_items': _unique_entry_items(entries, ROLE_FOOTER),
         'page_number_items': _unique_entry_items(entries, ROLE_PAGE_NUMBER),
+        'page_number_start_number': _docx_header_footer_page_number_start(entries),
     }
 
 
@@ -6821,6 +6950,7 @@ def _docx_header_footer_item_from_entry(entry: dict) -> dict:
         'color': style.get('color', entry.get('color')),
         'alignment': entry.get('alignment', DOCX_ALIGNMENT_UNKNOWN),
         'line_index': entry.get('line_index', 0),
+        'page_number_template': dict(entry.get('page_number_template') or {}),
     }
 
 
@@ -6828,6 +6958,21 @@ def _docx_header_footer_entry_has_style_metadata(entry: dict) -> bool:
     return any(
         entry.get(key) not in ('', None, [])
         for key in ('font_name', 'font_size', 'bold', 'italic', 'color'))
+
+
+def _docx_header_footer_page_number_start(entries: list):
+    starts = []
+    for entry in entries or []:
+        if entry.get('role') != ROLE_PAGE_NUMBER:
+            continue
+        template = entry.get('page_number_template') or {}
+        if template.get('supported') and template.get('consecutive'):
+            start = _readiness_int(template.get('start_number', 0))
+            if start > 0:
+                starts.append(start)
+    if len(set(starts)) == 1:
+        return starts[0]
+    return None
 
 
 def _block_matches_reviewed_candidate(block: dict, page_index, candidate: dict) -> bool:
