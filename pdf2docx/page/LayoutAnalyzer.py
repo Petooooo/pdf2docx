@@ -175,6 +175,13 @@ def normalize_page_number(text, placeholder: str = PAGE_NUMBER_PLACEHOLDER) -> s
     if not normalized:
         return ''
 
+    try:
+        parsed = parse_docx_page_number_template(normalized)
+    except NameError:
+        parsed = {}
+    if parsed.get('supported'):
+        return placeholder
+
     for pattern in _PAGE_NUMBER_RE_LIST:
         if pattern.match(normalized):
             return placeholder
@@ -1799,18 +1806,27 @@ def build_automatic_header_footer_decisions(
             enabled=enabled)
         for candidate in candidates
     ]
-    summary = _automatic_header_footer_decision_summary(
+    policy_diagnostics = _automatic_header_footer_policy_diagnostics(
         decisions,
         page_count)
+    decisions = _automatic_header_footer_apply_policy_diagnostics(
+        decisions,
+        policy_diagnostics)
+    summary = _automatic_header_footer_decision_summary(
+        decisions,
+        page_count,
+        policy_diagnostics)
     warnings = _automatic_header_footer_decision_warnings(
         decisions,
-        enabled)
+        enabled,
+        policy_diagnostics)
     return {
         'enabled': bool(enabled),
         'mode': AUTOMATIC_HEADER_FOOTER_MODE,
         'policy': 'internal_automatic_header_footer_classifier_only',
         'summary': summary,
         'decisions': decisions,
+        'policy_diagnostics': policy_diagnostics,
         'warnings': warnings,
         'public_cli_exposed': False,
         'production_default_enabled': False,
@@ -1920,6 +1936,11 @@ def build_automatic_header_footer_migration_plan(
                 'page_number_semantics', ''),
             'page_number_drift_risk': docx_plan.get('summary', {}).get(
                 'page_number_drift_risk', ''),
+            'automatic_policy_diagnostic_count': len(
+                decisions_report.get('policy_diagnostics', []) or []),
+            'odd_even_policy_detected_count': (
+                decisions_report.get('summary', {})
+                .get('odd_even_policy_detected_count', 0)),
             'safe_for_internal_automatic_migration': safe_for_plan,
             'public_cli_exposed': False,
             'production_default_enabled': False,
@@ -6235,8 +6256,17 @@ def _automatic_header_footer_candidate_decision(
         blocking.append(bbox_stability.get('reason') or 'unstable_bbox_band')
 
     if effective_role == ROLE_PAGE_NUMBER:
-        if page_number_template.get('supported') and page_number_template.get('consecutive'):
+        sequence_status = page_number_template.get('sequence_status', '')
+        if (
+                page_number_template.get('supported') and
+                page_number_template.get('consecutive')):
             evidence.append('parseable_consecutive_page_number_sequence')
+        elif (
+                page_number_template.get('supported') and
+                page_number_template.get('mostly_consecutive')):
+            evidence.append('parseable_mostly_consecutive_page_number_sequence')
+        elif sequence_status == 'single_candidate':
+            blocking.append('single_page_number_candidate_diagnostic_only')
         elif page_number_template.get('supported'):
             blocking.append('non_consecutive_page_number_sequence')
         else:
@@ -6430,7 +6460,7 @@ def _automatic_header_footer_protected_content_signal(candidate: dict) -> bool:
         if candidate.get(key):
             signals.append(normalize_text(candidate.get(key)).lower())
     signal_text = ' '.join(signals)
-    return any(token in signal_text for token in ('table', 'callout', 'list'))
+    return bool(re.search(r'(^|[^a-z])(table|callout|list)([^a-z]|$)', signal_text))
 
 
 def _automatic_header_footer_confidence(
@@ -6457,7 +6487,8 @@ def _automatic_header_footer_text_preview(candidate: dict, text_lookup: dict) ->
 
 def _automatic_header_footer_decision_summary(
         decisions: list,
-        page_count: int) -> dict:
+        page_count: int,
+        policy_diagnostics: list = None) -> dict:
     decision_counts = Counter(
         decision.get('auto_decision', AUTO_DECISION_DIAGNOSTIC)
         for decision in decisions or [])
@@ -6478,6 +6509,16 @@ def _automatic_header_footer_decision_summary(
         'page_number_count': role_counts.get(ROLE_PAGE_NUMBER, 0),
         'layout_placeholder_auto_exclude_count': role_counts.get(
             ROLE_LAYOUT_PLACEHOLDER, 0),
+        'policy_diagnostic_count': len(policy_diagnostics or []),
+        'odd_even_policy_detected_count': sum(
+            1 for item in policy_diagnostics or []
+            if item.get('policy_type') == 'odd_even'),
+        'detected_policy_types': sorted({
+            item.get('policy_type', '')
+            for item in policy_diagnostics or []
+            if item.get('policy_type')
+        }),
+        'odd_even_writer_supported': False,
         'manual_review_required': False,
         'public_cli_exposed': False,
         'production_default_enabled': False,
@@ -6487,7 +6528,8 @@ def _automatic_header_footer_decision_summary(
 
 def _automatic_header_footer_decision_warnings(
         decisions: list,
-        enabled: bool) -> list:
+        enabled: bool,
+        policy_diagnostics: list = None) -> list:
     warnings = []
     if not enabled:
         warnings.append({'type': 'automatic_header_footer_classifier_disabled'})
@@ -6495,6 +6537,15 @@ def _automatic_header_footer_decision_warnings(
             decision.get('auto_decision') == AUTO_DECISION_EXCLUDE
             for decision in decisions or []):
         warnings.append({'type': 'no_auto_exclude_candidates'})
+    odd_even_count = sum(
+        1 for item in policy_diagnostics or []
+        if item.get('policy_type') == 'odd_even')
+    if odd_even_count:
+        warnings.append({
+            'type': 'automatic_odd_even_policy_diagnostic_only',
+            'count': odd_even_count,
+            'writer_supported': False,
+        })
     return warnings
 
 
@@ -6503,9 +6554,183 @@ def _automatic_header_footer_decision_recommendation(
         warnings: list) -> str:
     if not summary.get('candidate_count', 0):
         return 'No repeated header/footer/page-number candidates were available for automatic classification.'
+    if summary.get('odd_even_policy_detected_count', 0) and not summary.get('auto_exclude_count', 0):
+        return 'Odd/even boundary patterns were detected, but writer support remains diagnostic-only.'
     if summary.get('auto_exclude_count', 0):
         return 'High-confidence boundary artifacts can proceed to internal automatic migration gates.'
     return 'No high-confidence automatic exclusions were found; keep uncertain candidates in the body and report diagnostics.'
+
+
+def _automatic_header_footer_policy_diagnostics(
+        decisions: list,
+        page_count: int) -> list:
+    diagnostics = []
+    diagnostics.extend(_automatic_header_footer_odd_even_diagnostics(
+        decisions,
+        page_count))
+    return diagnostics
+
+
+def _automatic_header_footer_odd_even_diagnostics(
+        decisions: list,
+        page_count: int) -> list:
+    page_count = _readiness_int(page_count)
+    if page_count < 4:
+        return []
+    eligible = []
+    for decision in decisions or []:
+        role = decision.get('automatic_role', '')
+        if role not in {ROLE_HEADER, ROLE_FOOTER}:
+            continue
+        if decision.get('auto_decision') == AUTO_DECISION_KEEP:
+            continue
+        if not decision.get('bbox_stability', {}).get('stable'):
+            continue
+        if any(
+                reason in set(decision.get('blocking_reasons', []) or [])
+                for reason in (
+                    'body_region_protected',
+                    'layout_placeholder_protected',
+                    'body_table_callout_list_content_protected',
+                    'header_role_region_mismatch',
+                    'footer_role_region_mismatch')):
+            continue
+        profile = _automatic_header_footer_parity_profile(
+            decision.get('affected_pages', []),
+            page_count)
+        if profile.get('parity') not in {'odd', 'even'}:
+            continue
+        item = dict(decision)
+        item['parity_profile'] = profile
+        eligible.append(item)
+
+    diagnostics = []
+    grouped = defaultdict(list)
+    for item in eligible:
+        grouped[(item.get('automatic_role'), item.get('region'))].append(item)
+    for (role, region), items in sorted(grouped.items()):
+        odd_items = [
+            item for item in items
+            if item.get('parity_profile', {}).get('parity') == 'odd'
+        ]
+        even_items = [
+            item for item in items
+            if item.get('parity_profile', {}).get('parity') == 'even'
+        ]
+        if not odd_items or not even_items:
+            continue
+        odd_item = sorted(
+            odd_items,
+            key=lambda item: (
+                -item.get('parity_profile', {}).get('coverage', 0.0),
+                item.get('candidate_id', '')))[0]
+        even_item = sorted(
+            even_items,
+            key=lambda item: (
+                -item.get('parity_profile', {}).get('coverage', 0.0),
+                item.get('candidate_id', '')))[0]
+        if odd_item.get('fingerprint') == even_item.get('fingerprint'):
+            continue
+        diagnostics.append({
+            'policy_type': 'odd_even',
+            'role': role,
+            'region': region,
+            'odd_candidate_id': odd_item.get('candidate_id', ''),
+            'odd_fingerprint': odd_item.get('fingerprint', ''),
+            'odd_affected_pages': list(odd_item.get('affected_pages', []) or []),
+            'odd_coverage': odd_item.get('parity_profile', {}).get('coverage', 0.0),
+            'even_candidate_id': even_item.get('candidate_id', ''),
+            'even_fingerprint': even_item.get('fingerprint', ''),
+            'even_affected_pages': list(even_item.get('affected_pages', []) or []),
+            'even_coverage': even_item.get('parity_profile', {}).get('coverage', 0.0),
+            'writer_status': 'diagnostic_only_writer_not_enabled',
+            'safe_for_migration': False,
+            'reason': 'odd_even_writer_not_supported',
+        })
+    return diagnostics
+
+
+def _automatic_header_footer_parity_profile(
+        affected_pages: list,
+        page_count: int) -> dict:
+    pages = sorted({
+        _readiness_int(page)
+        for page in affected_pages or []
+        if 0 <= _readiness_int(page) < page_count
+    })
+    if not pages:
+        return {
+            'parity': '',
+            'coverage': 0.0,
+            'purity': 0.0,
+            'reason': 'missing_affected_pages',
+        }
+    source_odd_pages = {index for index in range(page_count) if index % 2 == 0}
+    source_even_pages = {index for index in range(page_count) if index % 2 == 1}
+    page_set = set(pages)
+    odd_count = len(page_set.intersection(source_odd_pages))
+    even_count = len(page_set.intersection(source_even_pages))
+    odd_coverage = odd_count / len(source_odd_pages) if source_odd_pages else 0.0
+    even_coverage = even_count / len(source_even_pages) if source_even_pages else 0.0
+    odd_purity = odd_count / len(page_set) if page_set else 0.0
+    even_purity = even_count / len(page_set) if page_set else 0.0
+    if odd_purity >= 0.8 and odd_coverage >= 0.66 and len(page_set) >= 2:
+        return {
+            'parity': 'odd',
+            'coverage': round(odd_coverage, 3),
+            'purity': round(odd_purity, 3),
+            'affected_page_count': len(page_set),
+            'parity_page_count': len(source_odd_pages),
+            'reason': 'source_odd_pages_repeated',
+        }
+    if even_purity >= 0.8 and even_coverage >= 0.66 and len(page_set) >= 2:
+        return {
+            'parity': 'even',
+            'coverage': round(even_coverage, 3),
+            'purity': round(even_purity, 3),
+            'affected_page_count': len(page_set),
+            'parity_page_count': len(source_even_pages),
+            'reason': 'source_even_pages_repeated',
+        }
+    return {
+        'parity': '',
+        'coverage': round(max(odd_coverage, even_coverage), 3),
+        'purity': round(max(odd_purity, even_purity), 3),
+        'affected_page_count': len(page_set),
+        'reason': 'not_stable_odd_even_pattern',
+    }
+
+
+def _automatic_header_footer_apply_policy_diagnostics(
+        decisions: list,
+        policy_diagnostics: list) -> list:
+    odd_even_candidate_ids = set()
+    for diagnostic in policy_diagnostics or []:
+        if diagnostic.get('policy_type') != 'odd_even':
+            continue
+        for key in ('odd_candidate_id', 'even_candidate_id'):
+            if diagnostic.get(key):
+                odd_even_candidate_ids.add(diagnostic.get(key))
+    if not odd_even_candidate_ids:
+        return decisions
+
+    updated = []
+    for decision in decisions or []:
+        item = dict(decision)
+        if item.get('candidate_id') in odd_even_candidate_ids:
+            evidence = list(item.get('evidence', []) or [])
+            if 'odd_even_policy_detected' not in evidence:
+                evidence.append('odd_even_policy_detected')
+            blocking = set(item.get('blocking_reasons', []) or [])
+            blocking.add('odd_even_writer_not_supported')
+            item['evidence'] = evidence
+            item['blocking_reasons'] = sorted(blocking)
+            item['auto_decision'] = AUTO_DECISION_DIAGNOSTIC
+            item['safe_for_migration'] = False
+            item['detected_policy_type'] = 'odd_even'
+            item['policy_writer_status'] = 'diagnostic_only_writer_not_enabled'
+        updated.append(item)
+    return updated
 
 
 def _automatic_header_footer_transformed_dry_run(
@@ -6735,39 +6960,123 @@ def infer_docx_header_footer_alignment(bbox, page_width) -> str:
 
 
 def parse_docx_page_number_template(text: str) -> dict:
-    '''Parse a simple visible page-number template.
-
-    Only a single arabic numeric run is supported in this internal helper. More
-    complex forms such as "Page 1 of 10" remain unsupported until a later
-    policy explicitly handles NUMPAGES or section-specific behavior.
-    '''
+    '''Parse a visible page-number template for internal migration diagnostics.'''
     raw_text = normalize_text(text)
-    numbers = list(_DOCX_PAGE_NUMBER_TEMPLATE_RE.finditer(raw_text))
-    if len(numbers) != 1:
+    if not raw_text:
         return {
             'raw_text': raw_text,
             'supported': False,
-            'reason': 'expected_single_arabic_number',
+            'reason': 'missing_page_number_text',
         }
-    match = numbers[0]
-    number_text = match.group(0)
-    try:
-        number = int(number_text)
-    except ValueError:
+    parsed = _parse_docx_page_number_template_pattern(raw_text)
+    if parsed:
+        return parsed
+
+    numbers = list(_DOCX_PAGE_NUMBER_TEMPLATE_RE.finditer(raw_text))
+    if len(numbers) > 1:
         return {
             'raw_text': raw_text,
             'supported': False,
-            'reason': 'invalid_arabic_number',
+            'reason': 'ambiguous_multiple_numbers',
+        }
+    if not numbers:
+        return {
+            'raw_text': raw_text,
+            'supported': False,
+            'reason': 'missing_arabic_number',
         }
     return {
         'raw_text': raw_text,
-        'supported': True,
-        'prefix': raw_text[:match.start()],
-        'number_text': number_text,
-        'number': number,
-        'suffix': raw_text[match.end():],
-        'start_number': number,
-        'number_style': 'arabic',
+        'supported': False,
+        'reason': 'unsupported_page_number_template',
+    }
+
+
+def _parse_docx_page_number_template_pattern(raw_text: str) -> dict:
+    patterns = (
+        (
+            re.compile(
+                r'^(?P<prefix>(?:page|p\.?|페이지)\s+)'
+                r'(?P<number>\d+)'
+                r'(?P<suffix>\s*(?:(?:of)\s+(?P<total_of>\d+)|/\s*(?P<total_slash>\d+)))?$',
+                re.IGNORECASE),
+            'labeled_arabic_page_number',
+        ),
+        (
+            re.compile(
+                r'^(?P<prefix>)'
+                r'(?P<number>\d+)'
+                r'(?P<suffix>\s*/\s*(?P<total_slash>\d+))$'),
+            'bare_arabic_page_number_with_total',
+        ),
+        (
+            re.compile(
+                r'^(?P<prefix>[|\-–—]\s*)'
+                r'(?P<number>\d+)'
+                r'(?P<suffix>\s*[|\-–—])?$'),
+            'decorated_arabic_page_number',
+        ),
+        (
+            re.compile(
+                r'^(?P<prefix>)'
+                r'(?P<number>\d+)'
+                r'(?P<suffix>\s*[|\-–—])?$'),
+            'bare_arabic_page_number',
+        ),
+    )
+    for pattern, template_kind in patterns:
+        match = pattern.match(raw_text)
+        if not match:
+            continue
+        number_text = match.group('number')
+        try:
+            number = int(number_text)
+        except ValueError:
+            return {
+                'raw_text': raw_text,
+                'supported': False,
+                'reason': 'invalid_arabic_number',
+            }
+        total_text = (
+            match.groupdict().get('total_of') or
+            match.groupdict().get('total_slash') or
+            '')
+        total_pages = None
+        if total_text:
+            try:
+                total_pages = int(total_text)
+            except ValueError:
+                return {
+                    'raw_text': raw_text,
+                    'supported': False,
+                    'reason': 'invalid_total_page_count',
+                }
+        confidence = (
+            0.9 if template_kind == 'labeled_arabic_page_number' else
+            0.86 if total_pages is not None else
+            0.84 if template_kind == 'decorated_arabic_page_number' else
+            0.76)
+        prefix = match.group('prefix') or ''
+        suffix = match.group('suffix') or ''
+        if total_pages is not None:
+            confidence = max(confidence, 0.86)
+        return {
+            'raw_text': raw_text,
+            'supported': True,
+            'template_kind': template_kind,
+            'prefix': prefix,
+            'number_text': number_text,
+            'number': number,
+            'suffix': suffix,
+            'total_pages': total_pages,
+            'start_number': number,
+            'number_style': 'arabic',
+            'confidence': round(confidence, 3),
+        }
+    return {
+        'raw_text': raw_text,
+        'supported': False,
+        'reason': 'unsupported_page_number_template',
     }
 
 
@@ -6789,6 +7098,9 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
         return {
             'supported': False,
             'consecutive': False,
+            'mostly_consecutive': False,
+            'sequence_status': 'not_sequence',
+            'confidence': 0.0,
             'reason': 'missing_page_number_text',
         }
 
@@ -6799,38 +7111,87 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
             'raw_text': ordered[0]['text'],
             'supported': False,
             'consecutive': False,
+            'mostly_consecutive': False,
+            'sequence_status': 'not_sequence',
+            'confidence': 0.0,
             'reason': unsupported[0].get('reason', 'unsupported_page_number_template'),
         }
 
     first = templates[0]
     prefix = first.get('prefix', '')
     suffix = first.get('suffix', '')
+    total_pages = first.get('total_pages')
     page_indices = [item['page_index'] for item in ordered]
     numbers = [item['template'].get('number') for item in ordered]
     same_template = all(
-        item.get('prefix', '') == prefix and item.get('suffix', '') == suffix
+        _docx_page_number_template_key(item) == _docx_page_number_template_key(first)
         for item in templates)
-    consecutive_pages = all(
-        page_indices[index] == page_indices[index - 1] + 1
-        for index in range(1, len(page_indices)))
-    consecutive_numbers = all(
-        numbers[index] == numbers[index - 1] + 1
-        for index in range(1, len(numbers)))
-    consecutive = bool(same_template and consecutive_pages and consecutive_numbers)
+    same_total_pages = all(
+        item.get('total_pages') == total_pages
+        for item in templates)
+    if len(ordered) == 1:
+        sequence_status = 'single_candidate'
+        consecutive = False
+        mostly_consecutive = False
+        confidence = min(float(first.get('confidence', 0.0)), 0.58)
+    else:
+        deltas = [
+            (
+                page_indices[index] - page_indices[index - 1],
+                numbers[index] - numbers[index - 1])
+            for index in range(1, len(page_indices))
+        ]
+        consecutive = bool(
+            same_template and
+            same_total_pages and
+            all(page_delta == 1 and number_delta == 1
+                for page_delta, number_delta in deltas))
+        gap_count = sum(max(0, page_delta - 1) for page_delta, _ in deltas)
+        mostly_consecutive = bool(
+            not consecutive and
+            same_template and
+            same_total_pages and
+            all(page_delta > 0 and page_delta == number_delta
+                for page_delta, number_delta in deltas) and
+            gap_count <= 2)
+        if consecutive:
+            sequence_status = 'consecutive'
+            confidence = 0.95
+        elif mostly_consecutive:
+            sequence_status = 'mostly_consecutive'
+            confidence = 0.82
+        else:
+            sequence_status = 'not_sequence'
+            confidence = 0.42
     return {
         'raw_text': first.get('raw_text', ordered[0]['text']),
         'supported': True,
         'consecutive': consecutive,
+        'mostly_consecutive': mostly_consecutive,
+        'sequence_status': sequence_status,
         'prefix': prefix,
         'number_text': first.get('number_text', ''),
         'number': first.get('number'),
         'suffix': suffix,
+        'total_pages': total_pages,
         'start_number': first.get('number'),
         'number_style': 'arabic',
+        'template_kind': first.get('template_kind', ''),
         'observed_numbers': numbers,
         'observed_page_indices': page_indices,
-        'reason': 'consecutive' if consecutive else 'non_consecutive_page_number_sequence',
+        'confidence': round(confidence, 3),
+        'reason': sequence_status if sequence_status != 'not_sequence' else (
+            'non_consecutive_page_number_sequence'),
     }
+
+
+def _docx_page_number_template_key(template: dict) -> tuple:
+    return (
+        normalize_text(template.get('prefix', '')).lower(),
+        normalize_text(template.get('suffix', '')).lower(),
+        template.get('total_pages'),
+        template.get('number_style', ''),
+    )
 
 
 def _docx_header_footer_block_metadata(

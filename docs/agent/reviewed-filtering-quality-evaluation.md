@@ -235,6 +235,24 @@ The automatic path remains internal/local-only. Public CLI/API exposure is
 still closed, default `Converter.convert()` behavior is unchanged, and
 non-default policies still fail closed for migration.
 
+## Automatic Classification v2
+
+The automatic mode now recognizes a broader set of page-number templates,
+including labeled, decorated, Korean-labeled, and total-page forms such as
+`Page 123`, `p. 123`, `- 123 -`, `123 / 456`, and `페이지 123`. Sequence
+metadata now distinguishes `consecutive`, `mostly_consecutive`,
+`single_candidate`, and `not_sequence`, so high-confidence page-number
+candidates can be migrated while unstable or body-region numbers remain
+diagnostic or kept.
+
+The classifier also detects strong odd/even header or footer patterns as
+internal diagnostics. Because the current writer remains default-policy-only,
+odd/even candidates are not removed or written automatically yet; they are
+reported as `auto_diagnostic` with `odd_even_writer_not_supported`.
+
+Manual review remains a fallback/debug workflow only. Public/default conversion
+is still unchanged.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

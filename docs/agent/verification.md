@@ -7698,3 +7698,178 @@ test outputs remained ignored.
   drifts.
 - Image/logo header/footer migration is not implemented.
 - Cross-page paragraph merge remains out of scope.
+
+## Automatic Header/Footer Classification v2
+
+### Why v1 was insufficient
+
+The first automatic classifier proved the internal path could avoid manual
+review for simple repeated default-policy artifacts, but local inspection showed
+two gaps:
+
+- page-number recognition was too narrow and could miss common forms.
+- odd/even header patterns were not surfaced clearly by the automatic layer.
+
+The v2 policy is more permissive during candidate recognition while preserving
+strict migration gates.
+
+### Page-number classifier v2
+
+The internal page-number parser now supports broader arabic page-label forms:
+
+- bare numbers such as `123`
+- labeled forms such as `Page 123`, `page 123`, `PAGE 123`, `p. 123`,
+  `P. 123`
+- decorated forms such as `- 123 -`, `— 123 —`, `123 |`, `| 123`
+- total-page forms such as `Page 123 of 456` and `123 / 456`
+- Korean-labeled forms such as `페이지 123`
+
+Sequence inference now reports:
+
+- `consecutive`
+- `mostly_consecutive`
+- `single_candidate`
+- `not_sequence`
+
+For `word_field`, supported consecutive sequences preserve prefix/suffix
+metadata, insert a Word PAGE field, and carry the inferred start number for
+`w:pgNumType`.
+
+The classifier also fixed a protection-signal false positive where the word
+`stable` was accidentally matching the substring `table`, causing real page
+numbers to be kept as table-protected content.
+
+### Odd/even handling
+
+Automatic classification now detects strong odd/even header/footer patterns:
+
+- source odd pages use one repeated boundary candidate
+- source even pages use another repeated boundary candidate
+- bbox and role-region evidence are stable
+- body/layout-placeholder/table/callout/list protections are clean
+
+The current writer remains default-policy-only. Therefore detected odd/even
+candidates are reported as `auto_diagnostic` with
+`odd_even_writer_not_supported`; they are not removed from the body and are not
+written into odd/even DOCX parts yet.
+
+### Tests added
+
+- Broader page-number parser coverage for labels, decoration, total-page
+  suffixes, and Korean labels.
+- Consecutive, mostly-consecutive, single-candidate, and non-sequence page
+  number inference.
+- Automatic migration for decorated page-number labels with `word_field`.
+- Automatic migration for `Page 123 of 456` preserving suffix around PAGE field.
+- Body-region page-number-like text remains protected.
+- Unstable page-number sequences remain diagnostic.
+- Odd/even top headers are detected as diagnostic-only policy.
+- Odd/even footers are detected as diagnostic-only policy.
+- Alternating body headings are not treated as odd/even headers.
+- The `stable`/`table` false-positive protection bug is covered.
+
+### Local smoke result
+
+Command:
+
+```bash
+.venv/bin/python local_reports/automatic_reviewed_batch/auto_batch_convert.py --input-dir local_reports/automatic_reviewed_batch_v2/input_pdf --default-output-dir local_reports/automatic_reviewed_batch_v2/output_docx_default --output-dir local_reports/automatic_reviewed_batch_v2/output_docx_auto_reviewed --report-dir local_reports/automatic_reviewed_batch_v2/reports --log-dir local_reports/automatic_reviewed_batch_v2/logs --allow-source-tree --overwrite --page-number-behavior word_field --max-pages 100 --verbose
+```
+
+Result:
+
+- total PDFs: 5
+- default converted: 5
+- automatic reviewed converted: 2
+- automatic diagnostic/skipped: 3
+- blocked: 0
+- skipped large: 0
+- failed: 0
+
+Files converted automatically:
+
+- `input.pdf`
+- `input3.pdf`
+
+Files remaining diagnostic:
+
+- `input2.pdf`: footer and page-number candidates were recognized as
+  `auto_exclude`, but migration stayed diagnostic because the internal default
+  policy plan had incomplete page coverage.
+- `input4.pdf`: no high-confidence semantic auto-exclude candidate.
+- `input5.pdf`: no high-confidence semantic auto-exclude candidate.
+
+Observed improvement:
+
+- `input.pdf` now auto-excludes one page-number candidate in addition to
+  header/footer candidates.
+- `input2.pdf` now recognizes footer plus page-number candidates as
+  `auto_exclude`, but strict policy coverage blocks DOCX migration.
+
+Ignored local artifacts:
+
+- `local_reports/automatic_reviewed_batch_v2/input_pdf/`
+- `local_reports/automatic_reviewed_batch_v2/output_docx_default/`
+- `local_reports/automatic_reviewed_batch_v2/output_docx_auto_reviewed/`
+- `local_reports/automatic_reviewed_batch_v2/reports/`
+- `local_reports/automatic_reviewed_batch_v2/logs/`
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "automatic_header_footer or auto_reviewed or page_number_template or odd_even or header_footer_fidelity"
+```
+
+Result: passed. 29 selected tests and 9 subtests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 398 tests and 49 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Current status
+
+- Default conversion changed: no.
+- Public CLI/API changed: no.
+- Reviewed filtering default-on: no.
+- Automatic mode public exposure: none.
+- Manual review code path: preserved.
+
+### Remaining limitations
+
+- Odd/even writing is still not implemented; detection is diagnostic-only.
+- Incomplete default-policy coverage still blocks migration.
+- Dynamic PAGE fields still follow Word pagination.
+- Exact source PDF page-label preservation remains future work if pagination
+  drifts.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph merge remains out of scope.

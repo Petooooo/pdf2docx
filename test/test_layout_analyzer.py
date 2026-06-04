@@ -5928,18 +5928,15 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertNotIn('w:color w:val="808080"', openxml['footer_xml'])
 
     def test_page_number_template_parse_supports_simple_arabic_templates(self):
-        self.assertEqual(
-            parse_docx_page_number_template('Page 123'),
-            {
-                'raw_text': 'Page 123',
-                'supported': True,
-                'prefix': 'Page ',
-                'number_text': '123',
-                'number': 123,
-                'suffix': '',
-                'start_number': 123,
-                'number_style': 'arabic',
-            })
+        parsed = parse_docx_page_number_template('Page 123')
+        self.assertTrue(parsed['supported'])
+        self.assertEqual(parsed['raw_text'], 'Page 123')
+        self.assertEqual(parsed['prefix'], 'Page ')
+        self.assertEqual(parsed['number_text'], '123')
+        self.assertEqual(parsed['number'], 123)
+        self.assertEqual(parsed['suffix'], '')
+        self.assertEqual(parsed['start_number'], 123)
+        self.assertEqual(parsed['number_style'], 'arabic')
         self.assertEqual(
             parse_docx_page_number_template('- 123 -')['prefix'],
             '- ')
@@ -5949,8 +5946,34 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(
             parse_docx_page_number_template('123')['prefix'],
             '')
+        with_total = parse_docx_page_number_template('Page 1 of 10')
+        self.assertTrue(with_total['supported'])
+        self.assertEqual(with_total['prefix'], 'Page ')
+        self.assertEqual(with_total['suffix'], ' of 10')
+        self.assertEqual(with_total['total_pages'], 10)
+
+    def test_page_number_template_parse_supports_v2_real_world_variants(self):
+        cases = [
+            ('page 123', 'page ', '', None),
+            ('PAGE 123', 'PAGE ', '', None),
+            ('p. 123', 'p. ', '', None),
+            ('P. 123', 'P. ', '', None),
+            ('— 123 —', '— ', ' —', None),
+            ('123 |', '', ' |', None),
+            ('| 123', '| ', '', None),
+            ('123 / 456', '', ' / 456', 456),
+            ('페이지 123', '페이지 ', '', None),
+        ]
+        for text, prefix, suffix, total_pages in cases:
+            with self.subTest(text=text):
+                parsed = parse_docx_page_number_template(text)
+                self.assertTrue(parsed['supported'])
+                self.assertEqual(parsed['prefix'], prefix)
+                self.assertEqual(parsed['number'], 123)
+                self.assertEqual(parsed['suffix'], suffix)
+                self.assertEqual(parsed['total_pages'], total_pages)
         self.assertFalse(
-            parse_docx_page_number_template('Page 1 of 10')['supported'])
+            parse_docx_page_number_template('Chapter 123 Heading')['supported'])
 
     def test_page_number_template_sequence_detects_consecutive_and_gaps(self):
         consecutive = infer_docx_page_number_template_sequence([
@@ -5967,8 +5990,30 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertTrue(consecutive['consecutive'])
         self.assertEqual(consecutive['start_number'], 123)
         self.assertEqual(consecutive['prefix'], 'Page ')
+        self.assertEqual(consecutive['sequence_status'], 'consecutive')
         self.assertFalse(gap['consecutive'])
         self.assertEqual(gap['reason'], 'non_consecutive_page_number_sequence')
+
+    def test_page_number_template_sequence_detects_mostly_consecutive_and_single_candidate(self):
+        mostly = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': '- 123 -'},
+            {'page_index': 1, 'text': '- 124 -'},
+            {'page_index': 3, 'text': '- 126 -'},
+        ])
+        single = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123 of 456'},
+        ])
+
+        self.assertTrue(mostly['supported'])
+        self.assertFalse(mostly['consecutive'])
+        self.assertTrue(mostly['mostly_consecutive'])
+        self.assertEqual(mostly['sequence_status'], 'mostly_consecutive')
+        self.assertEqual(mostly['prefix'], '- ')
+        self.assertEqual(mostly['suffix'], ' -')
+        self.assertTrue(single['supported'])
+        self.assertEqual(single['sequence_status'], 'single_candidate')
+        self.assertEqual(single['suffix'], ' of 456')
+        self.assertEqual(single['total_pages'], 456)
 
     def test_page_number_template_generation_plan_carries_prefix_and_start(self):
         page_summaries = []
@@ -6215,6 +6260,384 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertNotIn('AUTO TOP HEADER', openxml['footer_xml'])
         self.assertNotIn('AUTO BOTTOM FOOTER', openxml['header_xml'])
         self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_promotes_v2_page_number_variants(self):
+        _require_docx_header_footer_support(self)
+        fingerprint = _summary_fingerprint('- 123 -', REGION_BOTTOM)
+        page_summaries = []
+        for index, text in enumerate(['- 123 -', '- 124 -', '- 125 -']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        [460, 760, 540, 774],
+                        {'font_name': 'Arial,Italic', 'font_size': 9, 'flags': 2, 'color': 0}),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'decorated-page-number',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_BOTTOM]),
+        ]}
+        dry_run['candidates'][0]['reason'] = (
+            'stable bottom page-number placeholder')
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        decision = migration['automatic_decisions']['decisions'][0]
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_EXCLUDE)
+        self.assertEqual(decision['automatic_role'], ROLE_PAGE_NUMBER)
+        self.assertEqual(
+            decision['page_number_template']['sequence_status'],
+            'consecutive')
+        self.assertEqual(
+            decision['page_number_template']['prefix'],
+            '- ')
+        self.assertEqual(
+            decision['page_number_template']['suffix'],
+            ' -')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-decorated-page-number.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('- ', openxml['footer_xml'])
+        self.assertIn(' -', openxml['footer_xml'])
+        self.assertIn(' PAGE ', openxml['footer_xml'])
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_preserves_page_number_total_suffix(self):
+        _require_docx_header_footer_support(self)
+        fingerprint = _summary_fingerprint('Page 123 of 456', REGION_BOTTOM)
+        page_summaries = []
+        for index, text in enumerate([
+                'Page 123 of 456',
+                'Page 124 of 456',
+                'Page 125 of 456']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        [430, 760, 560, 774],
+                        {'font_name': 'Arial', 'font_size': 9, 'color': 0}),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'page-number-total',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_BOTTOM]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        template = (
+            migration['automatic_decisions']['decisions'][0]
+            ['page_number_template'])
+
+        self.assertEqual(
+            migration['automatic_decisions']['summary']['auto_exclude_count'],
+            1)
+        self.assertEqual(template['prefix'], 'Page ')
+        self.assertEqual(template['suffix'], ' of 456')
+        self.assertEqual(template['total_pages'], 456)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-total-page-number.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('Page ', openxml['footer_xml'])
+        self.assertIn(' of 456', openxml['footer_xml'])
+        self.assertIn(' PAGE ', openxml['footer_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_keeps_body_region_page_number_like_text(self):
+        fingerprint = _summary_fingerprint('Page 123', REGION_BODY)
+        page_summaries = []
+        for index, text in enumerate(['Page 123', 'Page 124', 'Page 125']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BODY,
+                        text,
+                        [220, 360, 300, 374]),
+                ],
+            })
+        candidate = _dry_run_candidate(
+            'body-page-number-like',
+            fingerprint,
+            ROLE_REVIEW_ONLY,
+            ACTION_REVIEW,
+            [0, 1, 2],
+            [REGION_BODY])
+
+        decision = classify_header_footer_candidate_automatically(
+            candidate,
+            page_summaries,
+            page_count=3)
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_KEEP)
+        self.assertIn('body_region_protected', decision['blocking_reasons'])
+
+    def test_automatic_header_footer_classifier_keeps_unstable_page_number_sequence_diagnostic(self):
+        fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
+        page_summaries = []
+        for index, text in enumerate(['Page 123', 'Page 125']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        [430, 760, 560, 774]),
+                ],
+            })
+        candidate = _dry_run_candidate(
+            'unstable-page-number',
+            fingerprint,
+            ROLE_REVIEW_ONLY,
+            ACTION_REVIEW,
+            [0, 1],
+            [REGION_BOTTOM])
+
+        decision = classify_header_footer_candidate_automatically(
+            candidate,
+            page_summaries,
+            page_count=2)
+
+        self.assertEqual(decision['automatic_role'], ROLE_PAGE_NUMBER)
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_DIAGNOSTIC)
+        self.assertIn(
+            'non_consecutive_page_number_sequence',
+            decision['blocking_reasons'])
+
+    def test_automatic_header_footer_classifier_detects_odd_even_headers_as_diagnostic_policy(self):
+        odd_fp = _summary_fingerprint('ODD HEADER', REGION_TOP)
+        even_fp = _summary_fingerprint('EVEN HEADER', REGION_TOP)
+        page_summaries = []
+        for index in range(6):
+            text = 'ODD HEADER' if index % 2 == 0 else 'EVEN HEADER'
+            fingerprint = odd_fp if index % 2 == 0 else even_fp
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_TOP,
+                        text,
+                        [50, 36, 180, 50]),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'odd-header',
+                odd_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 2, 4],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'even-header',
+                even_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [1, 3, 5],
+                [REGION_TOP]),
+        ]}
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            dry_run,
+            enabled=True)
+        decisions = {
+            decision['candidate_id']: decision
+            for decision in report['decisions']
+        }
+
+        self.assertEqual(report['summary']['odd_even_policy_detected_count'], 1)
+        self.assertEqual(
+            report['policy_diagnostics'][0]['policy_type'],
+            'odd_even')
+        self.assertEqual(
+            decisions['odd-header']['auto_decision'],
+            AUTO_DECISION_DIAGNOSTIC)
+        self.assertEqual(
+            decisions['even-header']['auto_decision'],
+            AUTO_DECISION_DIAGNOSTIC)
+        self.assertIn(
+            'odd_even_policy_detected',
+            decisions['odd-header']['evidence'])
+        self.assertIn(
+            'odd_even_writer_not_supported',
+            decisions['even-header']['blocking_reasons'])
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True)
+        self.assertFalse(
+            migration['summary']['safe_for_internal_automatic_migration'])
+        self.assertEqual(
+            migration['summary']['odd_even_policy_detected_count'],
+            1)
+
+    def test_automatic_header_footer_classifier_detects_odd_even_footer_as_diagnostic_policy(self):
+        odd_fp = _summary_fingerprint('ODD FOOTER', REGION_BOTTOM)
+        even_fp = _summary_fingerprint('EVEN FOOTER', REGION_BOTTOM)
+        page_summaries = []
+        for index in range(6):
+            text = 'ODD FOOTER' if index % 2 == 0 else 'EVEN FOOTER'
+            fingerprint = odd_fp if index % 2 == 0 else even_fp
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        [50, 760, 180, 774]),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'odd-footer',
+                odd_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 2, 4],
+                [REGION_BOTTOM]),
+            _dry_run_candidate(
+                'even-footer',
+                even_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [1, 3, 5],
+                [REGION_BOTTOM]),
+        ]}
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            dry_run,
+            enabled=True)
+
+        self.assertEqual(report['summary']['odd_even_policy_detected_count'], 1)
+        self.assertEqual(
+            report['policy_diagnostics'][0]['role'],
+            ROLE_FOOTER)
+
+    def test_automatic_header_footer_classifier_does_not_treat_body_alternation_as_odd_even(self):
+        odd_fp = _summary_fingerprint('ODD BODY HEADING', REGION_BODY)
+        even_fp = _summary_fingerprint('EVEN BODY HEADING', REGION_BODY)
+        page_summaries = []
+        for index in range(6):
+            text = 'ODD BODY HEADING' if index % 2 == 0 else 'EVEN BODY HEADING'
+            fingerprint = odd_fp if index % 2 == 0 else even_fp
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BODY,
+                        text,
+                        [50, 220, 250, 236]),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'odd-body',
+                odd_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 2, 4],
+                [REGION_BODY]),
+            _dry_run_candidate(
+                'even-body',
+                even_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [1, 3, 5],
+                [REGION_BODY]),
+        ]}
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            dry_run,
+            enabled=True)
+
+        self.assertEqual(report['summary']['odd_even_policy_detected_count'], 0)
+        self.assertEqual(
+            {decision['auto_decision'] for decision in report['decisions']},
+            {AUTO_DECISION_KEEP})
 
     def test_automatic_header_footer_classifier_protects_body_heading_similarity(self):
         fingerprint = _summary_fingerprint('AUTO TOP HEADER', REGION_TOP)
