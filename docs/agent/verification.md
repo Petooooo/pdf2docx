@@ -6985,3 +6985,129 @@ Result: passed. 5 conversion tests ran successfully.
   an eligible header candidate under the current safety policy.
 - First-page, odd/even, section-scoped, image/logo, and paragraph continuation
   behavior remains out of scope.
+
+## Header/Footer Fidelity Improvement
+
+### Observed quality issue
+
+Manual reviewed-output inspection showed that header/footer role separation was
+structurally correct, but visual fidelity was weak. Header/footer text appeared
+in the correct Word parts, but font size, font family, bold/italic, color,
+alignment, and dynamic page-number output were not preserved well.
+
+### Metadata availability result
+
+- Page summaries already expose page width/height and text block bboxes.
+- Text spans already expose font, size, flags, and color.
+- The internal layout-analysis summary now preserves color when available and
+  keeps a separate style payload for writer hints.
+- Candidate entries now carry lightweight bbox, page-size, style, alignment,
+  and line-index metadata.
+
+Local ignored investigation reports:
+
+- `local_reports/header_footer_fidelity/metadata-availability-report.md`
+- `local_reports/header_footer_fidelity/reviewed-output-openxml-fidelity-report.md`
+- `local_reports/header_footer_fidelity/fidelity-root-cause.md`
+
+### Root cause
+
+The internal generation plan flattened approved candidates into plain text
+lists, and the writer assigned paragraph text directly. That discarded available
+layout/style hints before DOCX header/footer XML was written.
+
+### Implementation summary
+
+- Added styled `header_items`, `footer_items`, and `page_number_items` while
+  keeping existing text-list keys for compatibility.
+- Added conservative alignment inference from bbox center and page width.
+- Applied simple paragraph alignment and run font size, font family, bold,
+  italic, and color hints in the internal DOCX writer.
+- Kept `placeholder_only` diagnostic and required explicit `word_field` for
+  real Word PAGE fields.
+- Default conversion behavior remains unchanged.
+- Public CLI/API remains unchanged and closed.
+
+### New regression tests
+
+- Styled header/footer plans write role-specific OpenXML with alignment, font
+  size, bold/italic, and color markers.
+- Alignment inference covers left, center, right, and unknown.
+- `word_field` page-number output writes a PAGE field and avoids literal
+  `<PAGE_NUMBER>` visible text.
+- Missing style metadata still writes header/footer text without crashing.
+- Existing role-mapping and word-field tests continue to inspect header/footer
+  XML separately.
+
+### Local smoke result
+
+The first smoke attempt against the default reviewed batch output path failed
+because the existing `input.docx` was locked by another process. A second smoke
+run used isolated ignored output paths under
+`local_reports/header_footer_fidelity/smoke/` and passed:
+
+- default converted/skipped-existing: 1
+- reviewed converted: 1
+- failed: 0
+- reviewed DOCX has `word/header1.xml` and `word/footer1.xml`
+- footer XML contains a Word PAGE field when `word_field` is selected
+- footer XML does not contain literal `<PAGE_NUMBER>`
+- header and footer XML contain style/alignment markers
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "header_footer_fidelity or header_footer_role or page_number or word_field"
+```
+
+Result: passed. 24 selected tests and 6 subtests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 369 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Local reviewed smoke:
+
+```bash
+.venv/bin/python local_reports/reviewed_migration_batch_compare/batch_compare_reviewed_migration.py --overwrite --allow-source-tree --page-number-behavior word_field --default-output-dir local_reports/header_footer_fidelity/smoke/output_docx_default --reviewed-output-dir local_reports/header_footer_fidelity/smoke/output_docx_reviewed --report-dir local_reports/header_footer_fidelity/smoke/reports --log-dir local_reports/header_footer_fidelity/smoke/logs
+```
+
+Result: passed. Local artifacts remain ignored.
+
+### Remaining limitations
+
+- Exact PDF absolute positioning is not implemented.
+- Image/logo header/footer migration is not implemented.
+- First-page, odd/even, and section-scoped writer application remains
+  fail-closed.
+- `placeholder_only` and `static_text` remain diagnostic literal modes.

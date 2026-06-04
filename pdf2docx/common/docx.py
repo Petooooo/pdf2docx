@@ -1,6 +1,8 @@
 '''docx operation methods based on ``python-docx``.'''
 
-from docx.shared import Pt
+import re
+
+from docx.shared import Pt, RGBColor
 try:
     # python-docx <= 0.8.11 or python-docx > 1.0.0
     from docx.oxml import OxmlElement, parse_xml, register_element_cls
@@ -10,7 +12,7 @@ except ImportError:
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml.shape import CT_Picture
 from docx.oxml.xmlchemy import BaseOxmlElement, OneAndOnlyOne
-from docx.enum.text import WD_COLOR_INDEX
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.image.exceptions import UnrecognizedImageError
 from docx.table import _Cell
 from docx.opc.constants import RELATIONSHIP_TYPE
@@ -109,9 +111,11 @@ def apply_header_footer_text_plan(
     '''Apply a simple internal header/footer text plan to a python-docx document.
 
     This helper is not called by the normal conversion path. It supports only
-    plain text header/footer content. Page numbers are explicit: placeholder
-    and static-text modes are diagnostic, while word_field writes an internal
-    OpenXML PAGE field only when this helper is explicitly enabled.
+    simple header/footer content. When the internal plan carries style or
+    alignment hints, the helper applies those hints conservatively. Page
+    numbers are explicit: placeholder and static-text modes are diagnostic,
+    while word_field writes an internal OpenXML PAGE field only when this
+    helper is explicitly enabled.
     '''
     sections = list(getattr(document, 'sections', []) or [])
     page_number_behavior = _normalize_page_number_behavior(page_number_behavior)
@@ -127,6 +131,9 @@ def apply_header_footer_text_plan(
                 'page_number_field_generation': 'deferred_placeholder_only',
                 'page_number_behavior': page_number_behavior,
                 'page_number_fields_written': 0,
+                'styled_runs_written': 0,
+                'style_properties_applied': 0,
+                'alignment_paragraphs_written': 0,
             },
             'safety_warnings': [],
         }
@@ -168,26 +175,52 @@ def apply_header_footer_text_plan(
     footer_count = 0
     page_number_fields_written = 0
     page_number_placeholders_written = 0
+    styled_runs_written = 0
+    style_properties_applied = 0
+    alignment_paragraphs_written = 0
     if sections and plan_sections and not warnings:
         section = sections[0]
         section_plan = plan_sections[0]
-        header_texts = _header_footer_plan_texts(section_plan, 'header_texts')
-        footer_texts = _header_footer_plan_texts(section_plan, 'footer_texts')
-        page_number_placeholders = _header_footer_plan_texts(
+        header_items = _header_footer_plan_items(
             section_plan,
+            'header_items',
+            'header_texts')
+        footer_items = _header_footer_plan_items(
+            section_plan,
+            'footer_items',
+            'footer_texts')
+        page_number_items = _header_footer_plan_items(
+            section_plan,
+            'page_number_items',
             'page_number_placeholders')
         if page_number_behavior in {
                 _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
                 _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
-            footer_texts.extend(page_number_placeholders)
-            page_number_placeholders_written = len(page_number_placeholders)
-        header_count = _replace_header_footer_part_text(section.header, header_texts)
-        footer_count = _replace_header_footer_part_text(section.footer, footer_texts)
+            footer_items.extend(page_number_items)
+            page_number_placeholders_written = len(page_number_items)
+        header_result = _replace_header_footer_part_items(section.header, header_items)
+        footer_result = _replace_header_footer_part_items(section.footer, footer_items)
+        header_count = header_result['paragraphs_written']
+        footer_count = footer_result['paragraphs_written']
+        styled_runs_written += (
+            header_result['styled_runs_written'] +
+            footer_result['styled_runs_written'])
+        style_properties_applied += (
+            header_result['style_properties_applied'] +
+            footer_result['style_properties_applied'])
+        alignment_paragraphs_written += (
+            header_result['alignment_paragraphs_written'] +
+            footer_result['alignment_paragraphs_written'])
         if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
-            page_number_fields_written = _append_page_number_fields(
+            page_number_result = _append_page_number_fields(
                 section.footer,
-                page_number_placeholders)
+                page_number_items)
+            page_number_fields_written = page_number_result['fields_written']
             footer_count += page_number_fields_written
+            styled_runs_written += page_number_result['styled_runs_written']
+            style_properties_applied += page_number_result['style_properties_applied']
+            alignment_paragraphs_written += (
+                page_number_result['alignment_paragraphs_written'])
 
     return {
         'enabled': True,
@@ -203,6 +236,9 @@ def apply_header_footer_text_plan(
                 page_number_behavior),
             'page_number_fields_written': page_number_fields_written,
             'page_number_placeholders_written': page_number_placeholders_written,
+            'styled_runs_written': styled_runs_written,
+            'style_properties_applied': style_properties_applied,
+            'alignment_paragraphs_written': alignment_paragraphs_written,
         },
         'safety_warnings': warnings,
         'plan_safety_warnings': plan_safety_warnings,
@@ -231,6 +267,41 @@ def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
         if text:
             values.append(text)
     return values
+
+
+def _header_footer_plan_items(
+        section_plan: dict,
+        item_key: str,
+        text_key: str) -> list:
+    values = []
+    raw_items = section_plan.get(item_key, []) or []
+    if raw_items:
+        for value in raw_items:
+            item = _normalize_header_footer_plan_item(value)
+            if item.get('text'):
+                values.append(item)
+        return values
+
+    return [
+        {'text': text}
+        for text in _header_footer_plan_texts(section_plan, text_key)
+    ]
+
+
+def _normalize_header_footer_plan_item(value) -> dict:
+    if isinstance(value, dict):
+        item = dict(value)
+        style = item.get('style') or {}
+        if isinstance(style, dict):
+            item.setdefault('font_name', style.get('font_name', ''))
+            item.setdefault('font_size', style.get('font_size'))
+            item.setdefault('bold', style.get('bold'))
+            item.setdefault('italic', style.get('italic'))
+            item.setdefault('color', style.get('color'))
+        item['text'] = str(item.get('text', '')).strip()
+        item['alignment'] = str(item.get('alignment', '')).strip().lower()
+        return item
+    return {'text': str(value or '').strip()}
 
 
 def _header_footer_plan_role_warnings(plan: dict) -> list:
@@ -312,13 +383,22 @@ def _header_footer_plan_entry_warning(entry: dict, warning_type: str) -> dict:
     }
 
 
-def _append_page_number_fields(part, placeholders: list) -> int:
-    written = 0
-    for _placeholder in placeholders or []:
+def _append_page_number_fields(part, items: list) -> dict:
+    result = _header_footer_write_result()
+    for value in items or []:
+        item = _normalize_header_footer_plan_item(value)
+        if not item.get('text'):
+            continue
         paragraph = part.add_paragraph()
-        add_page_number_field(paragraph)
-        written += 1
-    return written
+        result['alignment_paragraphs_written'] += (
+            _apply_header_footer_paragraph_alignment(paragraph, item))
+        run = add_page_number_field(paragraph)
+        style_count = _apply_header_footer_run_style(run, item)
+        if style_count:
+            result['styled_runs_written'] += 1
+            result['style_properties_applied'] += style_count
+        result['fields_written'] += 1
+    return result
 
 
 def add_page_number_field(paragraph):
@@ -346,13 +426,136 @@ def add_page_number_field(paragraph):
 
 
 def _replace_header_footer_part_text(part, texts: list) -> int:
+    return _replace_header_footer_part_items(
+        part,
+        [{'text': text} for text in texts or []])['paragraphs_written']
+
+
+def _replace_header_footer_part_items(part, items: list) -> dict:
+    result = _header_footer_write_result()
     paragraphs = list(part.paragraphs)
-    written = 0
-    for index, text in enumerate(texts or []):
+    for index, value in enumerate(items or []):
+        item = _normalize_header_footer_plan_item(value)
+        text = item.get('text', '')
+        if not text:
+            continue
         paragraph = paragraphs[index] if index < len(paragraphs) else part.add_paragraph()
-        paragraph.text = text
-        written += 1
-    return written
+        _clear_paragraph_text(paragraph)
+        result['alignment_paragraphs_written'] += (
+            _apply_header_footer_paragraph_alignment(paragraph, item))
+        run = paragraph.add_run(text)
+        style_count = _apply_header_footer_run_style(run, item)
+        if style_count:
+            result['styled_runs_written'] += 1
+            result['style_properties_applied'] += style_count
+        result['paragraphs_written'] += 1
+    return result
+
+
+def _header_footer_write_result() -> dict:
+    return {
+        'paragraphs_written': 0,
+        'fields_written': 0,
+        'styled_runs_written': 0,
+        'style_properties_applied': 0,
+        'alignment_paragraphs_written': 0,
+    }
+
+
+def _clear_paragraph_text(paragraph):
+    for child in list(paragraph._p):
+        if child.tag != qn('w:pPr'):
+            paragraph._p.remove(child)
+
+
+def _apply_header_footer_paragraph_alignment(paragraph, item: dict) -> int:
+    alignment = str((item or {}).get('alignment', '')).strip().lower()
+    values = {
+        'left': WD_ALIGN_PARAGRAPH.LEFT,
+        'center': WD_ALIGN_PARAGRAPH.CENTER,
+        'right': WD_ALIGN_PARAGRAPH.RIGHT,
+    }
+    if alignment not in values:
+        return 0
+    paragraph.alignment = values[alignment]
+    return 1
+
+
+def _apply_header_footer_run_style(run, item: dict) -> int:
+    count = 0
+    font_name = _safe_header_footer_font_name((item or {}).get('font_name', ''))
+    if font_name:
+        run.font.name = font_name
+        if run._element.rPr is not None:
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+        count += 1
+
+    font_size = _header_footer_optional_float((item or {}).get('font_size'))
+    if font_size and font_size > 0:
+        run.font.size = Pt(font_size)
+        count += 1
+
+    bold = _header_footer_optional_bool((item or {}).get('bold'))
+    if bold is not None:
+        run.bold = bold
+        count += 1
+
+    italic = _header_footer_optional_bool((item or {}).get('italic'))
+    if italic is not None:
+        run.italic = italic
+        count += 1
+
+    color = _header_footer_hex_color((item or {}).get('color'))
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+        count += 1
+    return count
+
+
+def _safe_header_footer_font_name(value: str) -> str:
+    text = str(value or '').strip()
+    if not text or len(text) > 80:
+        return ''
+    if re.search(r'[\x00-\x1f<>]', text):
+        return ''
+    return text
+
+
+def _header_footer_optional_float(value):
+    if value in ('', None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _header_footer_optional_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value in ('', None):
+        return None
+    text = str(value).strip().lower()
+    if text in {'true', '1', 'yes'}:
+        return True
+    if text in {'false', '0', 'no'}:
+        return False
+    return None
+
+
+def _header_footer_hex_color(value) -> str:
+    if value in ('', None):
+        return ''
+    if isinstance(value, int) and 0 <= value <= 0xFFFFFF:
+        return f'{value:06X}'
+    text = str(value).strip().upper()
+    if text.startswith('#'):
+        text = text[1:]
+    if text.startswith('0X'):
+        text = text[2:]
+    if len(text) == 6 and re.fullmatch(r'[0-9A-F]{6}', text):
+        return text
+    return ''
 
 
 def reset_paragraph_format(p, line_spacing:float=1.05):

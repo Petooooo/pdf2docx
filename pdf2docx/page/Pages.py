@@ -1396,12 +1396,16 @@ class Pages(BaseCollection):
             font = getattr(span, 'font', '')
             size = getattr(span, 'size', '')
             flags = getattr(span, 'flags', '')
-            if font or size or flags:
-                return {
+            color = getattr(span, 'color', '')
+            if font or size or flags or color not in ('', None):
+                style = {
                     'font': font,
                     'size': size,
                     'flags': flags,
                 }
+                if color not in ('', None):
+                    style['color'] = color
+                return style
         return {}
 
 

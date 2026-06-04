@@ -28,6 +28,10 @@ ROLE_PAGE_NUMBER = 'page_number'
 ROLE_LAYOUT_PLACEHOLDER = 'layout_placeholder'
 ROLE_REVIEW_ONLY = 'review_only'
 ROLE_KEEP_BODY = 'keep_body'
+DOCX_ALIGNMENT_LEFT = 'left'
+DOCX_ALIGNMENT_CENTER = 'center'
+DOCX_ALIGNMENT_RIGHT = 'right'
+DOCX_ALIGNMENT_UNKNOWN = 'unknown'
 PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY = 'placeholder_only'
 PAGE_NUMBER_BEHAVIOR_STATIC_TEXT = 'static_text'
 PAGE_NUMBER_BEHAVIOR_WORD_FIELD = 'word_field'
@@ -282,6 +286,7 @@ def text_block_records(
             bbox = _json_bbox(block.get('bbox'))
             region = classify_y_band(bbox, page_height, top_ratio, bottom_ratio)
             style = block.get('style') or _style_from_block(block)
+            style_payload = _docx_header_footer_style_payload(style)
             fingerprint = make_text_fingerprint(text, region, style=None)
             quality = text_quality_signals(text)
 
@@ -293,6 +298,7 @@ def text_block_records(
                 'bbox': bbox,
                 'region': region,
                 'style': normalize_style_key(style),
+                'style_properties': style_payload,
                 'fingerprint': fingerprint['key'],
                 'signals': quality,
             })
@@ -6020,17 +6026,182 @@ def _reviewed_candidate_allowed(candidate: dict, decision: str) -> tuple:
 def _docx_header_footer_text_lookup(page_summaries: list) -> dict:
     grouped = defaultdict(list)
     for page in page_summaries or []:
+        page_width = _docx_header_footer_number(
+            page.get('width', page.get('page_width', 0.0)))
+        page_height = _docx_header_footer_number(
+            page.get('height', page.get('page_height', 0.0)))
+        fallback_page_index = page.get('page_index', page.get('id', 0))
         for block in page.get('text_blocks', []) or []:
             fingerprint = block.get('fingerprint', '')
             text = normalize_text(block.get('text', ''))
             if fingerprint and text:
-                grouped[fingerprint].append(text)
+                grouped[fingerprint].append({
+                    'text': text,
+                    'page_index': _readiness_int(
+                        block.get('page_index', fallback_page_index)),
+                    'block_index': _readiness_int(block.get('block_index', 0)),
+                    'metadata': _docx_header_footer_block_metadata(
+                        block,
+                        page_width,
+                        page_height),
+                })
 
     lookup = {}
-    for fingerprint, texts in grouped.items():
-        counts = Counter(normalize_text(text) for text in texts if normalize_text(text))
-        lookup[fingerprint] = counts.most_common(1)[0][0] if counts else ''
+    for fingerprint, records in grouped.items():
+        counts = Counter(
+            normalize_text(record.get('text', ''))
+            for record in records
+            if normalize_text(record.get('text', '')))
+        text = counts.most_common(1)[0][0] if counts else ''
+        metadata = {}
+        if text:
+            matches = [
+                record for record in records
+                if normalize_text(record.get('text', '')) == text
+            ]
+            matches.sort(key=lambda item: (
+                _readiness_int(item.get('page_index', 0)),
+                _readiness_int(item.get('block_index', 0))))
+            if matches:
+                metadata = dict(matches[0].get('metadata') or {})
+        lookup[fingerprint] = {
+            'text': text,
+            'metadata': metadata,
+        }
     return lookup
+
+
+def infer_docx_header_footer_alignment(bbox, page_width) -> str:
+    '''Infer a simple paragraph alignment from a PDF text bbox.
+
+    This is intentionally approximate. It gives the internal writer a stable
+    left/center/right hint without attempting absolute PDF positioning.
+    '''
+    try:
+        width = float(page_width or 0.0)
+    except (TypeError, ValueError):
+        width = 0.0
+    if width <= 0 or not bbox or len(bbox) < 4:
+        return DOCX_ALIGNMENT_UNKNOWN
+    try:
+        x0 = float(bbox[0])
+        x1 = float(bbox[2])
+    except (TypeError, ValueError):
+        return DOCX_ALIGNMENT_UNKNOWN
+    center_x = (x0 + x1) / 2.0
+    if center_x < width / 3.0:
+        return DOCX_ALIGNMENT_LEFT
+    if center_x > width * 2.0 / 3.0:
+        return DOCX_ALIGNMENT_RIGHT
+    return DOCX_ALIGNMENT_CENTER
+
+
+def _docx_header_footer_block_metadata(
+        block: dict,
+        page_width: float,
+        page_height: float) -> dict:
+    bbox = _json_bbox(block.get('bbox'))
+    style = (
+        block.get('style_properties')
+        if isinstance(block.get('style_properties'), dict) else
+        block.get('style') or _style_from_block(block))
+    payload = _docx_header_footer_style_payload(style)
+    payload.update({
+        'bbox': bbox,
+        'page_width': page_width,
+        'page_height': page_height,
+        'alignment': infer_docx_header_footer_alignment(bbox, page_width),
+        'line_index': _readiness_int(block.get('block_index', 0)),
+    })
+    return payload
+
+
+def _docx_header_footer_style_payload(style=None) -> dict:
+    if isinstance(style, dict):
+        font_name = normalize_text(
+            style.get('font_name') or
+            style.get('font') or
+            style.get('font_family'))
+        font_size = _docx_header_footer_optional_float(
+            style.get('font_size', style.get('size')))
+        flags = _docx_header_footer_optional_int(style.get('flags'))
+        color = _docx_header_footer_color(style.get('color'))
+    else:
+        parts = normalize_text(style).split('|') if normalize_text(style) else []
+        font_name = parts[0] if parts else ''
+        font_size = (
+            _docx_header_footer_optional_float(parts[1])
+            if len(parts) > 1 else None)
+        flags = (
+            _docx_header_footer_optional_int(parts[2])
+            if len(parts) > 2 else None)
+        color = None
+
+    lower_font = font_name.lower()
+    bold = None
+    italic = None
+    if flags is not None:
+        bold = bool(flags & 2**4)
+        italic = bool(flags & 2**1)
+    if 'bold' in lower_font:
+        bold = True
+    if 'italic' in lower_font or 'oblique' in lower_font:
+        italic = True
+
+    return {
+        'font_name': font_name,
+        'font_size': font_size,
+        'bold': bold,
+        'italic': italic,
+        'color': color,
+        'flags': flags,
+    }
+
+
+def _docx_header_footer_number(value) -> float:
+    try:
+        return round(float(value or 0.0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _docx_header_footer_optional_float(value):
+    if value in ('', None):
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _docx_header_footer_optional_int(value):
+    if value in ('', None):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _docx_header_footer_color(value):
+    if value in ('', None):
+        return None
+    if isinstance(value, int):
+        if 0 <= value <= 0xFFFFFF:
+            return f'#{value:06X}'
+        return None
+    text = normalize_text(value).upper()
+    if not text:
+        return None
+    if text.startswith('#'):
+        text = text[1:]
+    if text.startswith('0X'):
+        text = text[2:]
+    if len(text) != 6:
+        return None
+    if not re.fullmatch(r'[0-9A-F]{6}', text):
+        return None
+    return f'#{text}'
 
 
 def _normalize_docx_page_number_behavior(value: str) -> str:
@@ -6091,6 +6262,14 @@ def _docx_header_footer_plan_entry(
             'Placeholder-like text is not represented as semantic header/footer content.')
 
     target_part = 'header' if role == ROLE_HEADER else 'footer'
+    metadata = _docx_header_footer_candidate_metadata(candidate, text_lookup)
+    style = {
+        'font_name': metadata.get('font_name', ''),
+        'font_size': metadata.get('font_size'),
+        'bold': metadata.get('bold'),
+        'italic': metadata.get('italic'),
+        'color': metadata.get('color'),
+    }
     return {
         'candidate_id': candidate.get('candidate_id', ''),
         'fingerprint': candidate.get('fingerprint', ''),
@@ -6103,6 +6282,18 @@ def _docx_header_footer_plan_entry(
         'regions': sorted(regions),
         'support_count': _readiness_int(candidate.get('support_count', 0)),
         'page_count': _readiness_int(candidate.get('page_count', 0)),
+        'region': sorted(regions)[0] if regions else '',
+        'bbox': metadata.get('bbox', []),
+        'page_width': metadata.get('page_width', 0.0),
+        'page_height': metadata.get('page_height', 0.0),
+        'font_name': style['font_name'],
+        'font_size': style['font_size'],
+        'bold': style['bold'],
+        'italic': style['italic'],
+        'color': style['color'],
+        'alignment': metadata.get('alignment', DOCX_ALIGNMENT_UNKNOWN),
+        'line_index': metadata.get('line_index', 0),
+        'style': style,
         'first_page_policy': 'deferred',
         'odd_even_policy': 'deferred',
         'page_number_behavior': (
@@ -6149,10 +6340,21 @@ def _docx_header_footer_role_region_warning(
 
 def _docx_header_footer_candidate_text(candidate: dict, text_lookup: dict) -> str:
     fingerprint = candidate.get('fingerprint', '')
-    text = normalize_text(text_lookup.get(fingerprint, ''))
+    value = text_lookup.get(fingerprint, '')
+    if isinstance(value, dict):
+        text = normalize_text(value.get('text', ''))
+    else:
+        text = normalize_text(value)
     if text:
         return text
     return normalize_text((fingerprint or '').split('||')[0])
+
+
+def _docx_header_footer_candidate_metadata(candidate: dict, text_lookup: dict) -> dict:
+    value = text_lookup.get(candidate.get('fingerprint', ''), {})
+    if isinstance(value, dict):
+        return dict(value.get('metadata') or {})
+    return {}
 
 
 def _docx_header_footer_warning(candidate: dict, warning_type: str, message: str) -> dict:
@@ -6210,6 +6412,16 @@ def _docx_header_footer_generation_plan_result(
         'semantic_header_footer_text_count': sum(
             1 for entry in entries
             if entry.get('text_kind') == 'semantic_text'),
+        'style_metadata_entry_count': sum(
+            1 for entry in entries
+            if _docx_header_footer_entry_has_style_metadata(entry)),
+        'alignment_inferred_entry_count': sum(
+            1 for entry in entries
+            if entry.get('alignment') in {
+                DOCX_ALIGNMENT_LEFT,
+                DOCX_ALIGNMENT_CENTER,
+                DOCX_ALIGNMENT_RIGHT,
+            }),
         'supported_page_number_behaviors': sorted(PAGE_NUMBER_BEHAVIORS),
         'page_number_behavior': page_number_behavior,
         'page_number_field_generation': page_number_field_generation,
@@ -6549,6 +6761,9 @@ def _docx_header_footer_section_plan(
         'header_texts': _unique_entry_texts(entries, ROLE_HEADER),
         'footer_texts': _unique_entry_texts(entries, ROLE_FOOTER),
         'page_number_placeholders': _unique_entry_texts(entries, ROLE_PAGE_NUMBER),
+        'header_items': _unique_entry_items(entries, ROLE_HEADER),
+        'footer_items': _unique_entry_items(entries, ROLE_FOOTER),
+        'page_number_items': _unique_entry_items(entries, ROLE_PAGE_NUMBER),
     }
 
 
@@ -6561,6 +6776,58 @@ def _unique_entry_texts(entries: list, role: str) -> list:
         if text and text not in values:
             values.append(text)
     return values
+
+
+def _unique_entry_items(entries: list, role: str) -> list:
+    values = []
+    seen = set()
+    for entry in entries or []:
+        if entry.get('role') != role:
+            continue
+        item = _docx_header_footer_item_from_entry(entry)
+        text = normalize_text(item.get('text', ''))
+        if not text:
+            continue
+        key = (
+            text,
+            item.get('alignment'),
+            item.get('font_name'),
+            item.get('font_size'),
+            item.get('bold'),
+            item.get('italic'),
+            item.get('color'),
+        )
+        if key not in seen:
+            seen.add(key)
+            values.append(item)
+    return values
+
+
+def _docx_header_footer_item_from_entry(entry: dict) -> dict:
+    style = dict(entry.get('style') or {})
+    return {
+        'text': normalize_text(entry.get('text', '')),
+        'role': entry.get('role', ''),
+        'target_part': entry.get('target_part', ''),
+        'region': entry.get('region', ''),
+        'regions': list(entry.get('regions', []) or []),
+        'bbox': list(entry.get('bbox', []) or []),
+        'page_width': entry.get('page_width', 0.0),
+        'page_height': entry.get('page_height', 0.0),
+        'font_name': style.get('font_name', entry.get('font_name', '')),
+        'font_size': style.get('font_size', entry.get('font_size')),
+        'bold': style.get('bold', entry.get('bold')),
+        'italic': style.get('italic', entry.get('italic')),
+        'color': style.get('color', entry.get('color')),
+        'alignment': entry.get('alignment', DOCX_ALIGNMENT_UNKNOWN),
+        'line_index': entry.get('line_index', 0),
+    }
+
+
+def _docx_header_footer_entry_has_style_metadata(entry: dict) -> bool:
+    return any(
+        entry.get(key) not in ('', None, [])
+        for key in ('font_name', 'font_size', 'bold', 'italic', 'color'))
 
 
 def _block_matches_reviewed_candidate(block: dict, page_index, candidate: dict) -> bool:

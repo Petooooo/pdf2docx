@@ -160,6 +160,21 @@ writer application trusted `proposed_role` without a final role-vs-region
 consistency check. Regression coverage now validates header/footer/page-number
 OpenXML parts separately, and role/region mismatches fail closed before writing.
 
+## Header/Footer Fidelity Follow-Up
+
+Manual inspection after the role-mapping fix showed that reviewed migration
+output was structurally correct but visually weak: header/footer text was placed
+in the correct Word parts, but basic style, alignment, and dynamic page-number
+fidelity were poor.
+
+The internal plan now carries lightweight style/layout hints for approved
+header/footer/page-number entries, and the internal DOCX writer applies simple
+paragraph alignment plus run font size, bold, italic, color, and font-family
+hints when they are available. `word_field` remains explicit and internal-only;
+`placeholder_only` remains the default diagnostic mode. Exact PDF absolute
+positioning, images/logos, and non-default header/footer policies remain out of
+scope and fail closed.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

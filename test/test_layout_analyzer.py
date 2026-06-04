@@ -76,6 +76,7 @@ build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 build_table_delta_investigation_report = LayoutAnalyzer.build_table_delta_investigation_report
 reviewed_filtering_config_to_document_parse_settings = LayoutAnalyzer.reviewed_filtering_config_to_document_parse_settings
 find_paragraph_continuation_candidates = LayoutAnalyzer.find_paragraph_continuation_candidates
+infer_docx_header_footer_alignment = LayoutAnalyzer.infer_docx_header_footer_alignment
 make_text_fingerprint = LayoutAnalyzer.make_text_fingerprint
 normalize_page_number = LayoutAnalyzer.normalize_page_number
 normalize_text = LayoutAnalyzer.normalize_text
@@ -5575,6 +5576,291 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('header_entry_target_part_mismatch', warning_types)
         self.assertNotIn('BOTTOM FOOTER TEXT', openxml['header_xml'])
         self.assertNotIn('TOP HEADER TEXT', openxml['footer_xml'])
+
+    def test_header_footer_fidelity_alignment_inference_uses_bbox_position(self):
+        self.assertEqual(
+            infer_docx_header_footer_alignment([30, 10, 130, 20], 600),
+            'left')
+        self.assertEqual(
+            infer_docx_header_footer_alignment([250, 10, 350, 20], 600),
+            'center')
+        self.assertEqual(
+            infer_docx_header_footer_alignment([470, 10, 570, 20], 600),
+            'right')
+        self.assertEqual(
+            infer_docx_header_footer_alignment([], 600),
+            'unknown')
+
+    def test_header_footer_fidelity_generation_plan_carries_style_layout_metadata(self):
+        header_text = 'STYLED PLAN HEADER'
+        footer_text = 'STYLED PLAN FOOTER'
+        header_fingerprint = _summary_fingerprint(header_text, REGION_TOP)
+        footer_fingerprint = _summary_fingerprint(footer_text, REGION_BOTTOM)
+        page_summaries = []
+        for page_index in range(2):
+            page_summaries.append({
+                'page_index': page_index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    {
+                        'page_index': page_index,
+                        'block_index': 0,
+                        'fingerprint': header_fingerprint,
+                        'region': REGION_TOP,
+                        'text': header_text,
+                        'bbox': [240, 24, 360, 40],
+                        'style_properties': {
+                            'font_name': 'SourceSans-BoldItalic',
+                            'font_size': 14,
+                            'flags': 18,
+                            'color': '#336699',
+                        },
+                    },
+                    {
+                        'page_index': page_index,
+                        'block_index': 1,
+                        'fingerprint': footer_fingerprint,
+                        'region': REGION_BOTTOM,
+                        'text': footer_text,
+                        'bbox': [450, 760, 570, 778],
+                        'style_properties': {
+                            'font_name': 'SourceSans-Italic',
+                            'font_size': 9,
+                            'flags': 2,
+                            'color': '#666666',
+                        },
+                    },
+                ],
+            })
+        dry_run = {
+            'candidates': [
+                _dry_run_candidate(
+                    'styled-header',
+                    header_fingerprint,
+                    ROLE_HEADER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0, 1],
+                    [REGION_TOP]),
+                _dry_run_candidate(
+                    'styled-footer',
+                    footer_fingerprint,
+                    ROLE_FOOTER,
+                    ACTION_WOULD_EXCLUDE,
+                    [0, 1],
+                    [REGION_BOTTOM]),
+            ],
+        }
+        decisions = {
+            'decisions': [
+                _review_decision('styled-header', header_fingerprint, 'approve_exclude'),
+                _review_decision('styled-footer', footer_fingerprint, 'approve_exclude'),
+            ],
+        }
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True)
+        header_entry = next(
+            entry for entry in plan['entries']
+            if entry.get('role') == ROLE_HEADER)
+        footer_item = plan['sections'][0]['footer_items'][0]
+
+        self.assertEqual(header_entry['alignment'], 'center')
+        self.assertEqual(header_entry['font_size'], 14.0)
+        self.assertTrue(header_entry['bold'])
+        self.assertTrue(header_entry['italic'])
+        self.assertEqual(header_entry['color'], '#336699')
+        self.assertEqual(header_entry['bbox'], [240.0, 24.0, 360.0, 40.0])
+        self.assertEqual(footer_item['alignment'], 'right')
+        self.assertEqual(footer_item['font_size'], 9.0)
+        self.assertTrue(plan['summary']['style_metadata_entry_count'] >= 2)
+        self.assertTrue(plan['summary']['alignment_inferred_entry_count'] >= 2)
+        json.dumps(plan)
+
+    def test_header_footer_fidelity_styled_plan_writes_role_specific_openxml(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'header_texts': ['STYLED HEADER'],
+                'footer_texts': ['STYLED FOOTER'],
+                'page_number_placeholders': [],
+                'header_items': [{
+                    'text': 'STYLED HEADER',
+                    'role': ROLE_HEADER,
+                    'target_part': 'header',
+                    'regions': [REGION_TOP],
+                    'alignment': 'center',
+                    'font_name': 'Arial',
+                    'font_size': 14,
+                    'bold': True,
+                    'italic': False,
+                    'color': '#336699',
+                }],
+                'footer_items': [{
+                    'text': 'STYLED FOOTER',
+                    'role': ROLE_FOOTER,
+                    'target_part': 'footer',
+                    'regions': [REGION_BOTTOM],
+                    'alignment': 'right',
+                    'font_name': 'Calibri',
+                    'font_size': 9,
+                    'bold': False,
+                    'italic': True,
+                    'color': '#666666',
+                }],
+                'page_number_items': [],
+            }],
+            'entries': [
+                {
+                    'candidate_id': 'styled-header',
+                    'role': ROLE_HEADER,
+                    'target_part': 'header',
+                    'regions': [REGION_TOP],
+                    'text': 'STYLED HEADER',
+                },
+                {
+                    'candidate_id': 'styled-footer',
+                    'role': ROLE_FOOTER,
+                    'target_part': 'footer',
+                    'regions': [REGION_BOTTOM],
+                    'text': 'STYLED FOOTER',
+                },
+            ],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'styled-header-footer.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertGreaterEqual(report['summary']['styled_runs_written'], 2)
+        self.assertGreaterEqual(report['summary']['alignment_paragraphs_written'], 2)
+        self.assertIn('STYLED HEADER', openxml['header_xml'])
+        self.assertNotIn('STYLED FOOTER', openxml['header_xml'])
+        self.assertIn('STYLED FOOTER', openxml['footer_xml'])
+        self.assertNotIn('STYLED HEADER', openxml['footer_xml'])
+        self.assertIn('w:jc w:val="center"', openxml['header_xml'])
+        self.assertIn('w:b', openxml['header_xml'])
+        self.assertIn('w:sz w:val="28"', openxml['header_xml'])
+        self.assertIn('w:color w:val="336699"', openxml['header_xml'])
+        self.assertIn('w:jc w:val="right"', openxml['footer_xml'])
+        self.assertIn('w:i', openxml['footer_xml'])
+        self.assertIn('w:sz w:val="18"', openxml['footer_xml'])
+        self.assertIn('w:color w:val="666666"', openxml['footer_xml'])
+
+    def test_header_footer_fidelity_word_field_uses_style_without_literal_placeholder(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'header_texts': [],
+                'footer_texts': [],
+                'page_number_placeholders': [PAGE_NUMBER_PLACEHOLDER],
+                'header_items': [],
+                'footer_items': [],
+                'page_number_items': [{
+                    'text': PAGE_NUMBER_PLACEHOLDER,
+                    'role': ROLE_PAGE_NUMBER,
+                    'target_part': 'footer',
+                    'regions': [REGION_BOTTOM],
+                    'alignment': 'right',
+                    'font_name': 'Arial',
+                    'font_size': 9,
+                    'italic': True,
+                    'color': '#666666',
+                }],
+            }],
+            'entries': [{
+                'candidate_id': 'page-number',
+                'role': ROLE_PAGE_NUMBER,
+                'target_part': 'footer',
+                'regions': [REGION_BOTTOM],
+                'text': PAGE_NUMBER_PLACEHOLDER,
+            }],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'styled-page-number.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['page_number_fields_written'], 1)
+        self.assertIn('w:instrText', openxml['footer_xml'])
+        self.assertIn(' PAGE ', openxml['footer_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+        self.assertIn('w:jc w:val="right"', openxml['footer_xml'])
+        self.assertIn('w:i', openxml['footer_xml'])
+        self.assertIn('w:sz w:val="18"', openxml['footer_xml'])
+        self.assertIn('w:color w:val="666666"', openxml['footer_xml'])
+
+    def test_header_footer_fidelity_missing_style_metadata_still_writes_text(self):
+        _require_docx_header_footer_support(self)
+        plan = {
+            'sections': [{
+                'header_items': [{'text': 'PLAIN INTERNAL HEADER'}],
+            }],
+            'entries': [{
+                'candidate_id': 'plain-header',
+                'role': ROLE_HEADER,
+                'target_part': 'header',
+                'regions': [REGION_TOP],
+                'text': 'PLAIN INTERNAL HEADER',
+            }],
+            'header_footer_policy': {
+                'policy_type': 'default',
+                'fail_closed': False,
+            },
+            'recommendation': {
+                'safe_for_internal_docx_header_footer_experiment': True,
+            },
+            'safety_warnings': [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'plain-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('PLAIN INTERNAL HEADER', openxml['header_xml'])
+        self.assertEqual(report['summary']['styled_runs_written'], 0)
+        self.assertEqual(report['summary']['alignment_paragraphs_written'], 0)
 
     def test_internal_docx_header_footer_word_page_field_writes_openxml(self):
         _require_docx_header_footer_support(self)
