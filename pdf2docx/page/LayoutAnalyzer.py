@@ -22,6 +22,15 @@ REGION_BOTTOM = 'bottom'
 ACTION_WOULD_EXCLUDE = 'would_exclude'
 ACTION_REVIEW = 'review'
 ACTION_KEEP = 'keep'
+AUTO_DECISION_EXCLUDE = 'auto_exclude'
+AUTO_DECISION_KEEP = 'auto_keep'
+AUTO_DECISION_DIAGNOSTIC = 'auto_diagnostic'
+AUTO_DECISIONS = {
+    AUTO_DECISION_EXCLUDE,
+    AUTO_DECISION_KEEP,
+    AUTO_DECISION_DIAGNOSTIC,
+}
+AUTOMATIC_HEADER_FOOTER_MODE = 'automatic'
 ROLE_HEADER = 'header'
 ROLE_FOOTER = 'footer'
 ROLE_PAGE_NUMBER = 'page_number'
@@ -116,6 +125,9 @@ DEFAULT_TOP_RATIO = 0.15
 DEFAULT_BOTTOM_RATIO = 0.15
 DEFAULT_NEAR_BODY_EDGE_RATIO = 0.12
 DOCX_HEADER_FOOTER_LINE_GROUP_Y_TOLERANCE = 3.0
+AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT = 2
+AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO = 0.66
+AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE = 8.0
 MIN_MEANINGFUL_TEXT_LENGTH = 12
 MIN_MEANINGFUL_WORDS = 2
 STRONG_SENTENCE_END_PUNC = '.．。?？!！'
@@ -601,6 +613,7 @@ def build_reviewed_filtering_internal_config(config: dict = None, **overrides) -
         'write_local_reports': bool(merged.get('write_local_reports', False)),
         'max_pages': max_pages,
         'page_subset': page_subset,
+        'dry_run_report_override': merged.get('dry_run_report_override'),
         'fail_closed_on_warning': bool(merged.get('fail_closed_on_warning', True)),
         'public_cli_exposed': False,
         'production_default_enabled': False,
@@ -685,6 +698,10 @@ def reviewed_filtering_config_to_document_parse_settings(
         'layout_analysis': True,
         '_document_parse_filtering_review_decisions': review_decisions,
     }
+    dry_run_report_override = internal_config.get('dry_run_report_override')
+    if dry_run_report_override:
+        settings['_document_parse_filtering_dry_run_report'] = dry_run_report_override
+        settings['_document_parse_mapping_dry_run_report'] = dry_run_report_override
     if mode in {
             REVIEWED_FILTERING_MODE_DRY_RUN,
             REVIEWED_FILTERING_MODE_SIMULATION,
@@ -1740,6 +1757,184 @@ def build_docx_header_footer_generation_plan(
         warnings=warnings,
         page_number_behavior=page_number_behavior,
         require_dynamic_page_number=require_dynamic_page_number)
+
+
+def classify_header_footer_candidate_automatically(
+        candidate: dict,
+        page_summaries: list = None,
+        page_count: int = None,
+        text_lookup: dict = None,
+        enabled: bool = True) -> dict:
+    '''Classify one candidate for internal automatic migration experiments.
+
+    This helper is deliberately separate from the manual review parser. It can
+    promote a dry-run ``review`` candidate only when independent boundary,
+    repetition, role-region, and bbox evidence is strong enough. Uncertain
+    candidates remain in the body as diagnostics.
+    '''
+    candidate = dict(candidate or {})
+    text_lookup = text_lookup or _docx_header_footer_text_lookup(page_summaries)
+    return _automatic_header_footer_candidate_decision(
+        candidate,
+        text_lookup,
+        page_count=page_count,
+        enabled=enabled)
+
+
+def build_automatic_header_footer_decisions(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        enabled: bool = True) -> dict:
+    '''Build a JSON-serializable automatic header/footer decision report.'''
+    candidates = _dry_run_candidates(dry_run_report)
+    page_count = _automatic_header_footer_page_count(
+        page_summaries,
+        candidates)
+    text_lookup = _docx_header_footer_text_lookup(page_summaries)
+    decisions = [
+        _automatic_header_footer_candidate_decision(
+            candidate,
+            text_lookup,
+            page_count=page_count,
+            enabled=enabled)
+        for candidate in candidates
+    ]
+    summary = _automatic_header_footer_decision_summary(
+        decisions,
+        page_count)
+    warnings = _automatic_header_footer_decision_warnings(
+        decisions,
+        enabled)
+    return {
+        'enabled': bool(enabled),
+        'mode': AUTOMATIC_HEADER_FOOTER_MODE,
+        'policy': 'internal_automatic_header_footer_classifier_only',
+        'summary': summary,
+        'decisions': decisions,
+        'warnings': warnings,
+        'public_cli_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+        'recommendation': {
+            'safe_for_internal_automatic_review': bool(
+                enabled and summary.get('auto_exclude_count', 0) > 0),
+            'manual_review_required': False,
+            'reason': _automatic_header_footer_decision_recommendation(
+                summary,
+                warnings),
+        },
+    }
+
+
+def build_automatic_header_footer_migration_plan(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        enabled: bool = True,
+        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        require_dynamic_page_number: bool = False) -> dict:
+    '''Build an internal automatic migration plan without public exposure.
+
+    The returned plan reuses the existing reviewed-generation safety checks by
+    translating only ``auto_exclude`` decisions into a private dry-run override
+    plus explicit approve_exclude decisions. Manual review behavior is not
+    changed.
+    '''
+    page_number_behavior = _normalize_docx_page_number_behavior(page_number_behavior)
+    decisions_report = build_automatic_header_footer_decisions(
+        page_summaries,
+        dry_run_report,
+        enabled=enabled)
+    transformed_dry_run = _automatic_header_footer_transformed_dry_run(
+        _dry_run_candidates(dry_run_report),
+        decisions_report)
+    review_decisions = _automatic_header_footer_review_decisions(decisions_report)
+    docx_plan = build_docx_header_footer_generation_plan(
+        page_summaries,
+        transformed_dry_run,
+        review_decisions,
+        enabled=enabled,
+        page_number_behavior=page_number_behavior,
+        require_dynamic_page_number=require_dynamic_page_number)
+    reviewed_filtering_config = build_reviewed_filtering_internal_config({
+        'enabled': bool(enabled and transformed_dry_run.get('candidates')),
+        'mode': REVIEWED_FILTERING_MODE_FILTERED_PARSE_EXPERIMENT,
+        'review_decisions': review_decisions,
+        'dry_run_report_override': transformed_dry_run,
+    })
+    config_report = build_reviewed_filtering_internal_config_report(
+        reviewed_filtering_config,
+        transformed_dry_run,
+        review_decisions,
+        enabled=enabled)
+    document_parse_settings = reviewed_filtering_config_to_document_parse_settings(
+        reviewed_filtering_config,
+        review_decisions=review_decisions,
+        activation_status=(
+            config_report.get('summary', {})
+            .get('activation_status', '')))
+    warnings = (
+        list(decisions_report.get('warnings', []) or []) +
+        list(docx_plan.get('safety_warnings', []) or []))
+    safe_for_plan = bool(
+        enabled and
+        transformed_dry_run.get('candidates') and
+        docx_plan.get('recommendation', {}).get(
+            'safe_for_internal_docx_header_footer_experiment') and
+        not _automatic_header_footer_blocking_warning_types(warnings))
+    return {
+        'enabled': bool(enabled),
+        'mode': AUTOMATIC_HEADER_FOOTER_MODE,
+        'policy': 'internal_automatic_header_footer_migration_plan_only',
+        'automatic_decisions': decisions_report,
+        'transformed_dry_run': transformed_dry_run,
+        'review_decisions': review_decisions,
+        'reviewed_filtering_internal_config': reviewed_filtering_config,
+        'reviewed_filtering_internal_config_report': config_report,
+        'document_parse_settings': document_parse_settings,
+        'docx_header_footer_generation_plan': docx_plan,
+        'summary': {
+            'enabled': bool(enabled),
+            'manual_review_required': False,
+            'auto_exclude_count': decisions_report.get('summary', {}).get(
+                'auto_exclude_count', 0),
+            'auto_keep_count': decisions_report.get('summary', {}).get(
+                'auto_keep_count', 0),
+            'auto_diagnostic_count': decisions_report.get('summary', {}).get(
+                'auto_diagnostic_count', 0),
+            'transformed_candidate_count': len(
+                transformed_dry_run.get('candidates', []) or []),
+            'representable_entry_count': docx_plan.get('summary', {}).get(
+                'representable_entry_count', 0),
+            'header_count': docx_plan.get('summary', {}).get(
+                'header_text_count', 0),
+            'footer_count': docx_plan.get('summary', {}).get(
+                'footer_text_count', 0),
+            'page_number_count': docx_plan.get('summary', {}).get(
+                'page_number_placeholder_count', 0),
+            'header_footer_policy_type': docx_plan.get('summary', {}).get(
+                'header_footer_policy_type', ''),
+            'header_footer_policy_fail_closed': docx_plan.get('summary', {}).get(
+                'header_footer_policy_fail_closed', True),
+            'page_number_behavior': page_number_behavior,
+            'page_number_semantics': docx_plan.get('summary', {}).get(
+                'page_number_semantics', ''),
+            'page_number_drift_risk': docx_plan.get('summary', {}).get(
+                'page_number_drift_risk', ''),
+            'safe_for_internal_automatic_migration': safe_for_plan,
+            'public_cli_exposed': False,
+            'production_default_enabled': False,
+            'default_conversion_changed': False,
+        },
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_for_internal_automatic_migration': safe_for_plan,
+            'manual_review_required': False,
+            'reason': _automatic_header_footer_migration_recommendation(
+                transformed_dry_run,
+                docx_plan,
+                warnings),
+        },
+    }
 
 
 def build_body_filtering_diff_report(
@@ -5981,6 +6176,445 @@ def _decision_counts(review_decisions) -> dict:
     for decision in decisions:
         counts[decision.get('manual_decision', DECISION_NONE)] += 1
     return dict(sorted(counts.items()))
+
+
+def _automatic_header_footer_candidate_decision(
+        candidate: dict,
+        text_lookup: dict,
+        page_count: int = None,
+        enabled: bool = True) -> dict:
+    candidate = dict(candidate or {})
+    evidence = []
+    blocking = []
+    regions = _candidate_regions(candidate)
+    support_count, total_pages, support_ratio = _automatic_header_footer_support(
+        candidate,
+        text_lookup,
+        page_count)
+    effective_role = _automatic_header_footer_effective_role(
+        candidate,
+        text_lookup,
+        regions)
+    region = _automatic_header_footer_region(regions)
+    bbox_stability = _automatic_header_footer_bbox_stability(
+        candidate,
+        text_lookup)
+    page_number_template = (
+        _docx_header_footer_candidate_page_number_template(candidate, text_lookup)
+        if effective_role == ROLE_PAGE_NUMBER else {})
+
+    if not enabled:
+        blocking.append('automatic_classifier_disabled')
+    if candidate.get('proposed_role') == ROLE_LAYOUT_PLACEHOLDER:
+        blocking.append('layout_placeholder_protected')
+    if _automatic_header_footer_protected_content_signal(candidate):
+        blocking.append('body_table_callout_list_content_protected')
+    if REGION_BODY in regions:
+        blocking.append('body_region_protected')
+
+    role_region_block = _automatic_header_footer_role_region_block(
+        effective_role,
+        regions)
+    if role_region_block:
+        blocking.append(role_region_block)
+    else:
+        evidence.append(f'{effective_role}_region_consistent')
+
+    if support_count >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT:
+        evidence.append('repeated_across_multiple_pages')
+    else:
+        blocking.append('insufficient_page_support')
+    if support_ratio >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO:
+        evidence.append('high_page_coverage')
+    else:
+        blocking.append('insufficient_page_coverage')
+
+    if bbox_stability.get('stable'):
+        evidence.append('stable_bbox_band')
+    else:
+        blocking.append(bbox_stability.get('reason') or 'unstable_bbox_band')
+
+    if effective_role == ROLE_PAGE_NUMBER:
+        if page_number_template.get('supported') and page_number_template.get('consecutive'):
+            evidence.append('parseable_consecutive_page_number_sequence')
+        elif page_number_template.get('supported'):
+            blocking.append('non_consecutive_page_number_sequence')
+        else:
+            blocking.append(
+                page_number_template.get('reason') or
+                'unsupported_page_number_template')
+    elif effective_role in {ROLE_HEADER, ROLE_FOOTER}:
+        text = _docx_header_footer_candidate_text(candidate, text_lookup)
+        if text and not _placeholder_kind(_comparison_text(text)):
+            evidence.append('semantic_boundary_text')
+        else:
+            blocking.append('missing_semantic_header_footer_text')
+    else:
+        blocking.append('role_not_auto_migratable')
+
+    hard_keep = bool({
+        'automatic_classifier_disabled',
+        'layout_placeholder_protected',
+        'body_table_callout_list_content_protected',
+        'body_region_protected',
+        'header_role_region_mismatch',
+        'footer_role_region_mismatch',
+        'page_number_region_mismatch',
+    }.intersection(blocking))
+    if not blocking:
+        auto_decision = AUTO_DECISION_EXCLUDE
+        safe_for_migration = True
+    elif hard_keep:
+        auto_decision = AUTO_DECISION_KEEP
+        safe_for_migration = False
+    else:
+        auto_decision = AUTO_DECISION_DIAGNOSTIC
+        safe_for_migration = False
+
+    confidence = _automatic_header_footer_confidence(
+        support_ratio,
+        evidence,
+        blocking,
+        auto_decision)
+    return {
+        'candidate_id': candidate.get('candidate_id', ''),
+        'fingerprint': candidate.get('fingerprint', ''),
+        'proposed_role': candidate.get('proposed_role', ''),
+        'automatic_role': effective_role,
+        'action': candidate.get('action', ''),
+        'auto_decision': auto_decision,
+        'confidence': confidence,
+        'evidence': evidence,
+        'blocking_reasons': sorted(set(blocking)),
+        'affected_pages': list(candidate.get('affected_pages', []) or []),
+        'support_count': support_count,
+        'page_count': total_pages,
+        'support_ratio': round(support_ratio, 3),
+        'bbox_stability': bbox_stability,
+        'region': region,
+        'regions': sorted(regions),
+        'safe_for_migration': bool(safe_for_migration),
+        'page_number_template': page_number_template,
+        'text_preview': _automatic_header_footer_text_preview(candidate, text_lookup),
+    }
+
+
+def _automatic_header_footer_page_count(page_summaries: list, candidates: list) -> int:
+    page_count = len(page_summaries or [])
+    for candidate in candidates or []:
+        page_count = max(page_count, _readiness_int(candidate.get('page_count', 0)))
+        affected = [
+            _readiness_int(page)
+            for page in candidate.get('affected_pages', []) or []
+        ]
+        if affected:
+            page_count = max(page_count, max(affected) + 1)
+    return page_count
+
+
+def _automatic_header_footer_support(
+        candidate: dict,
+        text_lookup: dict,
+        page_count: int = None) -> tuple:
+    records = _automatic_header_footer_records(candidate, text_lookup)
+    support_count = (
+        _readiness_int(candidate.get('support_count', 0)) or
+        len(candidate.get('affected_pages', []) or []) or
+        len(records))
+    total_pages = (
+        _readiness_int(candidate.get('page_count', 0)) or
+        _readiness_int(page_count or 0) or
+        support_count)
+    if total_pages <= 0:
+        total_pages = support_count
+    support_ratio = (support_count / total_pages) if total_pages else 0.0
+    return support_count, total_pages, support_ratio
+
+
+def _automatic_header_footer_effective_role(
+        candidate: dict,
+        text_lookup: dict,
+        regions: set) -> str:
+    role = candidate.get('proposed_role', '')
+    if role in {ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER, ROLE_LAYOUT_PLACEHOLDER}:
+        return role
+    page_number_template = _docx_header_footer_candidate_page_number_template(
+        candidate,
+        text_lookup)
+    if REGION_BOTTOM in regions and page_number_template.get('supported'):
+        return ROLE_PAGE_NUMBER
+    if regions == {REGION_TOP}:
+        return ROLE_HEADER
+    if regions == {REGION_BOTTOM}:
+        return ROLE_FOOTER
+    return role or ROLE_REVIEW_ONLY
+
+
+def _automatic_header_footer_region(regions: set) -> str:
+    regions = set(regions or [])
+    if len(regions) == 1:
+        return next(iter(regions))
+    if not regions:
+        return ''
+    return 'mixed'
+
+
+def _automatic_header_footer_role_region_block(role: str, regions: set) -> str:
+    regions = set(regions or [])
+    if role == ROLE_HEADER:
+        return '' if regions == {REGION_TOP} else 'header_role_region_mismatch'
+    if role == ROLE_FOOTER:
+        return '' if regions == {REGION_BOTTOM} else 'footer_role_region_mismatch'
+    if role == ROLE_PAGE_NUMBER:
+        return '' if regions == {REGION_BOTTOM} else 'page_number_region_mismatch'
+    if role == ROLE_LAYOUT_PLACEHOLDER:
+        return 'layout_placeholder_protected'
+    return 'role_not_auto_migratable'
+
+
+def _automatic_header_footer_bbox_stability(
+        candidate: dict,
+        text_lookup: dict) -> dict:
+    records = _automatic_header_footer_records(candidate, text_lookup)
+    centers = []
+    for record in records:
+        metadata = record.get('metadata') or {}
+        _, y_center = _docx_header_footer_bbox_center(metadata.get('bbox', []))
+        if y_center is not None:
+            centers.append(float(y_center))
+    if not centers:
+        return {
+            'stable': False,
+            'record_count': len(records),
+            'bbox_record_count': 0,
+            'y_center_min': None,
+            'y_center_max': None,
+            'y_center_spread': None,
+            'tolerance': AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE,
+            'reason': 'missing_bbox_evidence',
+        }
+    spread = max(centers) - min(centers) if len(centers) > 1 else 0.0
+    stable = spread <= AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE
+    return {
+        'stable': bool(stable),
+        'record_count': len(records),
+        'bbox_record_count': len(centers),
+        'y_center_min': round(min(centers), 2),
+        'y_center_max': round(max(centers), 2),
+        'y_center_spread': round(spread, 2),
+        'tolerance': AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE,
+        'reason': 'stable_y_band' if stable else 'unstable_bbox_band',
+    }
+
+
+def _automatic_header_footer_records(candidate: dict, text_lookup: dict) -> list:
+    value = (text_lookup or {}).get(candidate.get('fingerprint', ''), {})
+    if isinstance(value, dict):
+        return list(value.get('records') or [])
+    return []
+
+
+def _automatic_header_footer_protected_content_signal(candidate: dict) -> bool:
+    signals = []
+    for key in (
+            'positive_signals',
+            'negative_signals',
+            'blocking_reasons',
+            'evidence'):
+        value = candidate.get(key)
+        if isinstance(value, (list, tuple, set)):
+            signals.extend(normalize_text(item).lower() for item in value)
+        elif value:
+            signals.append(normalize_text(value).lower())
+    for key in ('content_kind', 'protected_content_kind', 'reason'):
+        if candidate.get(key):
+            signals.append(normalize_text(candidate.get(key)).lower())
+    signal_text = ' '.join(signals)
+    return any(token in signal_text for token in ('table', 'callout', 'list'))
+
+
+def _automatic_header_footer_confidence(
+        support_ratio: float,
+        evidence: list,
+        blocking: list,
+        auto_decision: str) -> float:
+    if auto_decision == AUTO_DECISION_KEEP:
+        return 0.0
+    base = min(max(float(support_ratio or 0.0), 0.0), 1.0) * 0.55
+    base += min(len(evidence or []), 5) * 0.08
+    base -= min(len(blocking or []), 5) * 0.08
+    if auto_decision == AUTO_DECISION_EXCLUDE:
+        base = max(base, 0.8)
+    return round(min(max(base, 0.0), 0.99), 3)
+
+
+def _automatic_header_footer_text_preview(candidate: dict, text_lookup: dict) -> str:
+    text = _docx_header_footer_candidate_text(candidate, text_lookup)
+    if len(text) > 80:
+        return f'{text[:77]}...'
+    return text
+
+
+def _automatic_header_footer_decision_summary(
+        decisions: list,
+        page_count: int) -> dict:
+    decision_counts = Counter(
+        decision.get('auto_decision', AUTO_DECISION_DIAGNOSTIC)
+        for decision in decisions or [])
+    role_counts = Counter(
+        decision.get('automatic_role', '')
+        for decision in decisions or []
+        if decision.get('auto_decision') == AUTO_DECISION_EXCLUDE)
+    return {
+        'mode': AUTOMATIC_HEADER_FOOTER_MODE,
+        'candidate_count': len(decisions or []),
+        'page_count': _readiness_int(page_count),
+        'auto_exclude_count': decision_counts.get(AUTO_DECISION_EXCLUDE, 0),
+        'auto_keep_count': decision_counts.get(AUTO_DECISION_KEEP, 0),
+        'auto_diagnostic_count': decision_counts.get(AUTO_DECISION_DIAGNOSTIC, 0),
+        'decision_counts': dict(sorted(decision_counts.items())),
+        'header_count': role_counts.get(ROLE_HEADER, 0),
+        'footer_count': role_counts.get(ROLE_FOOTER, 0),
+        'page_number_count': role_counts.get(ROLE_PAGE_NUMBER, 0),
+        'layout_placeholder_auto_exclude_count': role_counts.get(
+            ROLE_LAYOUT_PLACEHOLDER, 0),
+        'manual_review_required': False,
+        'public_cli_exposed': False,
+        'production_default_enabled': False,
+        'default_conversion_changed': False,
+    }
+
+
+def _automatic_header_footer_decision_warnings(
+        decisions: list,
+        enabled: bool) -> list:
+    warnings = []
+    if not enabled:
+        warnings.append({'type': 'automatic_header_footer_classifier_disabled'})
+    if enabled and not any(
+            decision.get('auto_decision') == AUTO_DECISION_EXCLUDE
+            for decision in decisions or []):
+        warnings.append({'type': 'no_auto_exclude_candidates'})
+    return warnings
+
+
+def _automatic_header_footer_decision_recommendation(
+        summary: dict,
+        warnings: list) -> str:
+    if not summary.get('candidate_count', 0):
+        return 'No repeated header/footer/page-number candidates were available for automatic classification.'
+    if summary.get('auto_exclude_count', 0):
+        return 'High-confidence boundary artifacts can proceed to internal automatic migration gates.'
+    return 'No high-confidence automatic exclusions were found; keep uncertain candidates in the body and report diagnostics.'
+
+
+def _automatic_header_footer_transformed_dry_run(
+        candidates: list,
+        decisions_report: dict) -> dict:
+    decision_by_candidate = {}
+    decision_by_fingerprint = {}
+    for decision in (decisions_report or {}).get('decisions', []) or []:
+        if decision.get('candidate_id'):
+            decision_by_candidate[decision.get('candidate_id')] = decision
+        if decision.get('fingerprint'):
+            decision_by_fingerprint[decision.get('fingerprint')] = decision
+
+    transformed = []
+    for candidate in candidates or []:
+        decision = (
+            decision_by_candidate.get(candidate.get('candidate_id')) or
+            decision_by_fingerprint.get(candidate.get('fingerprint')) or {})
+        if decision.get('auto_decision') != AUTO_DECISION_EXCLUDE:
+            continue
+        item = dict(candidate)
+        item['action'] = ACTION_WOULD_EXCLUDE
+        item['proposed_role'] = decision.get('automatic_role', item.get('proposed_role'))
+        item['region'] = decision.get('region', item.get('region', ''))
+        item['regions'] = list(decision.get('regions', item.get('regions', [])) or [])
+        item['support_count'] = decision.get('support_count', item.get('support_count', 0))
+        item['page_count'] = decision.get('page_count', item.get('page_count', 0))
+        item['affected_pages'] = list(
+            decision.get('affected_pages', item.get('affected_pages', [])) or [])
+        item['automatic_decision'] = AUTO_DECISION_EXCLUDE
+        item['automatic_confidence'] = decision.get('confidence', 0.0)
+        item['automatic_evidence'] = list(decision.get('evidence', []) or [])
+        item['reason'] = (
+            'Automatic classifier promoted this high-confidence boundary artifact '
+            'for the existing internal reviewed migration gates.')
+        transformed.append(item)
+
+    return {
+        'policy': 'internal_automatic_header_footer_transformed_dry_run_only',
+        'summary': {
+            'candidate_count': len(transformed),
+            'action_counts': (
+                {ACTION_WOULD_EXCLUDE: len(transformed)}
+                if transformed else {}),
+            'automatic_source': AUTOMATIC_HEADER_FOOTER_MODE,
+        },
+        'candidates': transformed,
+    }
+
+
+def _automatic_header_footer_review_decisions(decisions_report: dict) -> dict:
+    decisions = []
+    for decision in (decisions_report or {}).get('decisions', []) or []:
+        if decision.get('auto_decision') != AUTO_DECISION_EXCLUDE:
+            continue
+        decisions.append({
+            'candidate_id': decision.get('candidate_id', ''),
+            'fingerprint': decision.get('fingerprint', ''),
+            'proposed_role': decision.get('automatic_role', ''),
+            'action': ACTION_WOULD_EXCLUDE,
+            'manual_decision': DECISION_APPROVE_EXCLUDE,
+            'checked_decisions': [DECISION_APPROVE_EXCLUDE],
+            'decision_source': 'automatic_header_footer_classifier',
+            'auto_decision': decision.get('auto_decision', ''),
+            'confidence': decision.get('confidence', 0.0),
+        })
+    return {
+        'policy': 'automatic_header_footer_review_decisions',
+        'decisions': decisions,
+        'summary': {
+            'candidate_count': len(decisions),
+            'decision_counts': (
+                {DECISION_APPROVE_EXCLUDE: len(decisions)}
+                if decisions else {}),
+            'manual_review_required': False,
+            'source': AUTOMATIC_HEADER_FOOTER_MODE,
+        },
+    }
+
+
+def _automatic_header_footer_blocking_warning_types(warnings: list) -> set:
+    return {
+        warning.get('type')
+        for warning in warnings or []
+        if warning.get('type') in {
+            'unsupported_page_number_behavior',
+            'dynamic_page_number_field_required',
+            'incomplete_header_footer_page_coverage',
+            'first_page_docx_header_footer_writing_deferred',
+            'odd_even_docx_header_footer_writing_deferred',
+            'section_scoped_docx_header_footer_mapping_deferred',
+            'ambiguous_header_footer_policy',
+            'missing_page_scope_for_header_footer_policy',
+            'no_representable_header_footer_entries',
+        }
+    }
+
+
+def _automatic_header_footer_migration_recommendation(
+        transformed_dry_run: dict,
+        docx_plan: dict,
+        warnings: list) -> str:
+    if not transformed_dry_run.get('candidates'):
+        return 'Automatic classifier found no high-confidence candidates; conversion can continue without reviewed migration.'
+    if docx_plan.get('recommendation', {}).get(
+            'safe_for_internal_docx_header_footer_experiment'):
+        return 'Automatic candidates are representable by the current internal default-policy writer.'
+    warning_types = sorted({warning.get('type') for warning in warnings or []})
+    return f'Automatic migration remains internal/diagnostic until fail-closed warnings are resolved: {warning_types}.'
 
 
 def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tuple:

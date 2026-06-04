@@ -7528,3 +7528,173 @@ Latest local OpenXML inspection confirmed:
 - Exact PDF absolute positioning is not implemented.
 - Static/source page-label mode is not implemented.
 - Cross-page paragraph merge remains out of scope.
+
+## Automatic Header/Footer Classification MVP
+
+### Motivation
+
+Manual review is not the final workflow for a high-quality converter. This
+phase added an internal automatic decision layer that can classify repeated
+boundary artifacts as `auto_exclude`, `auto_keep`, or `auto_diagnostic` without
+changing default conversion behavior.
+
+### Automatic classifier design
+
+The classifier remains internal/local-only. It does not alter the existing
+manual review parser and does not weaken reviewed filtering gates.
+
+High-confidence `auto_exclude` requires:
+
+- repeated evidence across enough pages
+- top/bottom boundary-region evidence
+- stable bbox y-band evidence
+- consistent role-region mapping
+- no body-region overlap
+- no layout-placeholder signal
+- no table/callout/list protection signal
+- parseable consecutive page-number sequence for page-number migration
+
+`auto_keep` protects body-like and structurally risky candidates. `auto_diagnostic`
+records uncertain candidates without blocking conversion.
+
+Only `auto_exclude` candidates are translated into a private dry-run override
+plus generated `approve_exclude` decisions for the existing internal reviewed
+filtering and DOCX header/footer plan. Public CLI/API remains closed and
+`Converter.convert()` defaults remain unchanged.
+
+### Implementation summary
+
+- Added automatic classification helpers in `pdf2docx/page/LayoutAnalyzer.py`.
+- Added an internal automatic migration plan helper that produces:
+  - automatic decision report
+  - transformed dry-run candidates for `auto_exclude` only
+  - generated internal review decisions
+  - reviewed filtering config with a private dry-run override
+  - DOCX header/footer generation plan
+- Added a private dry-run override pass-through for internal filtered-parse
+  experiments in `LayoutAnalyzer.py` and `Pages.py`.
+- Added a local-only ignored batch helper:
+  `local_reports/automatic_reviewed_batch/auto_batch_convert.py`
+
+### Tests added
+
+- Repeated top header auto-excludes and writes to header XML.
+- Repeated bottom footer auto-excludes and writes to footer XML.
+- Consecutive `Page 123`, `Page 124`, `Page 125` auto-excludes as a page
+  number and preserves `Page ` prefix, PAGE field, and start number.
+- Body-heading similarity is protected.
+- Weak `action=review` candidates remain diagnostic.
+- Layout placeholders are never auto-excluded.
+- Table/callout/list protection signals remain body/keep.
+- Non-default or incomplete policy patterns fail closed for migration.
+- Automatic filtered parse can run without a manual review file.
+- Automatic summaries are JSON-serializable.
+
+### Local smoke result
+
+Command:
+
+```bash
+.venv/bin/python local_reports/automatic_reviewed_batch/auto_batch_convert.py --input-dir local_samples --allow-source-tree --overwrite --page-number-behavior word_field --max-pages 100 --verbose
+```
+
+Result:
+
+- total PDFs considered: 7
+- default converted: 6
+- automatic reviewed converted: 3
+- automatic diagnostic/skipped: 3
+- blocked: 0
+- skipped large: 1
+- failed: 0
+
+Converted automatically:
+
+- `input.pdf`
+- `input3.pdf`
+- `subsets/input6_large_phase3d_subset.pdf`
+
+Diagnostic/skipped:
+
+- `input2.pdf`: no high-confidence auto-exclude candidates
+- `input4.pdf`: no high-confidence auto-exclude candidates
+- `input5.pdf`: no high-confidence auto-exclude candidates
+- `input6_large.pdf`: skipped as a large document by local `--max-pages 100`
+
+Ignored local artifacts:
+
+- `local_reports/automatic_reviewed_batch/output_docx_default/`
+- `local_reports/automatic_reviewed_batch/output_docx_auto_reviewed/`
+- `local_reports/automatic_reviewed_batch/reports/`
+- `local_reports/automatic_reviewed_batch/logs/batch_summary.json`
+- `local_reports/automatic_reviewed_batch/logs/batch_summary.csv`
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "automatic_header_footer or auto_reviewed or header_footer_fidelity or page_number"
+```
+
+Result: passed. 35 selected tests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 389 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Repository status check:
+
+```bash
+git status --short --ignored
+```
+
+Result: tracked changes were limited to code, tests, and docs. Local samples,
+local reports, generated DOCX output, wheelhouse/dist/venv/cache artifacts, and
+test outputs remained ignored.
+
+### Current status
+
+- Default conversion changed: no.
+- Public CLI/API changed: no.
+- Reviewed filtering default-on: no.
+- Automatic mode public exposure: none.
+- Manual review path: preserved.
+
+### Remaining limitations
+
+- Automatic promotion is conservative and still skips some local samples.
+- Non-default policies remain fail-closed.
+- Dynamic PAGE fields still follow Word pagination.
+- Exact PDF page-label preservation remains future work when DOCX pagination
+  drifts.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph merge remains out of scope.

@@ -211,12 +211,17 @@ class Pages(BaseCollection):
         '''Translate a private reviewed-filtering config into private parse settings.'''
         config = self._internal_reviewed_filtering_config(settings)
         review_decisions = None
+        dry_run_report = (layout_analysis_report or {}).get(
+            'header_footer_exclusion_dry_run', {})
         if isinstance(config, dict):
             review_decisions = config.get('review_decisions')
+            dry_run_report = (
+                config.get('dry_run_report_override') or
+                dry_run_report)
 
         self._reviewed_filtering_internal_config_report = build_reviewed_filtering_internal_config_report(
             config,
-            (layout_analysis_report or {}).get('header_footer_exclusion_dry_run', {}),
+            dry_run_report,
             review_decisions,
             enabled=True)
 

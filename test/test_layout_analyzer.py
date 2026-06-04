@@ -22,6 +22,9 @@ IMAGE_PLACEHOLDER = LayoutAnalyzer.IMAGE_PLACEHOLDER
 ACTION_KEEP = LayoutAnalyzer.ACTION_KEEP
 ACTION_REVIEW = LayoutAnalyzer.ACTION_REVIEW
 ACTION_WOULD_EXCLUDE = LayoutAnalyzer.ACTION_WOULD_EXCLUDE
+AUTO_DECISION_DIAGNOSTIC = LayoutAnalyzer.AUTO_DECISION_DIAGNOSTIC
+AUTO_DECISION_EXCLUDE = LayoutAnalyzer.AUTO_DECISION_EXCLUDE
+AUTO_DECISION_KEEP = LayoutAnalyzer.AUTO_DECISION_KEEP
 ROLE_FOOTER = LayoutAnalyzer.ROLE_FOOTER
 ROLE_HEADER = LayoutAnalyzer.ROLE_HEADER
 ROLE_KEEP_BODY = LayoutAnalyzer.ROLE_KEEP_BODY
@@ -46,6 +49,9 @@ validate_reviewed_header_footer_warning_model = LayoutAnalyzer.validate_reviewed
 build_reviewed_header_footer_quality_evaluation_pack = LayoutAnalyzer.build_reviewed_header_footer_quality_evaluation_pack
 build_local_corpus_quality_review_summary_report = LayoutAnalyzer.build_local_corpus_quality_review_summary_report
 build_docx_header_footer_generation_plan = LayoutAnalyzer.build_docx_header_footer_generation_plan
+build_automatic_header_footer_decisions = LayoutAnalyzer.build_automatic_header_footer_decisions
+build_automatic_header_footer_migration_plan = LayoutAnalyzer.build_automatic_header_footer_migration_plan
+classify_header_footer_candidate_automatically = LayoutAnalyzer.classify_header_footer_candidate_automatically
 build_body_filtering_diff_report = LayoutAnalyzer.build_body_filtering_diff_report
 build_body_table_geometry_delta_safety_report = LayoutAnalyzer.build_body_table_geometry_delta_safety_report
 build_body_table_delta_root_cause_report = LayoutAnalyzer.build_body_table_delta_root_cause_report
@@ -6097,6 +6103,398 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('w:sz w:val="18"', openxml['footer_xml'])
         self.assertIn('w:color w:val="000000"', openxml['footer_xml'])
 
+    def test_automatic_header_footer_classifier_promotes_repeated_boundary_artifacts(self):
+        _require_docx_header_footer_support(self)
+        page_summaries = []
+        header_fp = _summary_fingerprint('AUTO TOP HEADER', REGION_TOP)
+        footer_fp = _summary_fingerprint('AUTO BOTTOM FOOTER', REGION_BOTTOM)
+        page_number_fp = _summary_fingerprint('Page 123', REGION_BOTTOM)
+        for index, page_text in enumerate(['Page 123', 'Page 124', 'Page 125']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        header_fp,
+                        REGION_TOP,
+                        'AUTO TOP HEADER',
+                        [240, 36, 360, 50],
+                        {'font_name': 'Arial,Bold', 'font_size': 12, 'flags': 16, 'color': 0x336699}),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        footer_fp,
+                        REGION_BOTTOM,
+                        'AUTO BOTTOM FOOTER',
+                        [50, 760, 180, 774],
+                        {'font_name': 'Arial', 'font_size': 9, 'color': 0x666666}),
+                    _automatic_summary_block(
+                        index,
+                        2,
+                        page_number_fp,
+                        REGION_BOTTOM,
+                        page_text,
+                        [460, 760, 540, 774],
+                        {'font_name': 'Arial,Italic', 'font_size': 9, 'flags': 2, 'color': 0}),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'auto-header',
+                header_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'auto-footer',
+                footer_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_BOTTOM]),
+            _dry_run_candidate(
+                'auto-page-number',
+                page_number_fp,
+                ROLE_PAGE_NUMBER,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_BOTTOM]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        decisions = migration['automatic_decisions']['decisions']
+
+        self.assertEqual(
+            migration['automatic_decisions']['summary']['auto_exclude_count'],
+            3)
+        self.assertEqual(
+            {decision['auto_decision'] for decision in decisions},
+            {AUTO_DECISION_EXCLUDE})
+        self.assertEqual(migration['summary']['header_count'], 1)
+        self.assertEqual(migration['summary']['footer_count'], 1)
+        self.assertEqual(migration['summary']['page_number_count'], 1)
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'default')
+        self.assertTrue(
+            migration['summary']['safe_for_internal_automatic_migration'])
+        self.assertFalse(migration['summary']['manual_review_required'])
+        self.assertEqual(
+            migration['review_decisions']['summary']['decision_counts'],
+            {'approve_exclude': 3})
+        self.assertEqual(
+            migration['reviewed_filtering_internal_config_report']['summary']['activation_status'],
+            'ready_for_internal_experiment')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-header-footer.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('AUTO TOP HEADER', openxml['header_xml'])
+        self.assertIn('AUTO BOTTOM FOOTER', openxml['footer_xml'])
+        self.assertIn('Page ', openxml['footer_xml'])
+        self.assertIn(' PAGE ', openxml['footer_xml'])
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertNotIn('AUTO TOP HEADER', openxml['footer_xml'])
+        self.assertNotIn('AUTO BOTTOM FOOTER', openxml['header_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_protects_body_heading_similarity(self):
+        fingerprint = _summary_fingerprint('AUTO TOP HEADER', REGION_TOP)
+        page_summaries = []
+        for index in range(3):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_TOP,
+                        'AUTO TOP HEADER',
+                        [50, 36, 180, 50]),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        fingerprint,
+                        REGION_BODY,
+                        'AUTO TOP HEADER',
+                        [50, 220, 200, 236]),
+                ],
+            })
+        candidate = _dry_run_candidate(
+            'body-heading-similar',
+            fingerprint,
+            ROLE_REVIEW_ONLY,
+            ACTION_REVIEW,
+            [0, 1, 2],
+            [REGION_TOP, REGION_BODY])
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            {'candidates': [candidate]},
+            enabled=True)
+        decision = report['decisions'][0]
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_KEEP)
+        self.assertIn('body_region_protected', decision['blocking_reasons'])
+        self.assertFalse(decision['safe_for_migration'])
+
+    def test_automatic_header_footer_classifier_keeps_weak_review_candidate_diagnostic(self):
+        fingerprint = _summary_fingerprint('WEAK FOOTER', REGION_BOTTOM)
+        page_summaries = [{
+            'page_index': 0,
+            'width': 600,
+            'height': 800,
+            'text_blocks': [
+                _automatic_summary_block(
+                    0,
+                    0,
+                    fingerprint,
+                    REGION_BOTTOM,
+                    'WEAK FOOTER',
+                    [50, 760, 150, 774]),
+            ],
+        }]
+        candidate = _dry_run_candidate(
+            'weak-footer',
+            fingerprint,
+            ROLE_REVIEW_ONLY,
+            ACTION_REVIEW,
+            [0],
+            [REGION_BOTTOM])
+        candidate['page_count'] = 4
+
+        decision = classify_header_footer_candidate_automatically(
+            candidate,
+            page_summaries,
+            page_count=4)
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_DIAGNOSTIC)
+        self.assertIn('insufficient_page_support', decision['blocking_reasons'])
+        self.assertIn('insufficient_page_coverage', decision['blocking_reasons'])
+
+    def test_automatic_header_footer_classifier_never_excludes_placeholders_or_body_structures(self):
+        placeholder_fp = _summary_fingerprint(IMAGE_PLACEHOLDER, REGION_TOP)
+        table_fp = _summary_fingerprint('TABLE LIKE FOOTER', REGION_BOTTOM)
+        page_summaries = []
+        for index in range(2):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        placeholder_fp,
+                        REGION_TOP,
+                        IMAGE_PLACEHOLDER,
+                        [50, 36, 100, 50]),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        table_fp,
+                        REGION_BOTTOM,
+                        'TABLE LIKE FOOTER',
+                        [50, 760, 170, 774]),
+                ],
+            })
+        placeholder = _dry_run_candidate(
+            'placeholder',
+            placeholder_fp,
+            ROLE_LAYOUT_PLACEHOLDER,
+            ACTION_REVIEW,
+            [0, 1],
+            [REGION_TOP])
+        table = _dry_run_candidate(
+            'table-footer',
+            table_fp,
+            ROLE_REVIEW_ONLY,
+            ACTION_REVIEW,
+            [0, 1],
+            [REGION_BOTTOM])
+        table['negative_signals'] = ['table_text_protected']
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            {'candidates': [placeholder, table]},
+            enabled=True)
+        decisions = {
+            decision['candidate_id']: decision
+            for decision in report['decisions']
+        }
+
+        self.assertEqual(
+            decisions['placeholder']['auto_decision'],
+            AUTO_DECISION_KEEP)
+        self.assertEqual(
+            decisions['table-footer']['auto_decision'],
+            AUTO_DECISION_KEEP)
+        self.assertIn(
+            'layout_placeholder_protected',
+            decisions['placeholder']['blocking_reasons'])
+        self.assertIn(
+            'body_table_callout_list_content_protected',
+            decisions['table-footer']['blocking_reasons'])
+
+    def test_automatic_header_footer_classifier_fails_closed_for_non_default_policy(self):
+        default_fp = _summary_fingerprint('DEFAULT HEADER', REGION_TOP)
+        first_fp = _summary_fingerprint('FIRST PAGE HEADER', REGION_TOP)
+        page_summaries = [{
+            'page_index': 0,
+            'width': 600,
+            'height': 800,
+            'text_blocks': [
+                _automatic_summary_block(
+                    0,
+                    0,
+                    first_fp,
+                    REGION_TOP,
+                    'FIRST PAGE HEADER',
+                    [50, 36, 220, 50]),
+            ],
+        }]
+        for index in (1, 2):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        default_fp,
+                        REGION_TOP,
+                        'DEFAULT HEADER',
+                        [50, 36, 220, 50]),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'first-page-only',
+                first_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'default-pages',
+                default_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [1, 2],
+                [REGION_TOP]),
+        ]}
+        dry_run['candidates'][0]['page_count'] = 3
+        dry_run['candidates'][1]['page_count'] = 3
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True)
+        warning_types = {
+            warning['type']
+            for warning in migration['safety_warnings']
+        }
+
+        self.assertEqual(
+            migration['automatic_decisions']['summary']['auto_exclude_count'],
+            1)
+        self.assertFalse(
+            migration['summary']['safe_for_internal_automatic_migration'])
+        self.assertIn('incomplete_header_footer_page_coverage', warning_types)
+        self.assertTrue(
+            migration['summary']['header_footer_policy_fail_closed'])
+
+    def test_automatic_header_footer_classifier_summary_is_json_serializable(self):
+        fingerprint = _summary_fingerprint('SERIAL HEADER', REGION_TOP)
+        page_summaries = [
+            {
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_TOP,
+                        'SERIAL HEADER',
+                        [50, 36, 170, 50]),
+                ],
+            }
+            for index in range(2)
+        ]
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'serial-header',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1],
+                [REGION_TOP]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True)
+
+        decoded = json.loads(json.dumps(migration))
+        self.assertEqual(decoded['summary']['auto_exclude_count'], 1)
+        self.assertFalse(decoded['summary']['manual_review_required'])
+
+    def test_automatic_header_footer_filtered_parse_does_not_require_manual_review_file(self):
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / 'automatic-filtered-parse.pdf'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+            layout = _parse_synthetic_layout(pdf_path)
+            migration = build_automatic_header_footer_migration_plan(
+                layout.get('pages', []),
+                layout.get('header_footer_exclusion_dry_run', {}),
+                enabled=True,
+                page_number_behavior='word_field')
+
+            converter = Converter(str(pdf_path))
+            settings = converter.default_settings.copy()
+            settings['_reviewed_header_footer_filtering_config'] = (
+                migration['reviewed_filtering_internal_config'])
+            try:
+                converter.load_pages().parse_document(**settings)
+                integration = converter.pages._reviewed_filtering_internal_filtered_parse_report
+            finally:
+                converter.close()
+
+        self.assertFalse(migration['summary']['manual_review_required'])
+        self.assertIsNotNone(integration)
+        self.assertTrue(integration['applied_to_parse'])
+        self.assertTrue(
+            integration['summary']['body_text_signature_preserved'])
+        self.assertEqual(
+            integration['summary']['body_region_removed_count'],
+            0)
+
     def test_header_footer_clipping_avoids_exact_line_spacing_for_large_text(self):
         _require_docx_header_footer_support(self)
         plan = {
@@ -11775,6 +12173,26 @@ def _mapping_summary_block(block_index, fingerprint, region, text):
         'region': region,
         'text': text,
         'bbox': block['bbox'],
+    }
+
+
+def _automatic_summary_block(
+        page_index,
+        block_index,
+        fingerprint,
+        region,
+        text,
+        bbox,
+        style_properties=None):
+    return {
+        'page_index': page_index,
+        'block_index': block_index,
+        'fingerprint': fingerprint,
+        'normalized_text': normalize_page_number(text).lower(),
+        'region': region,
+        'text': text,
+        'bbox': list(bbox),
+        'style_properties': dict(style_properties or {}),
     }
 
 

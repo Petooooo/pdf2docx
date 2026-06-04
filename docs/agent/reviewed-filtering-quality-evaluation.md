@@ -216,6 +216,25 @@ uses direct paragraph alignment for single-item or single-zone line groups and
 keeps tab-stop layout for multi-zone lines. Footer same-line grouping remains
 valid, and dynamic PAGE fields still depend on Word pagination.
 
+## Automatic Classification MVP
+
+Manual review remains useful as a safety and diagnostics fallback, but it is
+not the desired end-user workflow. The internal MVP now includes an automatic
+candidate decision layer that classifies repeated boundary artifacts as
+`auto_exclude`, `auto_keep`, or `auto_diagnostic`.
+
+`auto_exclude` is reserved for high-confidence repeated top/bottom artifacts
+with stable bbox bands, consistent role-region evidence, enough page coverage,
+and no body/layout-placeholder/table/callout/list protection signals. Only
+`auto_exclude` candidates are translated into the existing internal reviewed
+filtering gates and DOCX header/footer plan. `auto_keep` and `auto_diagnostic`
+candidates remain in the body and are reported without blocking ordinary
+conversion.
+
+The automatic path remains internal/local-only. Public CLI/API exposure is
+still closed, default `Converter.convert()` behavior is unchanged, and
+non-default policies still fail closed for migration.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:
