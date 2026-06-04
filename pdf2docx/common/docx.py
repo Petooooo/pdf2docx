@@ -602,22 +602,33 @@ def _replace_header_footer_part_line_groups(
         _clear_paragraph_text(paragraph)
         result['paragraph_spacing_normalized_count'] += (
             _prepare_header_footer_paragraph(paragraph))
-        tab_count = _apply_header_footer_line_group_tabs(
-            paragraph,
-            section,
-            items)
-        if tab_count:
-            result['tabbed_paragraphs_written'] += 1
+        use_tab_layout = _line_group_needs_tab_layout(items)
+        if use_tab_layout:
+            tab_count = _apply_header_footer_line_group_tabs(
+                paragraph,
+                section,
+                items)
+            if tab_count:
+                result['tabbed_paragraphs_written'] += 1
+        else:
+            tab_count = 0
+            result['alignment_paragraphs_written'] += (
+                _apply_header_footer_paragraph_alignment(
+                    paragraph,
+                    _line_group_paragraph_alignment_item(items)))
         result['line_groups_written'] += 1
         result['grouped_line_item_count'] += len(items)
         previous_alignment = None
         wrote_any = False
         for item in _ordered_line_group_items(items):
-            tab_runs = _tabs_before_line_group_item(
-                paragraph,
-                item,
-                previous_alignment,
-                wrote_any)
+            if use_tab_layout:
+                tab_runs = _tabs_before_line_group_item(
+                    paragraph,
+                    item,
+                    previous_alignment,
+                    wrote_any)
+            else:
+                tab_runs = _space_before_line_group_item(paragraph, wrote_any)
             result['tab_runs_written'] += tab_runs
             item_result = _write_header_footer_item_runs(
                 paragraph,
@@ -689,6 +700,38 @@ def _section_writable_width(section) -> int:
         return int(Pt(468))
 
 
+def _line_group_needs_tab_layout(items: list) -> bool:
+    if len(items or []) <= 1:
+        return False
+    zones = {
+        _line_group_item_alignment_zone(item)
+        for item in items or []
+    }
+    return len(zones) > 1
+
+
+def _line_group_paragraph_alignment_item(items: list) -> dict:
+    alignments = [
+        _line_group_item_alignment(item)
+        for item in items or []
+    ]
+    known = [
+        alignment
+        for alignment in alignments
+        if alignment in {'left', 'center', 'right'}
+    ]
+    if not known:
+        return {}
+    if len(set(known)) == 1:
+        return {'alignment': known[0]}
+    return {'alignment': 'left'}
+
+
+def _line_group_item_alignment_zone(item: dict) -> str:
+    alignment = _line_group_item_alignment(item)
+    return alignment if alignment in {'center', 'right'} else 'left'
+
+
 def _ordered_line_group_items(items: list) -> list:
     return sorted(
         items or [],
@@ -725,6 +768,12 @@ def _tabs_before_line_group_item(
         paragraph.add_run().add_tab()
         return 1
     if wrote_any and previous_alignment in {'left', 'unknown'}:
+        paragraph.add_run(' ')
+    return 0
+
+
+def _space_before_line_group_item(paragraph, wrote_any: bool) -> int:
+    if wrote_any:
         paragraph.add_run(' ')
     return 0
 

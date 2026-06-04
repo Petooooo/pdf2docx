@@ -6267,6 +6267,105 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertNotIn('LEFT HEADER', openxml['footer_xml'])
         self.assertNotIn('RIGHT HEADER', openxml['footer_xml'])
 
+    def test_header_alignment_single_right_item_uses_right_paragraph_alignment(self):
+        _require_docx_header_footer_support(self)
+        plan = _line_grouping_plan(
+            header_rows=[
+                [(ROLE_HEADER, 'TOP RIGHT HEADER', [430, 40, 560, 58], 'right')],
+                [(ROLE_HEADER, 'TOP RIGHT HEADER', [430, 40, 560, 58], 'right')],
+            ])
+
+        self.assertEqual(plan['summary']['header_line_group_count'], 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'single-right-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        header_paragraphs = _docx_xml_paragraphs(openxml['header_xml'])
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['header_paragraphs_written'], 1)
+        self.assertEqual(report['summary']['tabbed_paragraphs_written'], 0)
+        self.assertEqual(report['summary']['tab_runs_written'], 0)
+        self.assertGreaterEqual(
+            report['summary']['alignment_paragraphs_written'],
+            1)
+        self.assertEqual(len(header_paragraphs), 1)
+        self.assertIn('TOP RIGHT HEADER', header_paragraphs[0])
+        self.assertIn('w:jc w:val="right"', header_paragraphs[0])
+        self.assertNotIn('w:tabs', header_paragraphs[0])
+        self.assertNotIn('<w:tab/>', header_paragraphs[0])
+        self.assertNotIn('TOP RIGHT HEADER', openxml['footer_xml'])
+
+    def test_header_alignment_single_center_item_uses_center_paragraph_alignment(self):
+        _require_docx_header_footer_support(self)
+        plan = _line_grouping_plan(
+            header_rows=[
+                [(ROLE_HEADER, 'TOP CENTER HEADER', [240, 40, 360, 58], 'center')],
+                [(ROLE_HEADER, 'TOP CENTER HEADER', [240, 40, 360, 58], 'center')],
+            ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'single-center-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        header_paragraphs = _docx_xml_paragraphs(openxml['header_xml'])
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['tabbed_paragraphs_written'], 0)
+        self.assertEqual(report['summary']['tab_runs_written'], 0)
+        self.assertEqual(len(header_paragraphs), 1)
+        self.assertIn('TOP CENTER HEADER', header_paragraphs[0])
+        self.assertIn('w:jc w:val="center"', header_paragraphs[0])
+        self.assertNotIn('w:tabs', header_paragraphs[0])
+        self.assertNotIn('TOP CENTER HEADER', openxml['footer_xml'])
+
+    def test_header_alignment_multi_item_same_line_uses_tab_layout(self):
+        _require_docx_header_footer_support(self)
+        plan = _line_grouping_plan(
+            header_rows=[
+                [
+                    (ROLE_HEADER, 'LEFT HEADER', [50, 40, 150, 58], 'left'),
+                    (ROLE_HEADER, 'RIGHT HEADER', [430, 40, 560, 58], 'right'),
+                ],
+                [
+                    (ROLE_HEADER, 'LEFT HEADER', [50, 40, 150, 58], 'left'),
+                    (ROLE_HEADER, 'RIGHT HEADER', [430, 40, 560, 58], 'right'),
+                ],
+            ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'multi-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        header_paragraphs = _docx_xml_paragraphs(openxml['header_xml'])
+        self.assertTrue(report['applied'])
+        self.assertEqual(report['summary']['tabbed_paragraphs_written'], 1)
+        self.assertGreaterEqual(report['summary']['tab_runs_written'], 1)
+        self.assertEqual(len(header_paragraphs), 1)
+        self.assertIn('LEFT HEADER', header_paragraphs[0])
+        self.assertIn('RIGHT HEADER', header_paragraphs[0])
+        self.assertIn('w:tabs', header_paragraphs[0])
+        self.assertIn('<w:tab/>', header_paragraphs[0])
+        self.assertNotIn('LEFT HEADER', openxml['footer_xml'])
+        self.assertNotIn('RIGHT HEADER', openxml['footer_xml'])
+
     def test_pagination_drift_summary_documents_word_dynamic_page_semantics(self):
         plan = _line_grouping_plan(
             footer_rows=[

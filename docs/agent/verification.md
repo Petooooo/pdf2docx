@@ -7387,3 +7387,144 @@ Local OpenXML inspection confirmed:
 - Static/source page-label mode is not implemented.
 - Per-page section mapping is not implemented.
 - Image/logo migration remains out of scope.
+
+## Header Alignment and Pagination Blank-Page Follow-up
+
+### Observed issues
+
+Manual inspection after same-line grouping showed a mixed result:
+
+- Footer grouping was much closer to the source layout.
+- A single top-right header appeared shifted because header line grouping used
+  the same tab-stop layout as multi-item footer lines.
+- Pagination drift and possible blank pages still needed OpenXML inspection.
+- First-page clipping remained a visual concern near the upper body/header
+  boundary.
+
+### Header alignment root cause
+
+OpenXML inspection of the latest reviewed smoke output showed that
+`word/header1.xml` contained one header paragraph with `w:jc w:val="left"`, a
+right tab stop, and a leading tab run. That is appropriate for footer lines
+with multiple horizontal zones, but too aggressive for a single right-aligned
+header item.
+
+### Implementation summary
+
+- The internal DOCX writer now uses direct paragraph alignment for single-item
+  or single-zone line groups.
+- Tab-stop layout is reserved for multi-item line groups that span different
+  horizontal zones.
+- Footer same-line grouping remains tab-based for left/center/right footer
+  content and page fields.
+- Header/footer role separation remains unchanged.
+- Default conversion remains unchanged.
+- Public CLI/API remains unchanged and closed.
+
+### Blank page and pagination investigation
+
+OpenXML inspection found no explicit `w:br w:type="page"` page breaks and no
+`w:pageBreakBefore` settings in the reviewed output. The document still
+contains many section-property paragraphs and empty paragraphs, and the same
+broad structure is present in default conversion output. This indicates the
+pagination drift risk is mainly existing body/section layout reconstruction,
+not a new reviewed header/footer writer page-break insertion.
+
+Dynamic Word PAGE fields still follow Word pagination. If body reflow creates
+extra Word pages, page labels can drift from source PDF page labels even when
+the prefix and `w:start="123"` are preserved.
+
+### First-page clipping investigation
+
+The visually clipped upper content is present in `word/document.xml` body
+content, not in the generated DOCX header part. Generated header/footer
+paragraphs still use zero before/after spacing and avoid exact line-height.
+No broad body-layout or margin patch was made in this phase.
+
+Ignored local investigation reports:
+
+- `local_reports/pagination_blank_page_followup/header-alignment-regression-report.md`
+- `local_reports/pagination_blank_page_followup/blank-page-openxml-report.md`
+- `local_reports/pagination_blank_page_followup/pagination-drift-analysis.md`
+
+### Tests added
+
+- Single right-aligned header line group writes a right-aligned header
+  paragraph without unnecessary tab stops or leading tab runs.
+- Single center header line group writes a center-aligned header paragraph.
+- Multi-item same-line header groups still use tab-stop layout when horizontal
+  zones differ.
+- Existing footer same-line grouping and PAGE field tests continue to pass.
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "header_alignment or footer_line_grouping or pagination_drift or blank_page or clipping or word_field"
+```
+
+Result: passed. 15 selected tests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 382 tests and 40 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+Local reviewed smoke:
+
+```bash
+.venv/bin/python local_reports/reviewed_migration_batch_compare/batch_compare_reviewed_migration.py --overwrite --allow-source-tree --page-number-behavior word_field --default-output-dir local_reports/pagination_blank_page_followup/smoke/output_docx_default --reviewed-output-dir local_reports/pagination_blank_page_followup/smoke/output_docx_reviewed --report-dir local_reports/pagination_blank_page_followup/smoke/reports --log-dir local_reports/pagination_blank_page_followup/smoke/logs
+```
+
+Result: passed. Reviewed converted count was 1 and failed count was 0.
+
+Latest local OpenXML inspection confirmed:
+
+- header paragraph count: 1
+- header alignment: `right`
+- header tab-stop count: 0
+- header leading tab runs: 0
+- footer paragraph count: 1
+- footer tab-stop layout remains present
+- footer contains `Page ` prefix and PAGE field
+- literal `<PAGE_NUMBER>` is absent
+- `w:pgNumType w:start="123"` is present
+- no explicit page breaks were introduced by reviewed migration
+
+### Remaining limitations
+
+- Dynamic PAGE labels can still drift when Word pagination differs from source
+  PDF pagination.
+- Existing body/section reconstruction can still create many section-property
+  paragraphs and empty paragraphs.
+- Exact PDF absolute positioning is not implemented.
+- Static/source page-label mode is not implemented.
+- Cross-page paragraph merge remains out of scope.

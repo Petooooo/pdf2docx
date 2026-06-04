@@ -207,6 +207,15 @@ drift even when the prefix and start number are preserved. Exact source PDF page
 label preservation remains future work and likely requires stronger page-boundary
 fidelity, a source-static label mode, or per-page section mapping.
 
+## Header Alignment Follow-Up
+
+After same-line footer grouping improved the reviewed output, local manual
+inspection found that a single top-right header was being serialized through the
+same tab-stop layout used for multi-item footer lines. The internal writer now
+uses direct paragraph alignment for single-item or single-zone line groups and
+keeps tab-stop layout for multi-zone lines. Footer same-line grouping remains
+valid, and dynamic PAGE fields still depend on Word pagination.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:
