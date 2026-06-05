@@ -1723,6 +1723,209 @@ def build_reviewed_header_footer_filter_report(
     }
 
 
+def build_migrated_source_block_accounting_report(
+        page_summaries: list = None,
+        dry_run_report: dict = None,
+        review_decisions=None,
+        filtering_report: dict = None,
+        docx_body_text: str = '',
+        parsed_body_text: str = '',
+        enabled: bool = True) -> dict:
+    '''Account for migrated source refs through filtering and DOCX body output.
+
+    This is an internal/test-only gate. It does not mutate conversion output.
+    '''
+    if not enabled:
+        return {
+            'enabled': False,
+            'policy': 'migrated_source_block_accounting_only',
+            'summary': {
+                'planned_source_ref_count': 0,
+                'matched_raw_source_ref_count': 0,
+                'removed_before_parse_count': 0,
+                'remaining_in_parsed_body_count': 0,
+                'remaining_in_docx_body_count': 0,
+                'unexpected_removed_source_ref_count': 0,
+                'all_planned_source_refs_removed': False,
+                'safe_for_migrated_output': False,
+            },
+            'planned_source_refs': [],
+            'removed_source_refs': [],
+            'remaining_docx_body_texts': [],
+            'unexpected_removed_source_refs': [],
+            'safety_warnings': [{'type': 'source_block_accounting_disabled'}],
+        }
+
+    expected_blocks = _raw_mapping_expected_blocks(
+        page_summaries or [],
+        dry_run_report or {},
+        review_decisions or {})
+    if filtering_report is None:
+        filtering_report = build_reviewed_header_footer_filter_report(
+            page_summaries or [],
+            dry_run_report or {},
+            review_decisions or {},
+            enabled=True,
+            apply=True)
+    removed_blocks = _accounting_removed_blocks(filtering_report or {})
+    expected_by_key = {
+        _accounting_source_ref_key(item): item
+        for item in expected_blocks
+    }
+    removed_by_key = {
+        _accounting_source_ref_key(item): item
+        for item in removed_blocks
+    }
+    matched_keys = sorted(set(expected_by_key).intersection(removed_by_key))
+    missing_keys = sorted(set(expected_by_key).difference(removed_by_key))
+    unexpected_keys = sorted(set(removed_by_key).difference(expected_by_key))
+    remaining_docx = _accounting_remaining_texts(
+        expected_blocks,
+        docx_body_text)
+    remaining_parsed = _accounting_remaining_texts(
+        expected_blocks,
+        parsed_body_text)
+    warnings = []
+    if missing_keys:
+        warnings.append({
+            'type': 'migrated_source_ref_removal_count_mismatch',
+            'missing_count': len(missing_keys),
+        })
+    if unexpected_keys:
+        warnings.append({
+            'type': 'unexpected_migrated_source_ref_removed',
+            'count': len(unexpected_keys),
+        })
+    if remaining_docx:
+        warnings.append({
+            'type': 'migrated_source_text_remaining_in_docx_body',
+            'count': len(remaining_docx),
+        })
+    if remaining_parsed:
+        warnings.append({
+            'type': 'migrated_source_text_remaining_in_parsed_body',
+            'count': len(remaining_parsed),
+        })
+
+    summary = {
+        'planned_source_ref_count': len(expected_blocks),
+        'matched_raw_source_ref_count': len(matched_keys),
+        'removed_before_parse_count': len(removed_blocks),
+        'remaining_in_parsed_body_count': len(remaining_parsed),
+        'remaining_in_docx_body_count': len(remaining_docx),
+        'unexpected_removed_source_ref_count': len(unexpected_keys),
+        'all_planned_source_refs_removed': not missing_keys,
+        'safe_for_migrated_output': not warnings,
+    }
+    return {
+        'enabled': True,
+        'policy': 'migrated_source_block_accounting_only',
+        'summary': summary,
+        'planned_source_refs': expected_blocks,
+        'removed_source_refs': removed_blocks,
+        'missing_source_refs': [
+            expected_by_key[key] for key in missing_keys
+        ],
+        'unexpected_removed_source_refs': [
+            removed_by_key[key] for key in unexpected_keys
+        ],
+        'remaining_parsed_body_texts': remaining_parsed,
+        'remaining_docx_body_texts': remaining_docx,
+        'by_candidate': _accounting_by_candidate(expected_blocks, removed_blocks),
+        'safety_warnings': warnings,
+        'recommendation': {
+            'safe_for_migrated_output': not warnings,
+            'reason': _accounting_recommendation(warnings),
+        },
+    }
+
+
+def _accounting_removed_blocks(filtering_report: dict) -> list:
+    removed = []
+    for page in (filtering_report or {}).get('pages', []) or []:
+        page_index = page.get('page_index')
+        for block in page.get('removed_blocks', []) or []:
+            item = dict(block)
+            item.setdefault('page_index', page_index)
+            removed.append(item)
+    return removed
+
+
+def _accounting_source_ref_key(item: dict) -> tuple:
+    return (
+        _readiness_int(item.get('page_index', -1)),
+        _readiness_int(item.get('block_index', -1)),
+        item.get('fingerprint', ''),
+        item.get('region', ''),
+    )
+
+
+def _accounting_remaining_texts(expected_blocks: list, body_text: str) -> list:
+    normalized_body = normalize_text(body_text or '')
+    if not normalized_body:
+        return []
+    remaining = []
+    seen = set()
+    for item in expected_blocks or []:
+        text = normalize_text(item.get('raw_text', ''))
+        if not text:
+            text = normalize_text(item.get('normalized_text', ''))
+        if text in {PAGE_NUMBER_PLACEHOLDER, PAGE_NUMBER_PLACEHOLDER.lower()}:
+            text = normalize_text(item.get('text_preview', ''))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        if text in normalized_body:
+            remaining.append({
+                'text': text,
+                'candidate_id': item.get('candidate_id', ''),
+                'proposed_role': item.get('proposed_role', ''),
+                'page_index': item.get('page_index'),
+                'block_index': item.get('block_index'),
+            })
+    return remaining
+
+
+def _accounting_by_candidate(expected_blocks: list, removed_blocks: list) -> list:
+    candidate_ids = sorted({
+        item.get('candidate_id', '')
+        for item in list(expected_blocks or []) + list(removed_blocks or [])
+        if item.get('candidate_id')
+    })
+    rows = []
+    for candidate_id in candidate_ids:
+        planned = [
+            item for item in expected_blocks or []
+            if item.get('candidate_id') == candidate_id
+        ]
+        removed = [
+            item for item in removed_blocks or []
+            if item.get('candidate_id') == candidate_id
+        ]
+        rows.append({
+            'candidate_id': candidate_id,
+            'planned_source_ref_count': len(planned),
+            'removed_before_parse_count': len(removed),
+            'all_planned_source_refs_removed': (
+                {
+                    _accounting_source_ref_key(item)
+                    for item in planned
+                } <= {
+                    _accounting_source_ref_key(item)
+                    for item in removed
+                }),
+        })
+    return rows
+
+
+def _accounting_recommendation(warnings: list) -> str:
+    if not warnings:
+        return 'All migrated source refs were removed and no migrated text remained in checked body text.'
+    warning_types = ', '.join(
+        warning.get('type', '') for warning in warnings or [])
+    return f'Fail closed before reviewed output promotion; resolve: {warning_types}.'
+
+
 def build_docx_header_footer_generation_plan(
         page_summaries: list = None,
         dry_run_report: dict = None,
@@ -8798,6 +9001,7 @@ def _docx_header_footer_section_plan(
         'header_page_number_items': _unique_entry_items(header_entries, ROLE_PAGE_NUMBER),
         'footer_page_number_items': _unique_entry_items(footer_entries, ROLE_PAGE_NUMBER),
         'page_number_start_number': _docx_header_footer_page_number_start(entries),
+        'body_area_plan': _docx_header_footer_body_area_plan(entries),
         'header_line_groups': _docx_header_footer_line_groups(
             header_entries,
             {ROLE_HEADER, ROLE_PAGE_NUMBER}),
@@ -8842,6 +9046,86 @@ def _docx_header_footer_entries_for_part(entries: list, target_part: str) -> lis
         entry for entry in entries or []
         if entry.get('target_part') == target_part
     ]
+
+
+def _docx_header_footer_body_area_plan(entries: list) -> dict:
+    page_heights = [
+        _docx_header_footer_optional_float(entry.get('page_height'))
+        for entry in entries or []
+    ]
+    page_heights = [value for value in page_heights if value]
+    if not page_heights:
+        return {
+            'enabled': False,
+            'reason': 'missing_page_geometry',
+        }
+    page_height = _median_number(page_heights)
+    header_bottoms = []
+    footer_tops = []
+    for entry in entries or []:
+        bbox = list(entry.get('bbox', []) or [])
+        if len(bbox) < 4:
+            continue
+        if entry.get('target_part') == 'header':
+            header_bottoms.append(_docx_header_footer_optional_float(bbox[3]))
+        elif entry.get('target_part') == 'footer':
+            footer_tops.append(_docx_header_footer_optional_float(bbox[1]))
+    header_bottoms = [value for value in header_bottoms if value is not None]
+    footer_tops = [value for value in footer_tops if value is not None]
+    safe_gap_top = 6.0
+    safe_gap_bottom = 6.0
+    recommended_top = (
+        _bounded_docx_margin(max(header_bottoms) + safe_gap_top)
+        if header_bottoms else None)
+    footer_extent_top = min(footer_tops) if footer_tops else None
+    recommended_bottom = (
+        _bounded_docx_margin(page_height - footer_extent_top + safe_gap_bottom)
+        if footer_extent_top is not None else None)
+    return {
+        'enabled': bool(header_bottoms or footer_tops),
+        'page_height': round(page_height, 2),
+        'header_extent_bottom': (
+            round(max(header_bottoms), 2) if header_bottoms else None),
+        'footer_extent_top': (
+            round(footer_extent_top, 2) if footer_extent_top is not None else None),
+        'safe_gap_top': safe_gap_top,
+        'safe_gap_bottom': safe_gap_bottom,
+        'recommended_top_margin': recommended_top,
+        'recommended_bottom_margin': recommended_bottom,
+        'recommended_header_distance': (
+            _bounded_docx_distance(max(header_bottoms) / 2.0)
+            if header_bottoms else None),
+        'recommended_footer_distance': (
+            _bounded_docx_distance((page_height - footer_extent_top) / 2.0)
+            if footer_extent_top is not None else None),
+        'usable_body_height': _docx_body_area_usable_height(
+            page_height,
+            recommended_top,
+            recommended_bottom),
+        'policy': 'safe_detected_header_footer_extent',
+    }
+
+
+def _bounded_docx_margin(value) -> float:
+    value = _docx_header_footer_optional_float(value)
+    if value is None:
+        return None
+    return round(min(max(value, 18.0), 72.0), 2)
+
+
+def _bounded_docx_distance(value) -> float:
+    value = _docx_header_footer_optional_float(value)
+    if value is None:
+        return None
+    return round(min(max(value, 6.0), 36.0), 2)
+
+
+def _docx_body_area_usable_height(page_height, top_margin, bottom_margin):
+    if page_height is None:
+        return None
+    top = top_margin if top_margin is not None else 0.0
+    bottom = bottom_margin if bottom_margin is not None else 0.0
+    return round(max(float(page_height) - float(top) - float(bottom), 0.0), 2)
 
 
 def _docx_header_footer_entries_for_parity(entries: list, parity: str) -> list:
@@ -9545,17 +9829,22 @@ def _raw_mapping_expected_blocks(
     approved, _ = _reviewed_exclusion_candidates(
         _dry_run_candidates(dry_run_report),
         decision_map)
-    approved_by_fingerprint = {
-        item.get('fingerprint'): item
-        for item in approved
-        if item.get('fingerprint')
-    }
+    approved_by_fingerprint = defaultdict(list)
+    for item in approved:
+        if item.get('fingerprint'):
+            approved_by_fingerprint[item.get('fingerprint')].append(item)
+        for fingerprint in item.get('filter_fingerprints', []) or []:
+            if fingerprint:
+                approved_by_fingerprint[fingerprint].append(item)
     expected_blocks = []
     for page in page_summaries or []:
         page_index = page.get('page_index')
         for block in page.get('text_blocks', []) or []:
-            candidate = approved_by_fingerprint.get(block.get('fingerprint'))
-            if not candidate or not _block_matches_reviewed_candidate(block, page_index, candidate):
+            candidate = _matching_reviewed_candidate_for_block(
+                block,
+                page_index,
+                approved_by_fingerprint.get(block.get('fingerprint'), []))
+            if not candidate:
                 continue
             expected_blocks.append(_raw_mapping_expected_block(page_index, block, candidate))
     return expected_blocks
@@ -9567,6 +9856,7 @@ def _raw_mapping_expected_block(page_index, block: dict, candidate: dict) -> dic
         'page_number': _human_page_number(page_index),
         'block_index': block.get('block_index'),
         'fingerprint': block.get('fingerprint', ''),
+        'raw_text': normalize_text(block.get('text', '')),
         'normalized_text': block.get('normalized_text') or _comparison_text(block.get('text', '')),
         'region': block.get('region', ''),
         'bbox': _json_bbox(block.get('bbox')),

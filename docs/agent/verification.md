@@ -8123,3 +8123,132 @@ Result:
   boundaries.
 - Section-scoped policy, image/logo migration, and paragraph continuation merge
   remain out of scope.
+
+## Automatic Layout Fidelity v5
+
+### Observed v4 issues
+
+Manual inspection of the v4 `input3.docx` showed that structural page-number
+migration was incomplete:
+
+- Bottom `8-1`..`8-5` page labels were represented as footer PAGE fields, but
+  the source labels also remained in `word/document.xml`.
+- Literal `<PAGE_NUMBER>` placeholders appeared in `word/header*.xml` even
+  though input3 page labels belonged in the footer.
+- Pagination still drifted, and the body area needed a conservative
+  source-geometry-based review before promoting more odd/even running heads.
+
+### Root cause
+
+The automatic v4 synthetic page-number family correctly carried exact
+`filter_block_refs`, but raw-object mapping still built expected blocks from a
+single `approved_by_fingerprint` mapping and did not honor
+`filter_fingerprints`/`filter_block_refs`. The filtered parse therefore removed
+the shared footer text but not the synthetic page-label refs.
+
+The header placeholder came from the writer fallback path: an explicitly empty
+`odd_header_page_number_items` list was treated the same as a missing legacy
+field list, causing `page_number_placeholders` to fall back into header parts.
+
+### Implementation summary
+
+- Raw-object expected mapping now honors approved candidates' exact
+  `filter_fingerprints` and `filter_block_refs`.
+- Added internal migrated source-block accounting for planned refs, removed
+  refs, unexpected removals, parsed/body residuals, and DOCX body residuals.
+- Added fail-closed writer invariants for `word_field` mode:
+  literal page-number placeholders must not be written, and actual
+  header/footer PAGE field counts must match expected structured item counts.
+- Changed the DOCX writer item fallback so an explicitly present empty split
+  item list remains empty instead of falling back to legacy placeholders.
+- Added a conservative body-area plan based on detected header/footer extents,
+  bounded safety gaps, and nonzero top/bottom margin limits. This is applied
+  only by the internal header/footer writer helper.
+
+### Local v5 smoke
+
+Command:
+
+```bash
+.venv/bin/python local_reports/automatic_reviewed_batch/auto_batch_convert.py --input-dir local_reports/automatic_layout_fidelity_v5/input_pdf --default-output-dir local_reports/automatic_layout_fidelity_v5/output_docx_default --output-dir local_reports/automatic_layout_fidelity_v5/output_docx_auto_reviewed --report-dir local_reports/automatic_layout_fidelity_v5/reports --log-dir local_reports/automatic_layout_fidelity_v5/logs --page-number-behavior word_field --allow-source-tree --overwrite
+```
+
+Result:
+
+- total PDFs considered: 5 (`input.pdf` through `input5.pdf`)
+- default converted: 5
+- automatic reviewed converted: 2 (`input.pdf`, `input3.pdf`)
+- automatic diagnostic/skipped: 3 (`input2.pdf`, `input4.pdf`, `input5.pdf`)
+- blocked: 0
+- failed: 0
+
+Input3 v5 OpenXML/accounting result:
+
+- planned source refs: 10
+- matched/removed source refs: 10
+- DOCX body residual count for migrated source labels: 0
+- `8-1` through `8-5` body counts: 0
+- header PAGE field count: 0
+- footer PAGE field count: 2
+- header/footer literal placeholder count: 0
+- explicit page break count: 0
+- `pageBreakBefore` count: 0
+- section break count: 5
+- empty paragraph count: 23
+- consecutive empty paragraph count: 5
+- trailing table paragraph indicator: 1
+
+Ignored input3 investigation reports:
+
+- `local_reports/automatic_layout_fidelity_v5/input3-investigation/body-area-and-pagination-report.md`
+- `local_reports/automatic_layout_fidelity_v5/input3-investigation/page-number-source-removal-report.md`
+- `local_reports/automatic_layout_fidelity_v5/input3-investigation/page-field-routing-report.md`
+- `local_reports/automatic_layout_fidelity_v5/input3-investigation/odd-even-running-head-report.md`
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "body_area or pagination or source_removal or page_field_routing or page_number or odd_even or automatic_header_footer"
+```
+
+Result: passed, 56 tests plus 15 subtests.
+
+Full verification commands:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+git diff --check
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+git status --short --ignored
+```
+
+Result: pending final verification.
+
+Final result:
+
+- `test/test_layout_analyzer.py`: passed, 412 tests plus 47 subtests.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+- `test/test.py::TestConversion`: passed, 5 tests.
+- Final `git status --short --ignored`: tracked changes were limited to the
+  internal helper/writer code, focused tests, and committed documentation;
+  generated/local reports and smoke outputs remained ignored.
+
+### Current status
+
+- Default conversion changed: no.
+- Public CLI/API changed: no.
+- Automatic mode public exposure: none.
+- Local v5 smoke generated ignored DOCX outputs only.
+
+### Remaining limitations
+
+- Word PAGE fields still follow Word pagination, so exact source page-label
+  fidelity depends on controlling body pagination.
+- input3 odd/even running heads remain diagnostic until parity safety is
+  reliable enough.
+- Empty paragraphs, section breaks, and trailing table paragraphs remain the
+  most likely next pagination-drift investigation targets.

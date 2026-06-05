@@ -204,13 +204,21 @@ def apply_header_footer_text_plan(
     page_number_prefix_suffix_runs_written = 0
     page_number_start_number = None
     page_number_start_applied = False
+    expected_header_page_field_count = 0
+    expected_footer_page_field_count = 0
+    actual_header_page_field_count = 0
+    actual_footer_page_field_count = 0
     line_groups_written = 0
     grouped_line_item_count = 0
     tabbed_paragraphs_written = 0
     tab_runs_written = 0
+    body_area_adjusted_section_count = 0
     if sections and plan_sections and not warnings:
         section = sections[0]
         section_plan = plan_sections[0]
+        body_area_adjusted_section_count = _apply_body_area_plan_to_sections(
+            sections,
+            section_plan.get('body_area_plan', {}))
         header_items = _header_footer_plan_items(
             section_plan,
             'header_items',
@@ -238,6 +246,16 @@ def apply_header_footer_text_plan(
         page_number_start_number = _page_number_start_number(
             page_number_items,
             section_plan)
+        expected_header_page_field_count = _expected_page_number_field_count(
+            section_plan,
+            _HEADER_FOOTER_PLAN_TARGET_HEADER,
+            policy_type,
+            page_number_behavior)
+        expected_footer_page_field_count = _expected_page_number_field_count(
+            section_plan,
+            _HEADER_FOOTER_PLAN_TARGET_FOOTER,
+            policy_type,
+            page_number_behavior)
         if policy_type == 'first_page_excluded_default':
             _enable_different_first_page_header_footer(section)
         if policy_type == 'odd_even':
@@ -336,6 +354,8 @@ def apply_header_footer_text_plan(
                 footer_result = _replace_header_footer_part_items(section.footer, footer_items)
         header_count = header_result['paragraphs_written']
         footer_count = footer_result['paragraphs_written']
+        actual_header_page_field_count = header_result['fields_written']
+        actual_footer_page_field_count = footer_result['fields_written']
         page_number_fields_written += (
             header_result['fields_written'] +
             footer_result['fields_written'])
@@ -379,6 +399,7 @@ def apply_header_footer_text_plan(
                     header_page_number_items,
                     page_number_start_number)
                 page_number_fields_written += page_number_result['fields_written']
+                actual_header_page_field_count += page_number_result['fields_written']
                 header_count += page_number_result['fields_written']
                 styled_runs_written += page_number_result['styled_runs_written']
                 style_properties_applied += page_number_result['style_properties_applied']
@@ -394,6 +415,7 @@ def apply_header_footer_text_plan(
                     footer_page_number_items,
                     page_number_start_number)
                 page_number_fields_written += page_number_result['fields_written']
+                actual_footer_page_field_count += page_number_result['fields_written']
                 footer_count += page_number_result['fields_written']
                 styled_runs_written += page_number_result['styled_runs_written']
                 style_properties_applied += page_number_result['style_properties_applied']
@@ -403,6 +425,30 @@ def apply_header_footer_text_plan(
                     page_number_result['paragraph_spacing_normalized_count'])
                 page_number_prefix_suffix_runs_written += (
                     page_number_result['prefix_suffix_runs_written'])
+
+        if (
+                page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD and
+                page_number_placeholders_written):
+            warnings.append({
+                'type': 'literal_page_number_placeholder_written_in_word_field',
+                'count': page_number_placeholders_written,
+            })
+        if (
+                page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD and
+                actual_header_page_field_count != expected_header_page_field_count):
+            warnings.append({
+                'type': 'header_page_field_count_mismatch',
+                'expected': expected_header_page_field_count,
+                'actual': actual_header_page_field_count,
+            })
+        if (
+                page_number_behavior == _PAGE_NUMBER_BEHAVIOR_WORD_FIELD and
+                actual_footer_page_field_count != expected_footer_page_field_count):
+            warnings.append({
+                'type': 'footer_page_field_count_mismatch',
+                'expected': expected_footer_page_field_count,
+                'actual': actual_footer_page_field_count,
+            })
 
     return {
         'enabled': True,
@@ -418,6 +464,10 @@ def apply_header_footer_text_plan(
                 page_number_behavior),
             'page_number_fields_written': page_number_fields_written,
             'page_number_placeholders_written': page_number_placeholders_written,
+            'expected_header_page_field_count': expected_header_page_field_count,
+            'actual_header_page_field_count': actual_header_page_field_count,
+            'expected_footer_page_field_count': expected_footer_page_field_count,
+            'actual_footer_page_field_count': actual_footer_page_field_count,
             'styled_runs_written': styled_runs_written,
             'style_properties_applied': style_properties_applied,
             'alignment_paragraphs_written': alignment_paragraphs_written,
@@ -429,6 +479,7 @@ def apply_header_footer_text_plan(
             'grouped_line_item_count': grouped_line_item_count,
             'tabbed_paragraphs_written': tabbed_paragraphs_written,
             'tab_runs_written': tab_runs_written,
+            'body_area_adjusted_section_count': body_area_adjusted_section_count,
         },
         'safety_warnings': warnings,
         'plan_safety_warnings': plan_safety_warnings,
@@ -450,6 +501,42 @@ def _page_number_field_generation(behavior: str) -> str:
     return 'deferred_placeholder_only'
 
 
+def _apply_body_area_plan_to_sections(sections: list, body_area_plan: dict) -> int:
+    if not (body_area_plan or {}).get('enabled'):
+        return 0
+    top_margin = _safe_float(body_area_plan.get('recommended_top_margin'))
+    bottom_margin = _safe_float(body_area_plan.get('recommended_bottom_margin'))
+    header_distance = _safe_float(body_area_plan.get('recommended_header_distance'))
+    footer_distance = _safe_float(body_area_plan.get('recommended_footer_distance'))
+    count = 0
+    for section in sections or []:
+        changed = False
+        if top_margin is not None:
+            section.top_margin = Pt(top_margin)
+            changed = True
+        if bottom_margin is not None:
+            section.bottom_margin = Pt(bottom_margin)
+            changed = True
+        if header_distance is not None and hasattr(section, 'header_distance'):
+            section.header_distance = Pt(header_distance)
+            changed = True
+        if footer_distance is not None and hasattr(section, 'footer_distance'):
+            section.footer_distance = Pt(footer_distance)
+            changed = True
+        if changed:
+            count += 1
+    return count
+
+
+def _safe_float(value):
+    if value in ('', None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _header_footer_plan_texts(section_plan: dict, key: str) -> list:
     values = []
     for value in section_plan.get(key, []) or []:
@@ -464,12 +551,17 @@ def _header_footer_plan_items(
         item_key: str,
         text_key: str) -> list:
     values = []
-    raw_items = section_plan.get(item_key, []) or []
+    if item_key in (section_plan or {}):
+        raw_items = section_plan.get(item_key, []) or []
+    else:
+        raw_items = None
     if raw_items:
         for value in raw_items:
             item = _normalize_header_footer_plan_item(value)
             if item.get('text'):
                 values.append(item)
+        return values
+    if raw_items is not None:
         return values
 
     return [
@@ -496,6 +588,24 @@ def _header_footer_plan_page_number_items_for_part(
         if _header_footer_page_number_item_target_part(item) == target_part:
             values.append(item)
     return values
+
+
+def _expected_page_number_field_count(
+        section_plan: dict,
+        target_part: str,
+        policy_type: str,
+        page_number_behavior: str) -> int:
+    if page_number_behavior != _PAGE_NUMBER_BEHAVIOR_WORD_FIELD:
+        return 0
+    if policy_type == 'odd_even':
+        if target_part == _HEADER_FOOTER_PLAN_TARGET_HEADER:
+            keys = ('odd_header_page_number_items', 'even_header_page_number_items')
+        else:
+            keys = ('odd_footer_page_number_items', 'even_footer_page_number_items')
+        return sum(len(_header_footer_raw_plan_items(section_plan, key)) for key in keys)
+    return len(_header_footer_plan_page_number_items_for_part(
+        section_plan,
+        target_part))
 
 
 def _header_footer_raw_plan_items(section_plan: dict, item_key: str) -> list:

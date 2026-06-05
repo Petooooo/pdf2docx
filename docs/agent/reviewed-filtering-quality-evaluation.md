@@ -310,6 +310,35 @@ still future work.
 Public/default conversion remains unchanged and the public CLI/API remains
 closed.
 
+## Automatic Layout Fidelity v5
+
+Automatic layout fidelity v5 tightened the correctness gates around generated
+page-number fields. Synthetic page-number families now carry exact source-block
+removal accounting through raw-object mapping, so every migrated source block
+must be matched and removed before the DOCX body is allowed to contain the new
+Word PAGE field. This prevents duplicate output where both the original PDF
+page label and the generated Word field appear.
+
+The internal writer also now treats explicitly empty odd/even split page-number
+item lists as empty, rather than falling back to legacy placeholder text. In
+`word_field` mode, literal `<PAGE_NUMBER>` or `<PAGE NUMBER>` placeholders are
+blocking writer warnings, and expected header/footer PAGE field counts must
+match the actual OpenXML output.
+
+A conservative body-area plan was added for the internal header/footer writer.
+It uses detected header/footer extents and bounded safety gaps to reduce unused
+vertical padding without setting margins to zero or changing default conversion.
+
+Local v5 smoke improved `input3.pdf`: migrated `8-1` through `8-5` source page
+labels no longer remain in `word/document.xml`, footer PAGE fields are present,
+and header PAGE fields/placeholders are absent. Pagination drift risk remains:
+Word PAGE fields still follow Word pagination, and empty paragraphs, section
+breaks, and trailing table paragraphs need a separate body-layout investigation
+before odd/even running heads can be promoted more broadly.
+
+Public/default conversion remains unchanged and the public CLI/API remains
+closed.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

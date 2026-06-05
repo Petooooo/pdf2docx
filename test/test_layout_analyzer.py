@@ -78,6 +78,7 @@ build_paragraph_mismatch_analysis_report = LayoutAnalyzer.build_paragraph_mismat
 build_paragraph_production_comparison_report = LayoutAnalyzer.build_paragraph_production_comparison_report
 build_paragraph_reconstruction_validation_report = LayoutAnalyzer.build_paragraph_reconstruction_validation_report
 build_reviewed_header_footer_filter_report = LayoutAnalyzer.build_reviewed_header_footer_filter_report
+build_migrated_source_block_accounting_report = LayoutAnalyzer.build_migrated_source_block_accounting_report
 build_layout_analysis_report = LayoutAnalyzer.build_layout_analysis_report
 build_table_delta_investigation_report = LayoutAnalyzer.build_table_delta_investigation_report
 reviewed_filtering_config_to_document_parse_settings = LayoutAnalyzer.reviewed_filtering_config_to_document_parse_settings
@@ -5691,6 +5692,63 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertTrue(plan['summary']['alignment_inferred_entry_count'] >= 2)
         json.dumps(plan)
 
+    def test_header_footer_body_area_plan_applies_safe_footer_margin(self):
+        _require_docx_header_footer_support(self)
+        footer_text = 'BODY AREA FOOTER'
+        footer_fingerprint = _summary_fingerprint(footer_text, REGION_BOTTOM)
+        page_summaries = [{
+            'page_index': 0,
+            'width': 600,
+            'height': 800,
+            'text_blocks': [{
+                'page_index': 0,
+                'block_index': 0,
+                'fingerprint': footer_fingerprint,
+                'region': REGION_BOTTOM,
+                'text': footer_text,
+                'bbox': [210, 760, 390, 776],
+                'style_properties': {'font_name': 'Arial', 'font_size': 9},
+            }],
+        }]
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'footer',
+                footer_fingerprint,
+                ROLE_FOOTER,
+                ACTION_WOULD_EXCLUDE,
+                [0],
+                [REGION_BOTTOM]),
+        ]}
+        decisions = {'decisions': [
+            _review_decision('footer', footer_fingerprint, 'approve_exclude'),
+        ]}
+
+        plan = build_docx_header_footer_generation_plan(
+            page_summaries,
+            dry_run,
+            decisions,
+            enabled=True)
+        body_area = plan['sections'][0]['body_area_plan']
+
+        self.assertTrue(body_area['enabled'])
+        self.assertEqual(body_area['footer_extent_top'], 760)
+        self.assertEqual(body_area['recommended_bottom_margin'], 46)
+
+        document = DocxDocument()
+        report = docx_utils.apply_header_footer_text_plan(
+            document,
+            plan,
+            enabled=True)
+
+        self.assertTrue(report['applied'])
+        self.assertEqual(
+            report['summary']['body_area_adjusted_section_count'],
+            1)
+        self.assertAlmostEqual(
+            document.sections[0].bottom_margin.pt,
+            46,
+            places=1)
+
     def test_header_footer_fidelity_styled_plan_writes_role_specific_openxml(self):
         _require_docx_header_footer_support(self)
         plan = {
@@ -6596,6 +6654,8 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
         self.assertIn('8-', openxml['footer_xml'])
         self.assertEqual(openxml['footer_xml'].count(' PAGE '), 2)
+        self.assertNotIn(' PAGE ', openxml['header_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['header_xml'])
         self.assertIn('w:pgNumType w:start="1"', openxml['body_xml'])
         self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
 
@@ -6666,6 +6726,155 @@ class TestLayoutAnalyzer(unittest.TestCase):
             enabled=True,
             apply=True)
         self.assertEqual(filter_report['summary']['removed_block_count'], 5)
+        kept_text = ' '.join(
+            block.get('text', '')
+            for page in filter_report['filtered_pages']
+            for block in page.get('text_blocks', []))
+        self.assertIn('6', kept_text)
+
+        raw_object_pages = [
+            {
+                'page_index': page['page_index'],
+                'height': page['height'],
+                'raw_objects': [
+                    {
+                        'block_index': block['block_index'],
+                        'text': block['text'],
+                        'bbox': block['bbox'],
+                    }
+                    for block in page['text_blocks']
+                ],
+            }
+            for page in page_summaries
+        ]
+        mapping_report = build_document_parse_raw_object_mapping_report(
+            page_summaries,
+            raw_object_pages,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            enabled=True)
+
+        self.assertEqual(mapping_report['summary']['mapped_raw_object_count'], 5)
+        self.assertTrue(
+            mapping_report['summary']['all_expected_blocks_mapped_once'])
+
+        accounting = build_migrated_source_block_accounting_report(
+            page_summaries,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            filtering_report=filter_report,
+            docx_body_text='Body text without migrated labels',
+            enabled=True)
+
+        self.assertEqual(accounting['summary']['planned_source_ref_count'], 5)
+        self.assertEqual(accounting['summary']['removed_before_parse_count'], 5)
+        self.assertEqual(accounting['summary']['remaining_in_docx_body_count'], 0)
+        self.assertTrue(accounting['summary']['safe_for_migrated_output'])
+
+    def test_migrated_source_block_accounting_blocks_missing_and_residual_page_labels(self):
+        fingerprint = '<page_number>||bottom'
+        page_summaries = []
+        for index, text in enumerate(['8-1', '8-2', '8-3']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        [528, 760, 543, 776],
+                        {'font_name': 'Minion', 'font_size': 11, 'color': 0}),
+                ],
+            })
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            {'candidates': []},
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        filter_report = build_reviewed_header_footer_filter_report(
+            page_summaries,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            enabled=True,
+            apply=True)
+        missing_first_filter_report = dict(filter_report)
+        pages = []
+        for page in filter_report['pages']:
+            copied = dict(page)
+            if copied.get('page_index') == 0:
+                copied['removed_blocks'] = []
+                copied['removed_block_count'] = 0
+            pages.append(copied)
+        missing_first_filter_report['pages'] = pages
+
+        accounting = build_migrated_source_block_accounting_report(
+            page_summaries,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            filtering_report=missing_first_filter_report,
+            docx_body_text='Body still has 8-1 after PAGE field generation',
+            enabled=True)
+        warning_types = {
+            warning['type'] for warning in accounting['safety_warnings']}
+
+        self.assertFalse(accounting['summary']['safe_for_migrated_output'])
+        self.assertEqual(accounting['summary']['planned_source_ref_count'], 3)
+        self.assertEqual(accounting['summary']['removed_before_parse_count'], 2)
+        self.assertEqual(accounting['summary']['remaining_in_docx_body_count'], 1)
+        self.assertIn('migrated_source_ref_removal_count_mismatch', warning_types)
+        self.assertIn('migrated_source_text_remaining_in_docx_body', warning_types)
+
+    def test_document_parse_mapping_uses_synthetic_page_number_filter_refs(self):
+        fingerprint = '<page_number>||bottom'
+        page_summaries = []
+        raw_object_pages = []
+        for index, text in enumerate(['8-1', '8-2', '8-3']):
+            block = _automatic_summary_block(
+                index,
+                0,
+                fingerprint,
+                REGION_BOTTOM,
+                text,
+                [528, 760, 543, 776],
+                {'font_name': 'Minion', 'font_size': 11, 'color': 0})
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [block],
+            })
+            raw_object_pages.append({
+                'page_index': index,
+                'height': 800,
+                'raw_objects': [{
+                    'block_index': 0,
+                    'text': text,
+                    'bbox': [528, 760, 543, 776],
+                }],
+            })
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            {'candidates': []},
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+
+        mapping_report = build_document_parse_raw_object_mapping_report(
+            page_summaries,
+            raw_object_pages,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            enabled=True)
+
+        self.assertEqual(mapping_report['summary']['mapped_raw_object_count'], 3)
+        self.assertEqual(mapping_report['summary']['missing_match_count'], 0)
+        self.assertTrue(
+            mapping_report['summary']['all_expected_blocks_mapped_once'])
 
     def test_automatic_header_footer_classifier_keeps_unstable_page_number_sequence_diagnostic(self):
         fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
