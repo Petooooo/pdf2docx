@@ -5132,12 +5132,14 @@ class TestLayoutAnalyzer(unittest.TestCase):
             page_number_behavior='word_field')
         warning_types = {warning['type'] for warning in plan['safety_warnings']}
 
-        self.assertEqual(plan['summary']['representable_entry_count'], 0)
-        self.assertEqual(plan['summary']['unrepresentable_approved_candidate_count'], 3)
+        self.assertEqual(plan['summary']['representable_entry_count'], 1)
+        self.assertEqual(plan['summary']['unrepresentable_approved_candidate_count'], 2)
         self.assertIn('header_role_region_mismatch', warning_types)
         self.assertIn('footer_role_region_mismatch', warning_types)
-        self.assertIn('page_number_region_not_supported', warning_types)
-        self.assertEqual(plan['header_footer_policy']['policy_type'], 'unsupported')
+        self.assertNotIn('page_number_region_not_supported', warning_types)
+        self.assertEqual(
+            plan['entries'][0]['target_part'],
+            'header')
         self.assertFalse(
             plan['recommendation']['safe_for_internal_docx_header_footer_experiment'])
 
@@ -6013,6 +6015,28 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(mostly['suffix'], ' -')
         self.assertTrue(single['supported'])
         self.assertEqual(single['sequence_status'], 'single_candidate')
+
+    def test_page_number_template_sequence_records_source_offsets(self):
+        mostly = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123 of 456'},
+            {'page_index': 2, 'text': 'Page 125 of 456'},
+            {'page_index': 3, 'text': 'Page 126 of 456'},
+        ])
+        unstable = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123'},
+            {'page_index': 1, 'text': 'Page 130'},
+            {'page_index': 2, 'text': 'Page 124'},
+        ])
+        single = infer_docx_page_number_template_sequence([
+            {'page_index': 0, 'text': 'Page 123 of 456'},
+        ])
+
+        self.assertEqual(mostly['source_offsets'], [123, 123, 123])
+        self.assertTrue(mostly['offset_consistent'])
+        self.assertEqual(mostly['sequence_status'], 'mostly_consecutive')
+        self.assertEqual(mostly['suffix'], ' of 456')
+        self.assertEqual(unstable['sequence_status'], 'unstable')
+        self.assertFalse(unstable['offset_consistent'])
         self.assertEqual(single['suffix'], ' of 456')
         self.assertEqual(single['total_pages'], 456)
 
@@ -6433,6 +6457,216 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(decision['auto_decision'], AUTO_DECISION_KEEP)
         self.assertIn('body_region_protected', decision['blocking_reasons'])
 
+    def test_automatic_header_footer_classifier_writes_top_page_numbers_to_header(self):
+        _require_docx_header_footer_support(self)
+        fingerprint = _summary_fingerprint('Page 123', REGION_TOP)
+        page_summaries = []
+        for index, text in enumerate(['Page 123', 'Page 124', 'Page 125']):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_TOP,
+                        text,
+                        [460, 36, 560, 50],
+                        {'font_name': 'Arial,Italic', 'font_size': 9, 'flags': 2, 'color': 0}),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'top-page-number',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2],
+                [REGION_TOP]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        decision = migration['automatic_decisions']['decisions'][0]
+
+        self.assertEqual(decision['automatic_role'], ROLE_PAGE_NUMBER)
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_EXCLUDE)
+        self.assertEqual(
+            migration['docx_header_footer_generation_plan']['entries'][0]['target_part'],
+            'header')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-top-page-number.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('Page ', openxml['header_xml'])
+        self.assertIn(' PAGE ', openxml['header_xml'])
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertNotIn(' PAGE ', openxml['footer_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['header_xml'])
+
+    def test_automatic_header_footer_classifier_builds_boundary_page_number_family(self):
+        _require_docx_header_footer_support(self)
+        page_summaries = []
+        for index, text in enumerate(['8-1', '8-2', '8-3', '8-4']):
+            bbox = (
+                [528, 760, 543, 776]
+                if index % 2 == 0 else
+                [56, 760, 71, 776])
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        f'{text}||{REGION_BOTTOM}',
+                        REGION_BOTTOM,
+                        text,
+                        bbox,
+                        {'font_name': 'Minion', 'font_size': 11, 'color': 0}),
+                ],
+            })
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            {'candidates': []},
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        decisions = migration['automatic_decisions']['decisions']
+        page_number_decisions = [
+            decision for decision in decisions
+            if decision.get('automatic_role') == ROLE_PAGE_NUMBER]
+        self.assertEqual(len(page_number_decisions), 1)
+        decision = page_number_decisions[0]
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_EXCLUDE)
+        self.assertEqual(
+            decision['page_number_template']['prefix'],
+            '8-')
+        self.assertEqual(
+            decision['page_number_template']['sequence_status'],
+            'parity_consecutive')
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'odd_even')
+        self.assertTrue(
+            migration['summary']['safe_for_internal_automatic_migration'])
+        self.assertEqual(
+            sorted(decision['filter_fingerprints']),
+            sorted(f'{text}||{REGION_BOTTOM}'
+                   for text in ['8-1', '8-2', '8-3', '8-4']))
+
+        filter_report = build_reviewed_header_footer_filter_report(
+            page_summaries,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            enabled=True,
+            apply=True)
+        self.assertEqual(filter_report['summary']['removed_block_count'], 4)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-family-page-number.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
+        self.assertIn('8-', openxml['footer_xml'])
+        self.assertEqual(openxml['footer_xml'].count(' PAGE '), 2)
+        self.assertIn('w:pgNumType w:start="1"', openxml['body_xml'])
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_splits_dirty_page_number_fingerprint_family(self):
+        fingerprint = '<page_number>||bottom'
+        page_summaries = []
+        for index, text in enumerate(['8-1', '8-2', '8-3', '8-4', '8-5']):
+            blocks = [
+                _automatic_summary_block(
+                    index,
+                    1 if index == 4 else 0,
+                    fingerprint,
+                    REGION_BOTTOM,
+                    text,
+                    [528, 760, 543, 776] if index % 2 == 0 else [56, 760, 71, 776],
+                    {'font_name': 'Minion', 'font_size': 11, 'color': 0}),
+            ]
+            if index == 4:
+                blocks.insert(0, _automatic_summary_block(
+                    index,
+                    0,
+                    fingerprint,
+                    REGION_BOTTOM,
+                    '6',
+                    [58, 684, 72, 699],
+                    {'font_name': 'Myriad', 'font_size': 13, 'color': 0}))
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': blocks,
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'dirty-page-number',
+                fingerprint,
+                ROLE_PAGE_NUMBER,
+                ACTION_REVIEW,
+                [0, 1, 2, 3, 4],
+                [REGION_BOTTOM]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        page_number_decisions = [
+            decision for decision in migration['automatic_decisions']['decisions']
+            if decision.get('automatic_role') == ROLE_PAGE_NUMBER]
+        family = [
+            decision for decision in page_number_decisions
+            if decision.get('candidate_id', '').startswith('auto-page-number-family')]
+
+        self.assertEqual(family[0]['auto_decision'], AUTO_DECISION_EXCLUDE)
+        self.assertEqual(
+            family[0]['page_number_template']['observed_numbers'],
+            [1, 2, 3, 4, 5])
+        self.assertIn(
+            'non_consecutive_page_number_sequence',
+            page_number_decisions[0]['blocking_reasons'])
+
+        filter_report = build_reviewed_header_footer_filter_report(
+            page_summaries,
+            migration['transformed_dry_run'],
+            migration['review_decisions'],
+            enabled=True,
+            apply=True)
+        self.assertEqual(filter_report['summary']['removed_block_count'], 5)
+
     def test_automatic_header_footer_classifier_keeps_unstable_page_number_sequence_diagnostic(self):
         fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
         page_summaries = []
@@ -6537,9 +6771,103 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(coverage['odd'], 'odd_pages')
         self.assertEqual(coverage['sparse'], 'sparse_or_unstable')
 
+    def test_automatic_header_footer_classifier_reports_robust_geometry(self):
+        stable_fp = _summary_fingerprint('ROBUST HEADER', REGION_TOP)
+        unstable_fp = _summary_fingerprint('MOVING HEADER', REGION_TOP)
+        page_summaries = []
+        stable_y = [36, 38, 37, 39]
+        moving_y = [80, 160, 260, 360]
+        for index in range(4):
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        stable_fp,
+                        REGION_TOP,
+                        'ROBUST HEADER',
+                        [50, stable_y[index], 180, stable_y[index] + 14],
+                        {'font_name': 'Arial', 'font_size': 10, 'color': 0}),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        unstable_fp,
+                        REGION_TOP,
+                        'MOVING HEADER',
+                        [50, moving_y[index], 180, moving_y[index] + 14],
+                        {'font_name': 'Arial', 'font_size': 10, 'color': 0}),
+                ],
+            })
+        stable = classify_header_footer_candidate_automatically(
+            _dry_run_candidate(
+                'stable-geometry',
+                stable_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2, 3],
+                [REGION_TOP]),
+            page_summaries,
+            page_count=4)
+        unstable = classify_header_footer_candidate_automatically(
+            _dry_run_candidate(
+                'unstable-geometry',
+                unstable_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 1, 2, 3],
+                [REGION_TOP]),
+            page_summaries,
+            page_count=4)
+
+        self.assertEqual(stable['bbox_stability']['geometry_status'], 'stable')
+        self.assertIn('global_y_median', stable['bbox_stability'])
+        self.assertEqual(unstable['bbox_stability']['geometry_status'], 'unstable')
+        self.assertIn('unstable_bbox_band', unstable['blocking_reasons'])
+
+    def test_automatic_header_footer_classifier_accepts_parity_stable_geometry(self):
+        fingerprint = _summary_fingerprint('PARITY HEADER', REGION_TOP)
+        page_summaries = []
+        for index in range(6):
+            y = 36 if index % 2 == 0 else 43
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_TOP,
+                        'PARITY HEADER',
+                        [50, y, 180, y + 14],
+                        {'font_name': 'Arial', 'font_size': 10, 'color': 0}),
+                ],
+            })
+
+        decision = classify_header_footer_candidate_automatically(
+            _dry_run_candidate(
+                'parity-stable-geometry',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                list(range(6)),
+                [REGION_TOP]),
+            page_summaries,
+            page_count=6)
+
+        self.assertIn(
+            decision['bbox_stability']['geometry_status'],
+            {'stable', 'parity_stable'})
+        self.assertTrue(decision['bbox_stability']['stable'])
+
     def test_automatic_header_footer_classifier_writes_parity_page_numbers(self):
         _require_docx_header_footer_support(self)
         fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
+        footer_fp = _summary_fingerprint('SHARED FOOTER', REGION_BOTTOM)
         page_summaries = []
         for index in range(6):
             text = f'Page {123 + index}'
@@ -6557,12 +6885,27 @@ class TestLayoutAnalyzer(unittest.TestCase):
                         text,
                         bbox,
                         {'font_name': 'Arial,Italic', 'font_size': 9, 'flags': 2, 'color': 0}),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        footer_fp,
+                        REGION_BOTTOM,
+                        'SHARED FOOTER',
+                        [230, 760, 360, 774],
+                        {'font_name': 'Arial', 'font_size': 9, 'color': 0}),
                 ],
             })
         dry_run = {'candidates': [
             _dry_run_candidate(
                 'parity-page-number',
                 fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                list(range(6)),
+                [REGION_BOTTOM]),
+            _dry_run_candidate(
+                'shared-footer',
+                footer_fp,
                 ROLE_REVIEW_ONLY,
                 ACTION_REVIEW,
                 list(range(6)),
@@ -6608,7 +6951,132 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(len(openxml['footer_parts']), 2)
         self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
         self.assertEqual(openxml['footer_xml'].count(' PAGE '), 2)
+        self.assertEqual(openxml['footer_xml'].count('SHARED FOOTER'), 2)
         self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_writes_odd_even_running_head_family(self):
+        _require_docx_header_footer_support(self)
+        odd_header_fp = _summary_fingerprint('CHAPTER TITLE', REGION_TOP)
+        even_header_fp = _summary_fingerprint('BOOK TITLE', REGION_TOP)
+        page_number_fp = _summary_fingerprint('Page 123', REGION_TOP)
+        page_summaries = []
+        for index in range(6):
+            page_text = f'Page {123 + index}'
+            if index % 2 == 0:
+                blocks = [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        odd_header_fp,
+                        REGION_TOP,
+                        'CHAPTER TITLE',
+                        [40, 36, 190, 50],
+                        {'font_name': 'Arial,Bold', 'font_size': 9, 'flags': 16, 'color': 0}),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        page_number_fp,
+                        REGION_TOP,
+                        page_text,
+                        [460, 36, 560, 50],
+                        {'font_name': 'Arial', 'font_size': 9, 'color': 0}),
+                ]
+            else:
+                blocks = [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        page_number_fp,
+                        REGION_TOP,
+                        page_text,
+                        [40, 36, 140, 50],
+                        {'font_name': 'Arial', 'font_size': 9, 'color': 0}),
+                    _automatic_summary_block(
+                        index,
+                        1,
+                        even_header_fp,
+                        REGION_TOP,
+                        'BOOK TITLE',
+                        [430, 36, 560, 50],
+                        {'font_name': 'Arial,Bold', 'font_size': 9, 'flags': 16, 'color': 0}),
+                ]
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': blocks,
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'odd-running-title',
+                odd_header_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [0, 2, 4],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'even-running-title',
+                even_header_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                [1, 3, 5],
+                [REGION_TOP]),
+            _dry_run_candidate(
+                'running-page-number',
+                page_number_fp,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                list(range(6)),
+                [REGION_TOP]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        diagnostics = (
+            migration['automatic_decisions']['policy_diagnostics'])
+
+        self.assertTrue(
+            any(
+                item.get('policy_type') == 'odd_even_running_head'
+                for item in diagnostics))
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'odd_even')
+        self.assertTrue(
+            migration['summary']['safe_for_internal_automatic_migration'])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-running-head.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertEqual(len(openxml['header_parts']), 2)
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
+        self.assertEqual(openxml['header_xml'].count(' PAGE '), 2)
+        self.assertNotIn(' PAGE ', openxml['footer_xml'])
+        odd_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'CHAPTER TITLE' in xml)
+        even_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'BOOK TITLE' in xml)
+        self.assertIn(' PAGE ', odd_part)
+        self.assertIn(' PAGE ', even_part)
+        self.assertIn('w:tab', odd_part)
+        self.assertIn('w:tab', even_part)
+        self.assertNotIn('BOOK TITLE', odd_part)
+        self.assertNotIn('CHAPTER TITLE', even_part)
 
     def test_automatic_header_footer_classifier_writes_strong_odd_even_headers(self):
         _require_docx_header_footer_support(self)

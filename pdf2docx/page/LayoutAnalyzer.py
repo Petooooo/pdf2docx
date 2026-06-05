@@ -1654,7 +1654,13 @@ def build_reviewed_header_footer_filter_report(
     dry_run_candidates = _dry_run_candidates(dry_run_report)
     decision_map = _review_decision_map(review_decisions)
     approved, blocked = _reviewed_exclusion_candidates(dry_run_candidates, decision_map)
-    approved_by_fingerprint = {item['fingerprint']: item for item in approved}
+    approved_by_fingerprint = defaultdict(list)
+    for item in approved:
+        if item.get('fingerprint'):
+            approved_by_fingerprint[item['fingerprint']].append(item)
+        for fingerprint in item.get('filter_fingerprints', []) or []:
+            if fingerprint:
+                approved_by_fingerprint[fingerprint].append(item)
     should_apply = bool(enabled and apply)
 
     pages_report = []
@@ -1672,7 +1678,10 @@ def build_reviewed_header_footer_filter_report(
 
         for block in blocks:
             original_block_count += 1
-            candidate = approved_by_fingerprint.get(block.get('fingerprint'))
+            candidate = _matching_reviewed_candidate_for_block(
+                block,
+                page_index,
+                approved_by_fingerprint.get(block.get('fingerprint'), []))
             if candidate and _block_matches_reviewed_candidate(block, page_index, candidate):
                 removed_blocks.append(_removed_block_summary(block, candidate))
                 continue
@@ -1800,11 +1809,15 @@ def build_automatic_header_footer_decisions(
         dry_run_report: dict = None,
         enabled: bool = True) -> dict:
     '''Build a JSON-serializable automatic header/footer decision report.'''
-    candidates = _dry_run_candidates(dry_run_report)
+    candidates = list(_dry_run_candidates(dry_run_report))
     page_count = _automatic_header_footer_page_count(
         page_summaries,
         candidates)
     text_lookup = _docx_header_footer_text_lookup(page_summaries)
+    candidates.extend(_automatic_header_footer_page_number_family_candidates(
+        text_lookup,
+        page_count,
+        candidates))
     decisions = [
         _automatic_header_footer_candidate_decision(
             candidate,
@@ -1832,6 +1845,7 @@ def build_automatic_header_footer_decisions(
         'mode': AUTOMATIC_HEADER_FOOTER_MODE,
         'policy': 'internal_automatic_header_footer_classifier_only',
         'summary': summary,
+        'candidate_inputs': candidates,
         'decisions': decisions,
         'policy_diagnostics': policy_diagnostics,
         'warnings': warnings,
@@ -1867,8 +1881,11 @@ def build_automatic_header_footer_migration_plan(
         page_summaries,
         dry_run_report,
         enabled=enabled)
+    decision_candidates = (
+        decisions_report.get('candidate_inputs') or
+        _dry_run_candidates(dry_run_report))
     transformed_dry_run = _automatic_header_footer_transformed_dry_run(
-        _dry_run_candidates(dry_run_report),
+        decision_candidates,
         decisions_report)
     review_decisions = _automatic_header_footer_review_decisions(decisions_report)
     docx_plan = build_docx_header_footer_generation_plan(
@@ -6288,8 +6305,12 @@ def _automatic_header_footer_candidate_decision(
         sequence_status = page_number_template.get('sequence_status', '')
         if (
                 page_number_template.get('supported') and
-                page_number_template.get('consecutive')):
-            evidence.append('parseable_consecutive_page_number_sequence')
+                sequence_status in {
+                    'consecutive',
+                    'parity_consecutive',
+                    'offset_consistent',
+                }):
+            evidence.append(f'parseable_{sequence_status}_page_number_sequence')
         elif (
                 page_number_template.get('supported') and
                 page_number_template.get('mostly_consecutive')):
@@ -6360,6 +6381,8 @@ def _automatic_header_footer_candidate_decision(
         'page_number_template_records': (
             _automatic_header_footer_records(candidate, text_lookup)
             if effective_role == ROLE_PAGE_NUMBER else []),
+        'filter_fingerprints': list(candidate.get('filter_fingerprints', []) or []),
+        'filter_block_refs': list(candidate.get('filter_block_refs', []) or []),
         'text_preview': _automatic_header_footer_text_preview(candidate, text_lookup),
     }
 
@@ -6500,7 +6523,9 @@ def _automatic_header_footer_effective_role(
     page_number_template = _docx_header_footer_candidate_page_number_template(
         candidate,
         text_lookup)
-    if REGION_BOTTOM in regions and page_number_template.get('supported'):
+    if (
+            regions.issubset({REGION_TOP, REGION_BOTTOM}) and
+            page_number_template.get('supported')):
         return ROLE_PAGE_NUMBER
     if regions == {REGION_TOP}:
         return ROLE_HEADER
@@ -6525,7 +6550,10 @@ def _automatic_header_footer_role_region_block(role: str, regions: set) -> str:
     if role == ROLE_FOOTER:
         return '' if regions == {REGION_BOTTOM} else 'footer_role_region_mismatch'
     if role == ROLE_PAGE_NUMBER:
-        return '' if regions == {REGION_BOTTOM} else 'page_number_region_mismatch'
+        return (
+            ''
+            if regions in ({REGION_TOP}, {REGION_BOTTOM}) else
+            'page_number_region_mismatch')
     if role == ROLE_LAYOUT_PLACEHOLDER:
         return 'layout_placeholder_protected'
     return 'role_not_auto_migratable'
@@ -6535,35 +6563,172 @@ def _automatic_header_footer_bbox_stability(
         candidate: dict,
         text_lookup: dict) -> dict:
     records = _automatic_header_footer_records(candidate, text_lookup)
-    centers = []
+    observations = []
     for record in records:
         metadata = record.get('metadata') or {}
-        _, y_center = _docx_header_footer_bbox_center(metadata.get('bbox', []))
+        x_center, y_center = _docx_header_footer_bbox_center(metadata.get('bbox', []))
         if y_center is not None:
-            centers.append(float(y_center))
-    if not centers:
+            page_height = _docx_header_footer_optional_float(
+                metadata.get('page_height')) or 0.0
+            page_width = _docx_header_footer_optional_float(
+                metadata.get('page_width')) or 0.0
+            font_size = _docx_header_footer_optional_float(
+                metadata.get('font_size')) or 0.0
+            observations.append({
+                'page_index': _readiness_int(record.get('page_index', 0)),
+                'x_center': float(x_center or 0.0),
+                'y_center': float(y_center),
+                'x_center_normalized': (
+                    round(float(x_center or 0.0) / page_width, 5)
+                    if page_width > 0 else None),
+                'y_center_normalized': (
+                    round(float(y_center) / page_height, 5)
+                    if page_height > 0 else None),
+                'font_size': font_size,
+                'page_height': page_height,
+            })
+    if not observations:
         return {
             'stable': False,
+            'geometry_status': 'unstable',
             'record_count': len(records),
             'bbox_record_count': 0,
             'y_center_min': None,
             'y_center_max': None,
             'y_center_spread': None,
             'tolerance': AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE,
+            'normalized_tolerance': None,
             'reason': 'missing_bbox_evidence',
         }
+    centers = [item['y_center'] for item in observations]
+    normalized = [
+        item['y_center_normalized']
+        for item in observations
+        if item.get('y_center_normalized') is not None
+    ]
+    page_heights = [
+        item['page_height']
+        for item in observations
+        if item.get('page_height')
+    ]
+    font_sizes = [
+        item['font_size']
+        for item in observations
+        if item.get('font_size')
+    ]
+    y_median = _median_number(centers)
+    y_mad = _median_absolute_deviation(centers)
+    normalized_median = _median_number(normalized) if normalized else None
+    normalized_mad = (
+        _median_absolute_deviation(normalized)
+        if normalized else None)
+    median_page_height = _median_number(page_heights) if page_heights else 0.0
+    median_font_size = _median_number(font_sizes) if font_sizes else 0.0
+    tolerance = max(
+        AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE,
+        median_page_height * 0.012 if median_page_height else 0.0,
+        median_font_size * 0.55 if median_font_size else 0.0)
+    normalized_tolerance = (
+        round(tolerance / median_page_height, 5)
+        if median_page_height else None)
+    outliers = [
+        item['page_index']
+        for item in observations
+        if abs(item['y_center'] - y_median) > tolerance
+    ]
     spread = max(centers) - min(centers) if len(centers) > 1 else 0.0
-    stable = spread <= AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE
+    parity = _automatic_header_footer_parity_geometry(observations, tolerance)
+    stable = not outliers
+    geometry_status = 'stable' if stable else (
+        'parity_stable'
+        if parity.get('geometry_status') == 'parity_stable' else
+        'unstable')
+    stable = stable or geometry_status == 'parity_stable'
     return {
         'stable': bool(stable),
+        'geometry_status': geometry_status,
         'record_count': len(records),
-        'bbox_record_count': len(centers),
+        'bbox_record_count': len(observations),
         'y_center_min': round(min(centers), 2),
         'y_center_max': round(max(centers), 2),
         'y_center_spread': round(spread, 2),
-        'tolerance': AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE,
-        'reason': 'stable_y_band' if stable else 'unstable_bbox_band',
+        'global_y_median': round(y_median, 2),
+        'global_y_mad': round(y_mad, 3),
+        'global_y_normalized_median': (
+            round(normalized_median, 5)
+            if normalized_median is not None else None),
+        'global_y_normalized_mad': (
+            round(normalized_mad, 5)
+            if normalized_mad is not None else None),
+        'odd_y_median': parity.get('odd_y_median'),
+        'even_y_median': parity.get('even_y_median'),
+        'odd_y_mad': parity.get('odd_y_mad'),
+        'even_y_mad': parity.get('even_y_mad'),
+        'tolerance': round(tolerance, 3),
+        'normalized_tolerance': normalized_tolerance,
+        'outlier_pages': sorted(set(outliers)),
+        'reason': (
+            'stable_y_band'
+            if geometry_status == 'stable' else
+            'parity_stable_y_band'
+            if geometry_status == 'parity_stable' else
+            'unstable_bbox_band'),
     }
+
+
+def _automatic_header_footer_parity_geometry(
+        observations: list,
+        tolerance: float) -> dict:
+    odd = [
+        item['y_center']
+        for item in observations or []
+        if item.get('page_index', 0) % 2 == 0
+    ]
+    even = [
+        item['y_center']
+        for item in observations or []
+        if item.get('page_index', 0) % 2 == 1
+    ]
+    odd_median = _median_number(odd) if odd else None
+    even_median = _median_number(even) if even else None
+    odd_mad = _median_absolute_deviation(odd) if odd else None
+    even_mad = _median_absolute_deviation(even) if even else None
+    odd_stable = bool(
+        odd and all(abs(value - odd_median) <= tolerance for value in odd))
+    even_stable = bool(
+        even and all(abs(value - even_median) <= tolerance for value in even))
+    close_clusters = bool(
+        odd_median is not None and
+        even_median is not None and
+        abs(odd_median - even_median) <= tolerance)
+    return {
+        'geometry_status': (
+            'parity_stable'
+            if odd_stable and even_stable and close_clusters else
+            'unstable'),
+        'odd_y_median': round(odd_median, 2) if odd_median is not None else None,
+        'even_y_median': round(even_median, 2) if even_median is not None else None,
+        'odd_y_mad': round(odd_mad, 3) if odd_mad is not None else None,
+        'even_y_mad': round(even_mad, 3) if even_mad is not None else None,
+    }
+
+
+def _median_number(values: list) -> float:
+    values = sorted(float(value) for value in values or [])
+    if not values:
+        return 0.0
+    midpoint = len(values) // 2
+    if len(values) % 2:
+        return values[midpoint]
+    return (values[midpoint - 1] + values[midpoint]) / 2.0
+
+
+def _median_absolute_deviation(values: list) -> float:
+    values = [float(value) for value in values or []]
+    if not values:
+        return 0.0
+    median = _median_number(values)
+    return _median_number([abs(value - median) for value in values])
 
 
 def _automatic_header_footer_records(candidate: dict, text_lookup: dict) -> list:
@@ -6571,6 +6736,142 @@ def _automatic_header_footer_records(candidate: dict, text_lookup: dict) -> list
     if isinstance(value, dict):
         return list(value.get('records') or [])
     return []
+
+
+def _automatic_header_footer_page_number_family_candidates(
+        text_lookup: dict,
+        page_count: int,
+        existing_candidates: list = None) -> list:
+    existing_fingerprints = {
+        candidate.get('fingerprint', '')
+        for candidate in existing_candidates or []
+        if candidate.get('fingerprint')
+    }
+    grouped = defaultdict(list)
+    for fingerprint, value in (text_lookup or {}).items():
+        if not isinstance(value, dict):
+            continue
+        for record in value.get('records', []) or []:
+            region = normalize_text(record.get('region', '')).lower()
+            if region not in {REGION_TOP, REGION_BOTTOM}:
+                continue
+            parsed = parse_docx_page_number_template(record.get('text', ''))
+            if not parsed.get('supported'):
+                continue
+            key = (
+                region,
+                _docx_page_number_template_key(parsed))
+            copied = dict(record)
+            copied['fingerprint'] = fingerprint
+            copied['region'] = region
+            copied['template'] = parsed
+            grouped[key].append(copied)
+
+    candidates = []
+    for index, ((region, template_key), records) in enumerate(sorted(
+            grouped.items(),
+            key=lambda item: (item[0][0], str(item[0][1])))):
+        records = _automatic_header_footer_unique_page_number_records(records)
+        if len(records) < AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT:
+            continue
+        sequence = infer_docx_page_number_template_sequence(records)
+        if sequence.get('sequence_status') not in {
+                'consecutive',
+                'mostly_consecutive',
+                'parity_consecutive',
+                'offset_consistent'}:
+            continue
+        pages = [
+            _readiness_int(record.get('page_index', 0))
+            for record in records
+        ]
+        source_fingerprints = sorted({
+            record.get('fingerprint', '')
+            for record in records
+            if record.get('fingerprint')
+        })
+        if _automatic_header_footer_page_number_family_duplicates_existing_candidate(
+                source_fingerprints,
+                records,
+                text_lookup,
+                existing_fingerprints):
+            continue
+        synthetic_fingerprint = (
+            f'auto_page_number_family::{region}::{index + 1}')
+        text_lookup[synthetic_fingerprint] = {
+            'text': normalize_text(records[0].get('text', '')),
+            'metadata': dict(records[0].get('metadata') or {}),
+            'records': records,
+            'page_number_template': sequence,
+        }
+        candidates.append({
+            'candidate_id': f'auto-page-number-family-{region}-{index + 1}',
+            'fingerprint': synthetic_fingerprint,
+            'text': sequence.get('raw_text', normalize_text(records[0].get('text', ''))),
+            'proposed_role': ROLE_PAGE_NUMBER,
+            'action': ACTION_REVIEW,
+            'affected_pages': pages,
+            'regions': [region],
+            'region': region,
+            'support_count': len(set(pages)),
+            'page_count': _readiness_int(page_count or 0) or (max(pages) + 1 if pages else 0),
+            'automatic_family_generated': True,
+            'filter_fingerprints': source_fingerprints,
+            'filter_block_refs': _automatic_header_footer_filter_block_refs(records),
+            'page_number_template_override': sequence,
+            'metadata_override': dict(records[0].get('metadata') or {}),
+            'reason': (
+                'Automatic classifier generated this boundary page-number '
+                'sequence family from non-repeated source fingerprints.'),
+        })
+    return candidates
+
+
+def _automatic_header_footer_filter_block_refs(records: list) -> list:
+    refs = []
+    for record in records or []:
+        refs.append({
+            'fingerprint': record.get('fingerprint', ''),
+            'page_index': _readiness_int(record.get('page_index', 0)),
+            'block_index': _readiness_int(record.get('block_index', 0)),
+            'region': normalize_text(record.get('region', '')).lower(),
+        })
+    return refs
+
+
+def _automatic_header_footer_page_number_family_duplicates_existing_candidate(
+        source_fingerprints: list,
+        records: list,
+        text_lookup: dict,
+        existing_fingerprints: set) -> bool:
+    if not source_fingerprints:
+        return False
+    if not set(source_fingerprints).issubset(existing_fingerprints or set()):
+        return False
+    source_record_count = 0
+    for fingerprint in source_fingerprints:
+        value = (text_lookup or {}).get(fingerprint, {})
+        if isinstance(value, dict):
+            source_record_count += len(value.get('records', []) or [])
+    return source_record_count == len(records or [])
+
+
+def _automatic_header_footer_unique_page_number_records(records: list) -> list:
+    by_page = {}
+    for record in sorted(
+            records or [],
+            key=lambda item: (
+                _readiness_int(item.get('page_index', 0)),
+                _readiness_int(item.get('block_index', 0)))):
+        page_index = _readiness_int(record.get('page_index', 0))
+        if page_index in by_page:
+            by_page[page_index] = None
+            continue
+        by_page[page_index] = record
+    return [
+        record for _, record in sorted(by_page.items())
+        if record is not None
+    ]
 
 
 def _automatic_header_footer_protected_content_signal(candidate: dict) -> bool:
@@ -6641,7 +6942,10 @@ def _automatic_header_footer_decision_summary(
         'policy_diagnostic_count': len(policy_diagnostics or []),
         'odd_even_policy_detected_count': sum(
             1 for item in policy_diagnostics or []
-            if item.get('policy_type') == 'odd_even'),
+            if item.get('policy_type') in {
+                'odd_even',
+                'odd_even_running_head',
+            }),
         'detected_policy_types': sorted({
             item.get('policy_type', '')
             for item in policy_diagnostics or []
@@ -6700,10 +7004,130 @@ def _automatic_header_footer_policy_diagnostics(
         decisions: list,
         page_count: int) -> list:
     diagnostics = []
+    diagnostics.extend(_automatic_header_footer_running_head_diagnostics(
+        decisions,
+        page_count))
     diagnostics.extend(_automatic_header_footer_odd_even_diagnostics(
         decisions,
         page_count))
     return diagnostics
+
+
+def _automatic_header_footer_running_head_diagnostics(
+        decisions: list,
+        page_count: int) -> list:
+    page_count = _readiness_int(page_count)
+    if page_count < 2:
+        return []
+    top_page_numbers = [
+        decision for decision in decisions or []
+        if (
+            decision.get('automatic_role') == ROLE_PAGE_NUMBER and
+            decision.get('region') == REGION_TOP and
+            decision.get('auto_decision') != AUTO_DECISION_KEEP and
+            (decision.get('page_number_template') or {}).get('supported') and
+            (decision.get('page_number_template') or {}).get('sequence_status') in {
+                'consecutive',
+                'mostly_consecutive',
+                'parity_consecutive',
+                'offset_consistent',
+            })
+    ]
+    headers = [
+        decision for decision in decisions or []
+        if (
+            decision.get('automatic_role') == ROLE_HEADER and
+            decision.get('region') == REGION_TOP and
+            decision.get('auto_decision') != AUTO_DECISION_KEEP)
+    ]
+    if not top_page_numbers or not headers:
+        return []
+
+    diagnostics = []
+    for page_number in top_page_numbers:
+        odd_headers = []
+        even_headers = []
+        for header in headers:
+            if not _automatic_header_footer_same_running_head_line(
+                    page_number,
+                    header):
+                continue
+            profile = _automatic_header_footer_parity_profile(
+                header.get('affected_pages', []),
+                page_count)
+            if profile.get('parity') == 'odd':
+                odd_headers.append((header, profile))
+            elif profile.get('parity') == 'even':
+                even_headers.append((header, profile))
+        if not odd_headers or not even_headers:
+            continue
+        odd_header, odd_profile = sorted(
+            odd_headers,
+            key=lambda item: (-item[1].get('coverage', 0.0), item[0].get('candidate_id', '')))[0]
+        even_header, even_profile = sorted(
+            even_headers,
+            key=lambda item: (-item[1].get('coverage', 0.0), item[0].get('candidate_id', '')))[0]
+        geometry_status = _automatic_header_footer_running_head_geometry_status(
+            page_number,
+            odd_header,
+            even_header)
+        if geometry_status == 'unstable':
+            continue
+        diagnostics.append({
+            'policy_type': 'odd_even_running_head',
+            'role': 'running_head',
+            'region': REGION_TOP,
+            'page_number_candidate_id': page_number.get('candidate_id', ''),
+            'page_number_fingerprint': page_number.get('fingerprint', ''),
+            'page_number_sequence_status': (
+                (page_number.get('page_number_template') or {})
+                .get('sequence_status', '')),
+            'odd_candidate_id': odd_header.get('candidate_id', ''),
+            'odd_fingerprint': odd_header.get('fingerprint', ''),
+            'odd_affected_pages': list(odd_header.get('affected_pages', []) or []),
+            'odd_coverage': odd_profile.get('coverage', 0.0),
+            'even_candidate_id': even_header.get('candidate_id', ''),
+            'even_fingerprint': even_header.get('fingerprint', ''),
+            'even_affected_pages': list(even_header.get('affected_pages', []) or []),
+            'even_coverage': even_profile.get('coverage', 0.0),
+            'geometry_status': geometry_status,
+            'writer_status': 'supported_internal_writer',
+            'safe_for_migration': True,
+            'reason': 'strong_odd_even_running_head_family',
+        })
+    return diagnostics
+
+
+def _automatic_header_footer_same_running_head_line(
+        page_number: dict,
+        header: dict) -> bool:
+    pn_bbox = page_number.get('bbox_stability', {}) or {}
+    header_bbox = header.get('bbox_stability', {}) or {}
+    pn_y = pn_bbox.get('global_y_median')
+    header_y = header_bbox.get('global_y_median')
+    if pn_y is None or header_y is None:
+        return False
+    tolerance = max(
+        float(pn_bbox.get('tolerance') or 0.0),
+        float(header_bbox.get('tolerance') or 0.0),
+        AUTOMATIC_HEADER_FOOTER_BBOX_Y_TOLERANCE)
+    return abs(float(pn_y) - float(header_y)) <= tolerance * 1.5
+
+
+def _automatic_header_footer_running_head_geometry_status(
+        page_number: dict,
+        odd_header: dict,
+        even_header: dict) -> str:
+    statuses = {
+        (page_number.get('bbox_stability') or {}).get('geometry_status'),
+        (odd_header.get('bbox_stability') or {}).get('geometry_status'),
+        (even_header.get('bbox_stability') or {}).get('geometry_status'),
+    }
+    if 'unstable' in statuses:
+        return 'unstable'
+    if 'parity_stable' in statuses:
+        return 'parity_stable'
+    return 'stable'
 
 
 def _automatic_header_footer_odd_even_diagnostics(
@@ -6841,9 +7265,11 @@ def _automatic_header_footer_apply_policy_diagnostics(
         policy_diagnostics: list) -> list:
     odd_even_candidate_ids = set()
     for diagnostic in policy_diagnostics or []:
-        if diagnostic.get('policy_type') != 'odd_even':
+        if diagnostic.get('policy_type') not in {
+                'odd_even',
+                'odd_even_running_head'}:
             continue
-        for key in ('odd_candidate_id', 'even_candidate_id'):
+        for key in ('odd_candidate_id', 'even_candidate_id', 'page_number_candidate_id'):
             if diagnostic.get(key):
                 odd_even_candidate_ids.add(diagnostic.get(key))
     if not odd_even_candidate_ids:
@@ -6904,6 +7330,14 @@ def _automatic_header_footer_transformed_dry_run(
         item['automatic_decision'] = AUTO_DECISION_EXCLUDE
         item['automatic_confidence'] = decision.get('confidence', 0.0)
         item['automatic_evidence'] = list(decision.get('evidence', []) or [])
+        item['filter_fingerprints'] = list(
+            decision.get('filter_fingerprints', item.get('filter_fingerprints', [])) or [])
+        item['filter_block_refs'] = list(
+            decision.get('filter_block_refs', item.get('filter_block_refs', [])) or [])
+        item['page_number_template_override'] = dict(
+            decision.get(
+                'page_number_template',
+                item.get('page_number_template_override', {})) or {})
         item['reason'] = (
             'Automatic classifier promoted this high-confidence boundary artifact '
             'for the existing internal reviewed migration gates.')
@@ -6961,6 +7395,21 @@ def _automatic_header_footer_split_page_number_parity_candidate(
             parity_pages)
         if metadata:
             item['metadata_override'] = metadata
+        item['filter_fingerprints'] = sorted({
+            record.get('fingerprint', '')
+            for record in records
+            if (
+                record.get('fingerprint') and
+                _readiness_int(record.get('page_index', -1)) in {
+                    _readiness_int(page) for page in parity_pages
+                })
+        })
+        item['filter_block_refs'] = [
+            ref for ref in candidate.get('filter_block_refs', []) or []
+            if _readiness_int(ref.get('page_index', -1)) in {
+                _readiness_int(page) for page in parity_pages
+            }
+        ]
         items.append(item)
     return items or [candidate]
 
@@ -7060,6 +7509,10 @@ def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tupl
             'page_count': _readiness_int(candidate.get('page_count', 0)),
             'metadata_override': dict(candidate.get('metadata_override') or {}),
             'automatic_parity': candidate.get('automatic_parity', ''),
+            'filter_fingerprints': list(candidate.get('filter_fingerprints', []) or []),
+            'filter_block_refs': list(candidate.get('filter_block_refs', []) or []),
+            'page_number_template_override': dict(
+                candidate.get('page_number_template_override') or {}),
         }
         if allowed:
             approved.append(item)
@@ -7096,6 +7549,8 @@ def _docx_header_footer_text_lookup(page_summaries: list) -> dict:
             if fingerprint and text:
                 grouped[fingerprint].append({
                     'text': text,
+                    'fingerprint': fingerprint,
+                    'region': block.get('region', ''),
                     'page_index': _readiness_int(
                         block.get('page_index', fallback_page_index)),
                     'block_index': _readiness_int(block.get('block_index', 0)),
@@ -7206,6 +7661,13 @@ def _parse_docx_page_number_template_pattern(raw_text: str) -> dict:
                 r'(?P<number>\d+)'
                 r'(?P<suffix>\s*/\s*(?P<total_slash>\d+))$'),
             'bare_arabic_page_number_with_total',
+        ),
+        (
+            re.compile(
+                r'^(?P<prefix>\d+\s*[-–—]\s*)'
+                r'(?P<number>\d+)'
+                r'(?P<suffix>)$'),
+            'chapter_prefixed_arabic_page_number',
         ),
         (
             re.compile(
@@ -7323,6 +7785,11 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
     total_pages = first.get('total_pages')
     page_indices = [item['page_index'] for item in ordered]
     numbers = [item['template'].get('number') for item in ordered]
+    source_offsets = [
+        number - page_index
+        for page_index, number in zip(page_indices, numbers)
+        if number is not None
+    ]
     parity_alignment = _docx_page_number_parity_alignment(ordered)
     same_template = all(
         _docx_page_number_template_key(item) == _docx_page_number_template_key(first)
@@ -7355,6 +7822,13 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
             all(page_delta > 0 and page_delta == number_delta
                 for page_delta, number_delta in deltas) and
             gap_count <= 2)
+        offset_consistent = bool(
+            not consecutive and
+            not mostly_consecutive and
+            same_template and
+            same_total_pages and
+            source_offsets and
+            len(set(source_offsets)) == 1)
         if consecutive:
             if parity_alignment.get('parity_alternating'):
                 sequence_status = 'parity_consecutive'
@@ -7365,8 +7839,11 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
         elif mostly_consecutive:
             sequence_status = 'mostly_consecutive'
             confidence = 0.82
+        elif offset_consistent:
+            sequence_status = 'offset_consistent'
+            confidence = 0.8
         else:
-            sequence_status = 'not_sequence'
+            sequence_status = 'unstable'
             confidence = 0.42
     return {
         'raw_text': first.get('raw_text', ordered[0]['text']),
@@ -7384,13 +7861,16 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
         'template_kind': first.get('template_kind', ''),
         'observed_numbers': numbers,
         'observed_page_indices': page_indices,
+        'source_offsets': source_offsets,
+        'offset_consistent': bool(
+            source_offsets and len(set(source_offsets)) == 1),
         'odd_alignment': parity_alignment.get('odd_alignment', ''),
         'even_alignment': parity_alignment.get('even_alignment', ''),
         'coverage_policy': (
             AUTOMATIC_COVERAGE_ODD_EVEN_PAIR
             if sequence_status == 'parity_consecutive' else ''),
         'confidence': round(confidence, 3),
-        'reason': sequence_status if sequence_status != 'not_sequence' else (
+        'reason': sequence_status if sequence_status != 'unstable' else (
             'non_consecutive_page_number_sequence'),
     }
 
@@ -7461,12 +7941,25 @@ def _docx_header_footer_block_metadata(
         if isinstance(block.get('style_properties'), dict) else
         block.get('style') or _style_from_block(block))
     payload = _docx_header_footer_style_payload(style)
+    x_center, y_center = _docx_header_footer_bbox_center(bbox)
     payload.update({
         'bbox': bbox,
         'page_width': page_width,
         'page_height': page_height,
         'alignment': infer_docx_header_footer_alignment(bbox, page_width),
         'line_index': _readiness_int(block.get('block_index', 0)),
+        'x_center_normalized': (
+            round(float(x_center or 0.0) / page_width, 5)
+            if page_width else None),
+        'y_center_normalized': (
+            round(float(y_center or 0.0) / page_height, 5)
+            if page_height else None),
+        'y_top_normalized': (
+            round(float(bbox[1]) / page_height, 5)
+            if page_height and len(bbox) >= 4 else None),
+        'y_bottom_normalized': (
+            round(float(bbox[3]) / page_height, 5)
+            if page_height and len(bbox) >= 4 else None),
     })
     return payload
 
@@ -7616,7 +8109,7 @@ def _docx_header_footer_plan_entry(
             'placeholder_not_semantic_header_footer_text',
             'Placeholder-like text is not represented as semantic header/footer content.')
 
-    target_part = 'header' if role == ROLE_HEADER else 'footer'
+    target_part = _docx_header_footer_target_part(role, regions)
     metadata = _docx_header_footer_candidate_metadata(candidate, text_lookup)
     style = {
         'font_name': metadata.get('font_name', ''),
@@ -7691,14 +8184,27 @@ def _docx_header_footer_role_region_warning(
             'footer_role_region_mismatch',
             'Footer candidates must have unambiguous bottom-region evidence.')
     if role == ROLE_PAGE_NUMBER and (
-            REGION_BOTTOM not in regions or
-            REGION_TOP in regions or
             REGION_BODY in regions):
         return _docx_header_footer_warning(
             candidate,
             'page_number_region_not_supported',
-            'Simple page-number migration currently supports bottom-region page numbers only.')
+            'Page-number migration supports top or bottom boundary regions only.')
+    if role == ROLE_PAGE_NUMBER and regions not in ({REGION_TOP}, {REGION_BOTTOM}):
+        return _docx_header_footer_warning(
+            candidate,
+            'page_number_region_not_supported',
+            'Page-number candidates must have unambiguous top or bottom evidence.')
     return None
+
+
+def _docx_header_footer_target_part(role: str, regions: set) -> str:
+    if role == ROLE_HEADER:
+        return 'header'
+    if role == ROLE_FOOTER:
+        return 'footer'
+    if role == ROLE_PAGE_NUMBER and regions == {REGION_TOP}:
+        return 'header'
+    return 'footer'
 
 
 def _docx_header_footer_candidate_text(candidate: dict, text_lookup: dict) -> str:
@@ -7726,6 +8232,9 @@ def _docx_header_footer_candidate_metadata(candidate: dict, text_lookup: dict) -
 def _docx_header_footer_candidate_page_number_template(
         candidate: dict,
         text_lookup: dict) -> dict:
+    override = candidate.get('page_number_template_override')
+    if isinstance(override, dict) and override:
+        return dict(override)
     value = text_lookup.get(candidate.get('fingerprint', ''), {})
     if isinstance(value, dict):
         return dict(value.get('page_number_template') or {})
@@ -7774,6 +8283,8 @@ def _docx_header_footer_generation_plan_result(
         entries,
         page_number_behavior,
         policy)
+    header_entries = _docx_header_footer_entries_for_part(entries, 'header')
+    footer_entries = _docx_header_footer_entries_for_part(entries, 'footer')
     page_number_field_generation = _docx_page_number_generation_status(
         page_number_behavior)
     summary = {
@@ -7804,10 +8315,10 @@ def _docx_header_footer_generation_plan_result(
             if page_number_behavior == PAGE_NUMBER_BEHAVIOR_WORD_FIELD else
             'static_or_placeholder_diagnostic'),
         'header_line_group_count': len(_docx_header_footer_line_groups(
-            entries,
-            {ROLE_HEADER})),
+            header_entries,
+            {ROLE_HEADER, ROLE_PAGE_NUMBER})),
         'footer_line_group_count': len(_docx_header_footer_line_groups(
-            entries,
+            footer_entries,
             {ROLE_FOOTER, ROLE_PAGE_NUMBER})),
         'page_number_grouped_with_footer_count': (
             _docx_header_footer_page_number_grouped_with_footer_count(entries)),
@@ -8253,8 +8764,22 @@ def _docx_header_footer_section_plan(
         page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
         policy: dict = None) -> dict:
     policy_type = (policy or {}).get('policy_type', 'default')
-    odd_entries = _docx_header_footer_entries_for_parity(entries, 'odd')
-    even_entries = _docx_header_footer_entries_for_parity(entries, 'even')
+    page_count = _docx_header_footer_policy_page_count(entries)
+    shared_entries = (
+        _docx_header_footer_entries_for_all_pages(entries, page_count)
+        if policy_type == 'odd_even' else [])
+    odd_entries = (
+        shared_entries +
+        _docx_header_footer_entries_for_parity(entries, 'odd'))
+    even_entries = (
+        shared_entries +
+        _docx_header_footer_entries_for_parity(entries, 'even'))
+    header_entries = _docx_header_footer_entries_for_part(entries, 'header')
+    footer_entries = _docx_header_footer_entries_for_part(entries, 'footer')
+    odd_header_entries = _docx_header_footer_entries_for_part(odd_entries, 'header')
+    even_header_entries = _docx_header_footer_entries_for_part(even_entries, 'header')
+    odd_footer_entries = _docx_header_footer_entries_for_part(odd_entries, 'footer')
+    even_footer_entries = _docx_header_footer_entries_for_part(even_entries, 'footer')
     return {
         'section_scope': 'document',
         'policy_type': policy_type,
@@ -8267,35 +8792,56 @@ def _docx_header_footer_section_plan(
         'header_texts': _unique_entry_texts(entries, ROLE_HEADER),
         'footer_texts': _unique_entry_texts(entries, ROLE_FOOTER),
         'page_number_placeholders': _unique_entry_texts(entries, ROLE_PAGE_NUMBER),
-        'header_items': _unique_entry_items(entries, ROLE_HEADER),
-        'footer_items': _unique_entry_items(entries, ROLE_FOOTER),
+        'header_items': _unique_entry_items(header_entries, ROLE_HEADER),
+        'footer_items': _unique_entry_items(footer_entries, ROLE_FOOTER),
         'page_number_items': _unique_entry_items(entries, ROLE_PAGE_NUMBER),
+        'header_page_number_items': _unique_entry_items(header_entries, ROLE_PAGE_NUMBER),
+        'footer_page_number_items': _unique_entry_items(footer_entries, ROLE_PAGE_NUMBER),
         'page_number_start_number': _docx_header_footer_page_number_start(entries),
         'header_line_groups': _docx_header_footer_line_groups(
-            entries,
-            {ROLE_HEADER}),
+            header_entries,
+            {ROLE_HEADER, ROLE_PAGE_NUMBER}),
         'footer_line_groups': _docx_header_footer_line_groups(
-            entries,
+            footer_entries,
             {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
-        'odd_header_items': _unique_entry_items(odd_entries, ROLE_HEADER),
-        'even_header_items': _unique_entry_items(even_entries, ROLE_HEADER),
-        'odd_footer_items': _unique_entry_items(odd_entries, ROLE_FOOTER),
-        'even_footer_items': _unique_entry_items(even_entries, ROLE_FOOTER),
+        'odd_header_items': _unique_entry_items(odd_header_entries, ROLE_HEADER),
+        'even_header_items': _unique_entry_items(even_header_entries, ROLE_HEADER),
+        'odd_footer_items': _unique_entry_items(odd_footer_entries, ROLE_FOOTER),
+        'even_footer_items': _unique_entry_items(even_footer_entries, ROLE_FOOTER),
+        'odd_header_page_number_items': _unique_entry_items(
+            odd_header_entries,
+            ROLE_PAGE_NUMBER),
+        'even_header_page_number_items': _unique_entry_items(
+            even_header_entries,
+            ROLE_PAGE_NUMBER),
+        'odd_footer_page_number_items': _unique_entry_items(
+            odd_footer_entries,
+            ROLE_PAGE_NUMBER),
+        'even_footer_page_number_items': _unique_entry_items(
+            even_footer_entries,
+            ROLE_PAGE_NUMBER),
         'odd_page_number_items': _unique_entry_items(odd_entries, ROLE_PAGE_NUMBER),
         'even_page_number_items': _unique_entry_items(even_entries, ROLE_PAGE_NUMBER),
         'odd_header_line_groups': _docx_header_footer_line_groups(
-            odd_entries,
-            {ROLE_HEADER}),
+            odd_header_entries,
+            {ROLE_HEADER, ROLE_PAGE_NUMBER}),
         'even_header_line_groups': _docx_header_footer_line_groups(
-            even_entries,
-            {ROLE_HEADER}),
+            even_header_entries,
+            {ROLE_HEADER, ROLE_PAGE_NUMBER}),
         'odd_footer_line_groups': _docx_header_footer_line_groups(
-            odd_entries,
+            odd_footer_entries,
             {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
         'even_footer_line_groups': _docx_header_footer_line_groups(
-            even_entries,
+            even_footer_entries,
             {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
     }
+
+
+def _docx_header_footer_entries_for_part(entries: list, target_part: str) -> list:
+    return [
+        entry for entry in entries or []
+        if entry.get('target_part') == target_part
+    ]
 
 
 def _docx_header_footer_entries_for_parity(entries: list, parity: str) -> list:
@@ -8310,6 +8856,22 @@ def _docx_header_footer_entries_for_parity(entries: list, parity: str) -> list:
         if not affected_pages:
             continue
         if all((page % 2 == 0) == target_is_odd for page in affected_pages):
+            values.append(entry)
+    return values
+
+
+def _docx_header_footer_entries_for_all_pages(entries: list, page_count: int) -> list:
+    if page_count <= 0:
+        return []
+    expected = set(range(page_count))
+    values = []
+    for entry in entries or []:
+        affected_pages = {
+            _readiness_int(page)
+            for page in entry.get('affected_pages', []) or []
+            if _readiness_int(page) >= 0
+        }
+        if affected_pages == expected:
             values.append(entry)
     return values
 
@@ -8497,7 +9059,12 @@ def _docx_header_footer_page_number_start(entries: list):
         if entry.get('role') != ROLE_PAGE_NUMBER:
             continue
         template = entry.get('page_number_template') or {}
-        if template.get('supported') and template.get('consecutive'):
+        if template.get('supported') and (
+                template.get('consecutive') or
+                template.get('sequence_status') in {
+                    'parity_consecutive',
+                    'offset_consistent',
+                }):
             start = _readiness_int(template.get('start_number', 0))
             if start > 0:
                 starts.append(start)
@@ -8507,13 +9074,48 @@ def _docx_header_footer_page_number_start(entries: list):
 
 
 def _block_matches_reviewed_candidate(block: dict, page_index, candidate: dict) -> bool:
-    if block.get('fingerprint') != candidate.get('fingerprint'):
+    refs = list(candidate.get('filter_block_refs', []) or [])
+    if refs:
+        return _block_matches_reviewed_candidate_ref(block, page_index, refs)
+    allowed_fingerprints = {
+        candidate.get('fingerprint', ''),
+        *list(candidate.get('filter_fingerprints', []) or []),
+    }
+    if block.get('fingerprint') not in allowed_fingerprints:
         return False
     affected_pages = set(candidate.get('affected_pages', []) or [])
     if affected_pages and page_index not in affected_pages:
         return False
     regions = set(candidate.get('regions', []) or [])
     return not regions or block.get('region') in regions
+
+
+def _block_matches_reviewed_candidate_ref(block: dict, page_index, refs: list) -> bool:
+    block_fingerprint = block.get('fingerprint', '')
+    block_index = _readiness_int(block.get('block_index', -1))
+    block_region = block.get('region', '')
+    page_index = _readiness_int(page_index)
+    for ref in refs or []:
+        if ref.get('fingerprint') and ref.get('fingerprint') != block_fingerprint:
+            continue
+        if _readiness_int(ref.get('page_index', -1)) != page_index:
+            continue
+        if _readiness_int(ref.get('block_index', -1)) != block_index:
+            continue
+        if ref.get('region') and ref.get('region') != block_region:
+            continue
+        return True
+    return False
+
+
+def _matching_reviewed_candidate_for_block(
+        block: dict,
+        page_index,
+        candidates: list):
+    for candidate in candidates or []:
+        if _block_matches_reviewed_candidate(block, page_index, candidate):
+            return candidate
+    return None
 
 
 def _removed_block_summary(block: dict, candidate: dict) -> dict:

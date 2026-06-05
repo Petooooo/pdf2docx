@@ -279,6 +279,37 @@ family remained diagnostic rather than being removed.
 Manual review remains a fallback/debug workflow only. Public/default conversion
 is still unchanged.
 
+## Automatic Classification v4
+
+Automatic classification now handles running-head page-number families more
+directly instead of assuming every page number belongs in the footer or must be
+represented by one repeated text fingerprint. Page-number candidates now carry a
+target part derived from their region: top page numbers target the header part,
+bottom page numbers target the footer part, and body-region numbers remain kept
+or diagnostic.
+
+The classifier can build boundary page-number families from changing text using
+the parsed number, source page index, prefix/suffix template, region, and exact
+block references. This lets chapter-style labels such as `8-1`, `8-2`, and
+`8-3` become one safe sequence family while unrelated numeric body or toolbar
+content with the same normalized placeholder remains protected.
+
+Geometry evidence now records normalized centers and robust odd/even statistics
+so small bbox jitter or parity-specific line positions do not automatically
+look unstable. All-page shared header/footer entries are also preserved in both
+odd and even Word parts when an odd/even page-number family requires odd/even
+writing.
+
+Local v4 smoke improved `input3.pdf`: its bottom chapter page labels were
+detected as a parity-consecutive page-number family and migrated with the
+`8-` prefix plus Word PAGE fields. Its top numeric chapter marker and odd/even
+running headers remain diagnostic because the first-page title contaminates the
+odd-side geometry; safe first-page-excluded odd/even running-head migration is
+still future work.
+
+Public/default conversion remains unchanged and the public CLI/API remains
+closed.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

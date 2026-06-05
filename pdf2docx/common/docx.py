@@ -223,6 +223,12 @@ def apply_header_footer_text_plan(
             section_plan,
             'page_number_items',
             'page_number_placeholders')
+        header_page_number_items = _header_footer_plan_page_number_items_for_part(
+            section_plan,
+            _HEADER_FOOTER_PLAN_TARGET_HEADER)
+        footer_page_number_items = _header_footer_plan_page_number_items_for_part(
+            section_plan,
+            _HEADER_FOOTER_PLAN_TARGET_FOOTER)
         header_groups = _header_footer_plan_line_groups(
             section_plan,
             'header_line_groups')
@@ -242,7 +248,11 @@ def apply_header_footer_text_plan(
                 _header_footer_plan_items(
                     section_plan,
                     'odd_header_items',
-                    'header_texts'),
+                    'header_texts') +
+                _header_footer_plan_items(
+                    section_plan,
+                    'odd_header_page_number_items',
+                    'page_number_placeholders'),
                 section,
                 page_number_behavior,
                 page_number_start_number)
@@ -252,7 +262,11 @@ def apply_header_footer_text_plan(
                 _header_footer_plan_items(
                     section_plan,
                     'even_header_items',
-                    'header_texts'),
+                    'header_texts') +
+                _header_footer_plan_items(
+                    section_plan,
+                    'even_header_page_number_items',
+                    'page_number_placeholders'),
                 section,
                 page_number_behavior,
                 page_number_start_number)
@@ -265,7 +279,7 @@ def apply_header_footer_text_plan(
                     'footer_texts') +
                 _header_footer_plan_items(
                     section_plan,
-                    'odd_page_number_items',
+                    'odd_footer_page_number_items',
                     'page_number_placeholders'),
                 section,
                 page_number_behavior,
@@ -279,7 +293,7 @@ def apply_header_footer_text_plan(
                     'footer_texts') +
                 _header_footer_plan_items(
                     section_plan,
-                    'even_page_number_items',
+                    'even_footer_page_number_items',
                     'page_number_placeholders'),
                 section,
                 page_number_behavior,
@@ -299,6 +313,10 @@ def apply_header_footer_text_plan(
                     page_number_behavior,
                     page_number_start_number)
             else:
+                if page_number_behavior in {
+                        _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+                        _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
+                    header_items.extend(header_page_number_items)
                 header_result = _replace_header_footer_part_items(section.header, header_items)
             if footer_groups:
                 footer_result = _replace_header_footer_part_line_groups(
@@ -311,8 +329,10 @@ def apply_header_footer_text_plan(
                 if page_number_behavior in {
                         _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
                         _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
-                    footer_items.extend(page_number_items)
-                    page_number_placeholders_written = len(page_number_items)
+                    footer_items.extend(footer_page_number_items)
+                    page_number_placeholders_written = (
+                        len(header_page_number_items) +
+                        len(footer_page_number_items))
                 footer_result = _replace_header_footer_part_items(section.footer, footer_items)
         header_count = header_result['paragraphs_written']
         footer_count = footer_result['paragraphs_written']
@@ -353,10 +373,25 @@ def apply_header_footer_text_plan(
             page_number_start_applied = _set_section_page_number_start(
                 section,
                 page_number_start_number)
+            if policy_type != 'odd_even' and not header_groups:
+                page_number_result = _append_page_number_fields(
+                    section.header,
+                    header_page_number_items,
+                    page_number_start_number)
+                page_number_fields_written += page_number_result['fields_written']
+                header_count += page_number_result['fields_written']
+                styled_runs_written += page_number_result['styled_runs_written']
+                style_properties_applied += page_number_result['style_properties_applied']
+                alignment_paragraphs_written += (
+                    page_number_result['alignment_paragraphs_written'])
+                paragraph_spacing_normalized_count += (
+                    page_number_result['paragraph_spacing_normalized_count'])
+                page_number_prefix_suffix_runs_written += (
+                    page_number_result['prefix_suffix_runs_written'])
             if policy_type != 'odd_even' and not footer_groups:
                 page_number_result = _append_page_number_fields(
                     section.footer,
-                    page_number_items,
+                    footer_page_number_items,
                     page_number_start_number)
                 page_number_fields_written += page_number_result['fields_written']
                 footer_count += page_number_result['fields_written']
@@ -443,6 +478,51 @@ def _header_footer_plan_items(
     ]
 
 
+def _header_footer_plan_page_number_items_for_part(
+        section_plan: dict,
+        target_part: str) -> list:
+    split_key = (
+        'header_page_number_items'
+        if target_part == _HEADER_FOOTER_PLAN_TARGET_HEADER
+        else 'footer_page_number_items')
+    if split_key in (section_plan or {}):
+        return _header_footer_raw_plan_items(section_plan, split_key)
+
+    values = []
+    for item in _header_footer_plan_items(
+            section_plan,
+            'page_number_items',
+            'page_number_placeholders'):
+        if _header_footer_page_number_item_target_part(item) == target_part:
+            values.append(item)
+    return values
+
+
+def _header_footer_raw_plan_items(section_plan: dict, item_key: str) -> list:
+    values = []
+    for value in (section_plan or {}).get(item_key, []) or []:
+        item = _normalize_header_footer_plan_item(value)
+        if item.get('text'):
+            values.append(item)
+    return values
+
+
+def _header_footer_page_number_item_target_part(item: dict) -> str:
+    target_part = str((item or {}).get('target_part', '')).strip().lower()
+    if target_part in {
+            _HEADER_FOOTER_PLAN_TARGET_HEADER,
+            _HEADER_FOOTER_PLAN_TARGET_FOOTER}:
+        return target_part
+    regions = {
+        str(region).strip().lower()
+        for region in (item or {}).get('regions', []) or []
+        if str(region).strip()
+    }
+    if regions == {_HEADER_FOOTER_PLAN_REGION_TOP}:
+        return _HEADER_FOOTER_PLAN_TARGET_HEADER
+    return _HEADER_FOOTER_PLAN_TARGET_FOOTER
+
+
 def _header_footer_plan_line_groups(section_plan: dict, key: str) -> list:
     groups = []
     for group in section_plan.get(key, []) or []:
@@ -522,17 +602,15 @@ def _header_footer_plan_role_warnings(plan: dict) -> list:
                     entry,
                     'footer_entry_region_mismatch'))
         elif role == _HEADER_FOOTER_PLAN_ROLE_PAGE_NUMBER:
-            if target_part and target_part != _HEADER_FOOTER_PLAN_TARGET_FOOTER:
+            if target_part and target_part not in {
+                    _HEADER_FOOTER_PLAN_TARGET_HEADER,
+                    _HEADER_FOOTER_PLAN_TARGET_FOOTER}:
                 warnings.append(_header_footer_plan_entry_warning(
                     entry,
                     'page_number_entry_target_part_mismatch'))
-            if _header_footer_plan_regions_mismatch(
+            if _header_footer_plan_page_number_region_mismatch(
                     regions,
-                    required=_HEADER_FOOTER_PLAN_REGION_BOTTOM,
-                    forbidden={
-                        _HEADER_FOOTER_PLAN_REGION_BODY,
-                        _HEADER_FOOTER_PLAN_REGION_TOP,
-                    }):
+                    target_part):
                 warnings.append(_header_footer_plan_entry_warning(
                     entry,
                     'page_number_entry_region_mismatch'))
@@ -544,6 +622,20 @@ def _header_footer_plan_regions_mismatch(
         required: str,
         forbidden: set) -> bool:
     return required not in regions or bool(regions.intersection(forbidden))
+
+
+def _header_footer_plan_page_number_region_mismatch(
+        regions: set,
+        target_part: str) -> bool:
+    if _HEADER_FOOTER_PLAN_REGION_BODY in regions:
+        return True
+    if target_part == _HEADER_FOOTER_PLAN_TARGET_HEADER:
+        return regions != {_HEADER_FOOTER_PLAN_REGION_TOP}
+    if target_part == _HEADER_FOOTER_PLAN_TARGET_FOOTER:
+        return regions != {_HEADER_FOOTER_PLAN_REGION_BOTTOM}
+    return regions not in (
+        {_HEADER_FOOTER_PLAN_REGION_TOP},
+        {_HEADER_FOOTER_PLAN_REGION_BOTTOM})
 
 
 def _header_footer_plan_entry_warning(entry: dict, warning_type: str) -> dict:
@@ -1049,7 +1141,12 @@ def _page_number_template(item: dict) -> dict:
     template = (item or {}).get('page_number_template') or {}
     if not isinstance(template, dict):
         return {}
-    if template.get('supported') and template.get('consecutive'):
+    if template.get('supported') and (
+            template.get('consecutive') or
+            template.get('sequence_status') in {
+                'parity_consecutive',
+                'offset_consistent',
+            }):
         return template
     return {}
 

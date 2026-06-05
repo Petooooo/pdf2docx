@@ -8008,3 +8008,118 @@ Result: passed. 5 conversion tests ran successfully.
   drifts.
 - Image/logo header/footer migration is not implemented.
 - Cross-page paragraph merge remains out of scope.
+
+## Automatic Header/Footer Classification v4
+
+### Why v3 was insufficient
+
+Classifier v3 still relied too much on repeated dry-run candidates. In the
+`input3.pdf` local sample, the real source page labels appeared as bottom
+boundary strings such as `8-1`, `8-2`, and `8-3`. These labels changed on every
+page and could be mixed into a broader `<page_number>` fingerprint with an
+unrelated bottom-region number. As a result, the repeated candidate looked
+non-consecutive and unstable.
+
+### Implementation summary
+
+- Added top-region page-number targeting: top page numbers map to DOCX header
+  parts, bottom page numbers map to DOCX footer parts.
+- Added chapter-prefixed page-label parsing such as `8-1` as prefix `8-` plus
+  dynamic `PAGE`.
+- Added automatic boundary page-number family generation from `page_summaries`
+  even when no repeated dry-run candidate exists.
+- Added combined source-offset/page-index sequence evidence for changing
+  page-label text.
+- Added block-level filter refs so a generated page-number family can remove
+  only the exact source blocks it owns, not unrelated numeric blocks sharing the
+  same normalized fingerprint.
+- Preserved all-page header/footer text in both odd/even Word parts when
+  parity-specific page numbers force an `odd_even` writer policy.
+- Kept top running-head candidates diagnostic when first-page title content is
+  mixed into the same family and safe odd/even first-page-excluded running-head
+  writing is not yet implemented.
+
+### Local v4 smoke
+
+Command:
+
+```bash
+.venv/bin/python local_reports/automatic_reviewed_batch/auto_batch_convert.py --input-dir local_samples --default-output-dir local_reports/automatic_reviewed_batch_v4/output_docx_default --output-dir local_reports/automatic_reviewed_batch_v4/output_docx_auto_reviewed --report-dir local_reports/automatic_reviewed_batch_v4/reports --log-dir local_reports/automatic_reviewed_batch_v4/logs --page-number-behavior word_field --allow-source-tree --overwrite
+```
+
+Result:
+
+- total PDFs considered: 7, including an ignored subset PDF under
+  `local_samples/subsets/`
+- default converted: 6
+- automatic reviewed converted: 3
+- automatic diagnostic/skipped: 3
+- blocked: 0
+- skipped large: 1
+- failed: 0
+
+Core local samples:
+
+- `input.pdf`: converted automatic reviewed, unchanged high-quality result.
+- `input2.pdf`: diagnostic only; no safe auto-exclude candidates.
+- `input3.pdf`: converted automatic reviewed; bottom `8-1`..`8-5` page labels
+  now migrate as odd/even footer PAGE fields with prefix `8-` and start number
+  `1`.
+- `input4.pdf`: diagnostic only; no safe auto-exclude candidates.
+- `input5.pdf`: diagnostic only; no safe auto-exclude candidates.
+- `input6_large.pdf`: skipped as large/bounded-only.
+
+Input3 investigation reports:
+
+- `local_reports/automatic_reviewed_batch_v4/input3-investigation/top-page-number-family-report.md`
+- `local_reports/automatic_reviewed_batch_v4/input3-investigation/running-head-family-report.md`
+- `local_reports/automatic_reviewed_batch_v4/input3-investigation/robust-geometry-report.md`
+- `local_reports/automatic_reviewed_batch_v4/input3-investigation/v3-v4-decision-comparison.md`
+
+### Commands run
+
+Focused regression commands:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "running_head or robust_geometry or applicable_page or automatic_header_footer or page_number or odd_even"
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "dirty_page_number_fingerprint_family or boundary_page_number_family or page_number or automatic_header_footer"
+```
+
+Result: passed. The primary v4 focused selector ran 53 tests plus 15 subtests.
+
+Full verification commands:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+git diff --check
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+git status --short --ignored
+```
+
+Result:
+
+- `test/test_layout_analyzer.py`: passed, 409 tests plus 47 subtests.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+- `test/test.py::TestConversion`: passed, 5 tests.
+- `git status --short --ignored`: only related tracked files were modified;
+  local reports, local samples, generated build artifacts, venvs, and caches
+  remained ignored.
+
+### Current status
+
+- Default conversion changed: no.
+- Public CLI/API changed: no.
+- Automatic mode public exposure: none.
+- Local v4 smoke generated ignored DOCX outputs only.
+
+### Remaining limitations
+
+- `input3.pdf` top odd/even running headers remain diagnostic because page 1
+  shares text with a first-page title at a different y band.
+- Safe odd/even first-page-excluded running-head writing remains future work.
+- Dynamic Word PAGE fields still follow Word pagination, not source PDF page
+  boundaries.
+- Section-scoped policy, image/logo migration, and paragraph continuation merge
+  remain out of scope.
