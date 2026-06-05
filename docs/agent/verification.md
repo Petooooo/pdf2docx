@@ -7873,3 +7873,138 @@ Result: passed. 5 conversion tests ran successfully.
   drifts.
 - Image/logo header/footer migration is not implemented.
 - Cross-page paragraph merge remains out of scope.
+
+## Automatic Header/Footer Classification v3
+
+### Why v3 was needed
+
+Classifier v2 still relied too heavily on global page coverage. That caused
+common book/manual patterns to remain diagnostic when a candidate was expected
+to appear only on odd pages, only on even pages, or on every page except the
+first. Page numbers also needed sequence-family reasoning because visible page
+number text changes on every page and can alternate left/right by page parity.
+
+### Implementation summary
+
+- Added applicable-page coverage metadata for `all_pages`,
+  `all_pages_except_first`, `odd_pages`, `even_pages`, `odd_even_pair`,
+  `contiguous_range`, and `sparse_or_unstable`.
+- Automatic decisions now use applicable support ratio rather than only global
+  support ratio.
+- Added parity-aware page-number sequence inference with
+  `parity_consecutive`, `odd_alignment`, `even_alignment`, and
+  `coverage_policy`.
+- Preserved parity-specific metadata when translating automatic decisions into
+  the existing reviewed migration gate.
+- Added internal DOCX writer support for `odd_even` policies using Word
+  odd/even header/footer parts.
+- Added internal support for `first_page_excluded_default` by enabling an empty
+  first-page header/footer while writing the repeated later-page default part.
+- Default `Converter.convert()` behavior remains unchanged.
+- Public CLI/API remains closed.
+
+### Tests added
+
+- Applicable-page coverage classification for all-page, first-page-excluded,
+  odd-page, and sparse candidates.
+- Strong odd/even header migration into separate Word header parts.
+- Strong odd/even footer migration into separate Word footer parts.
+- Parity-alternating page-number sequence migration using `word_field`.
+- Existing same-line footer grouping, style, word-field, body protection, and
+  conversion regressions continue to pass.
+
+### Local v3 smoke
+
+Command:
+
+```bash
+.venv/bin/python local_reports/automatic_reviewed_batch/auto_batch_convert.py --input-dir local_reports/automatic_reviewed_batch_v3/input_pdf --default-output-dir local_reports/automatic_reviewed_batch_v3/output_docx_default --output-dir local_reports/automatic_reviewed_batch_v3/output_docx_auto_reviewed --report-dir local_reports/automatic_reviewed_batch_v3/reports --log-dir local_reports/automatic_reviewed_batch_v3/logs --page-number-behavior word_field --allow-source-tree --overwrite --max-pages 100
+```
+
+Result:
+
+- total PDFs: 5
+- default converted: 5
+- automatic reviewed converted: 2
+- automatic diagnostic/skipped: 3
+- blocked: 0
+- skipped large: 0
+- failed: 0
+
+Automatic reviewed outputs:
+
+- `local_reports/automatic_reviewed_batch_v3/output_docx_auto_reviewed/input.docx`
+- `local_reports/automatic_reviewed_batch_v3/output_docx_auto_reviewed/input3.docx`
+
+Input3 investigation:
+
+- The all-page footer migrated safely.
+- The page-number-like top `8` family was not migrated because it was a
+  non-consecutive top-region numeric family with unstable y-band evidence.
+- Odd/even top header coverage was detected, but the odd-side header y-band was
+  unstable, so the pair remained diagnostic.
+- Reports were written under
+  `local_reports/automatic_reviewed_batch_v3/input3-investigation/`.
+
+### Commands run
+
+Focused regression command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "applicable_page or automatic_header_footer or page_number or odd_even"
+```
+
+Result: passed. 46 selected tests and 15 subtests ran successfully.
+
+Full layout analyzer tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 402 tests and 47 subtests ran successfully.
+
+Compile check:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+Whitespace check:
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Existing conversion tests:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Current status
+
+- Default conversion changed: no.
+- Public CLI/API changed: no.
+- Reviewed filtering default-on: no.
+- Automatic mode public exposure: none.
+- Odd/even writer support: internal-only.
+
+### Remaining limitations
+
+- `input3.pdf` still has diagnostic header/page-number families because the
+  available evidence was not strong enough for safe migration.
+- Section-scoped policy remains diagnostic/fail-closed.
+- Full first-page different content writing remains out of scope; only
+  first-page-excluded default repetition is supported internally.
+- Dynamic PAGE fields still follow Word pagination.
+- Exact source PDF page-label preservation remains future work if pagination
+  drifts.
+- Image/logo header/footer migration is not implemented.
+- Cross-page paragraph merge remains out of scope.

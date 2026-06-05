@@ -31,6 +31,13 @@ AUTO_DECISIONS = {
     AUTO_DECISION_DIAGNOSTIC,
 }
 AUTOMATIC_HEADER_FOOTER_MODE = 'automatic'
+AUTOMATIC_COVERAGE_ALL_PAGES = 'all_pages'
+AUTOMATIC_COVERAGE_ALL_EXCEPT_FIRST = 'all_pages_except_first'
+AUTOMATIC_COVERAGE_ODD_PAGES = 'odd_pages'
+AUTOMATIC_COVERAGE_EVEN_PAGES = 'even_pages'
+AUTOMATIC_COVERAGE_ODD_EVEN_PAIR = 'odd_even_pair'
+AUTOMATIC_COVERAGE_CONTIGUOUS_RANGE = 'contiguous_range'
+AUTOMATIC_COVERAGE_SPARSE = 'sparse_or_unstable'
 ROLE_HEADER = 'header'
 ROLE_FOOTER = 'footer'
 ROLE_PAGE_NUMBER = 'page_number'
@@ -5453,9 +5460,9 @@ def _quality_policy_summary() -> dict:
     return {
         'default_policy_supported': True,
         'default_policy_writer_scope': 'simple_text_header_footer_only',
-        'non_default_policy_fail_closed': True,
+        'non_default_policy_fail_closed': False,
         'first_page_policy': 'fail_closed',
-        'odd_even_policy': 'fail_closed',
+        'odd_even_policy': 'internal_writer_supported',
         'section_scoped_policy': 'fail_closed',
         'unsupported_policy': 'fail_closed',
     }
@@ -5496,7 +5503,7 @@ def _quality_known_limitations(local_summary: dict) -> list:
         'public_cli_api_not_exposed',
         'production_default_migration_not_enabled',
         'first_page_header_footer_writing_not_implemented',
-        'odd_even_header_footer_writing_not_implemented',
+        'odd_even_header_footer_writing_internal_only',
         'section_specific_mapping_not_implemented',
         'image_logo_header_footer_migration_not_implemented',
         'paragraph_continuation_merge_not_implemented',
@@ -5557,8 +5564,13 @@ def _quality_evaluation_warnings(
             warnings.append({'type': warning_type, 'count': count})
     if not policy_summary.get('default_policy_supported', False):
         warnings.append({'type': 'default_policy_not_supported'})
-    if not policy_summary.get('non_default_policy_fail_closed', False):
-        warnings.append({'type': 'non_default_policy_not_fail_closed'})
+    if not all(
+            policy_summary.get(key) == 'fail_closed'
+            for key in (
+                'first_page_policy',
+                'section_scoped_policy',
+                'unsupported_policy')):
+        warnings.append({'type': 'unsafe_non_default_policy_not_fail_closed'})
     if page_number_summary.get('default_behavior') != PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY:
         warnings.append({'type': 'page_number_default_behavior_changed'})
     if not page_number_summary.get('word_field_supported_internal_only', False):
@@ -6212,6 +6224,10 @@ def _automatic_header_footer_candidate_decision(
         candidate,
         text_lookup,
         page_count)
+    coverage = _automatic_header_footer_applicable_page_coverage(
+        candidate,
+        text_lookup,
+        total_pages)
     effective_role = _automatic_header_footer_effective_role(
         candidate,
         text_lookup,
@@ -6245,10 +6261,23 @@ def _automatic_header_footer_candidate_decision(
         evidence.append('repeated_across_multiple_pages')
     else:
         blocking.append('insufficient_page_support')
-    if support_ratio >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO:
-        evidence.append('high_page_coverage')
+
+    coverage_policy = coverage.get('coverage_policy', AUTOMATIC_COVERAGE_SPARSE)
+    applicable_support_ratio = float(
+        coverage.get('applicable_support_ratio', support_ratio) or 0.0)
+    if applicable_support_ratio >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO:
+        evidence.append('high_applicable_page_coverage')
+        evidence.append(f'coverage_policy:{coverage_policy}')
     else:
         blocking.append('insufficient_page_coverage')
+    if coverage_policy in {
+            AUTOMATIC_COVERAGE_ODD_PAGES,
+            AUTOMATIC_COVERAGE_EVEN_PAGES}:
+        blocking.append('coverage_policy_requires_family')
+    elif coverage_policy == AUTOMATIC_COVERAGE_CONTIGUOUS_RANGE:
+        blocking.append('contiguous_range_policy_diagnostic_only')
+    elif coverage_policy == AUTOMATIC_COVERAGE_SPARSE:
+        blocking.append('sparse_or_unstable_page_coverage')
 
     if bbox_stability.get('stable'):
         evidence.append('stable_bbox_band')
@@ -6302,7 +6331,7 @@ def _automatic_header_footer_candidate_decision(
         safe_for_migration = False
 
     confidence = _automatic_header_footer_confidence(
-        support_ratio,
+        applicable_support_ratio,
         evidence,
         blocking,
         auto_decision)
@@ -6320,11 +6349,17 @@ def _automatic_header_footer_candidate_decision(
         'support_count': support_count,
         'page_count': total_pages,
         'support_ratio': round(support_ratio, 3),
+        'coverage': coverage,
+        'coverage_policy': coverage_policy,
+        'applicable_support_ratio': round(applicable_support_ratio, 3),
         'bbox_stability': bbox_stability,
         'region': region,
         'regions': sorted(regions),
         'safe_for_migration': bool(safe_for_migration),
         'page_number_template': page_number_template,
+        'page_number_template_records': (
+            _automatic_header_footer_records(candidate, text_lookup)
+            if effective_role == ROLE_PAGE_NUMBER else []),
         'text_preview': _automatic_header_footer_text_preview(candidate, text_lookup),
     }
 
@@ -6359,6 +6394,100 @@ def _automatic_header_footer_support(
         total_pages = support_count
     support_ratio = (support_count / total_pages) if total_pages else 0.0
     return support_count, total_pages, support_ratio
+
+
+def _automatic_header_footer_applicable_page_coverage(
+        candidate: dict,
+        text_lookup: dict,
+        page_count: int = None) -> dict:
+    total_pages = _readiness_int(page_count or candidate.get('page_count', 0))
+    observed_pages = _automatic_header_footer_observed_pages(candidate, text_lookup)
+    if observed_pages:
+        total_pages = max(total_pages, max(observed_pages) + 1)
+    if total_pages <= 0:
+        total_pages = len(observed_pages)
+
+    all_pages = list(range(total_pages))
+    page_set = set(observed_pages)
+    applicable_pages = all_pages
+    coverage_policy = AUTOMATIC_COVERAGE_SPARSE
+    confidence = 0.0
+
+    if total_pages and page_set == set(all_pages):
+        coverage_policy = AUTOMATIC_COVERAGE_ALL_PAGES
+        applicable_pages = all_pages
+        confidence = 0.99
+    elif total_pages > 1 and page_set == set(all_pages[1:]):
+        coverage_policy = AUTOMATIC_COVERAGE_ALL_EXCEPT_FIRST
+        applicable_pages = all_pages[1:]
+        confidence = 0.94
+    else:
+        odd_pages = [index for index in all_pages if index % 2 == 0]
+        even_pages = [index for index in all_pages if index % 2 == 1]
+        odd_support = len(page_set.intersection(odd_pages))
+        even_support = len(page_set.intersection(even_pages))
+        odd_purity = (odd_support / len(page_set)) if page_set else 0.0
+        even_purity = (even_support / len(page_set)) if page_set else 0.0
+        odd_ratio = (odd_support / len(odd_pages)) if odd_pages else 0.0
+        even_ratio = (even_support / len(even_pages)) if even_pages else 0.0
+        if (
+                len(page_set) >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT and
+                odd_purity >= 0.8 and
+                odd_ratio >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO):
+            coverage_policy = AUTOMATIC_COVERAGE_ODD_PAGES
+            applicable_pages = odd_pages
+            confidence = min(0.98, 0.5 + odd_ratio * 0.48)
+        elif (
+                len(page_set) >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT and
+                even_purity >= 0.8 and
+                even_ratio >= AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_RATIO):
+            coverage_policy = AUTOMATIC_COVERAGE_EVEN_PAGES
+            applicable_pages = even_pages
+            confidence = min(0.98, 0.5 + even_ratio * 0.48)
+        elif _automatic_header_footer_contiguous_pages(observed_pages):
+            coverage_policy = AUTOMATIC_COVERAGE_CONTIGUOUS_RANGE
+            applicable_pages = observed_pages
+            confidence = min(0.82, 0.45 + len(page_set) / max(total_pages, 1) * 0.35)
+
+    applicable_set = set(applicable_pages)
+    applicable_support = len(page_set.intersection(applicable_set))
+    applicable_ratio = (
+        applicable_support / len(applicable_set)
+        if applicable_set else 0.0)
+    global_ratio = (len(page_set) / total_pages) if total_pages else 0.0
+    return {
+        'coverage_policy': coverage_policy,
+        'document_page_count': total_pages,
+        'applicable_page_indices': list(applicable_pages),
+        'observed_page_indices': observed_pages,
+        'applicable_support_ratio': round(applicable_ratio, 3),
+        'global_support_ratio': round(global_ratio, 3),
+        'coverage_confidence': round(confidence, 3),
+    }
+
+
+def _automatic_header_footer_observed_pages(
+        candidate: dict,
+        text_lookup: dict) -> list:
+    pages = {
+        _readiness_int(page)
+        for page in candidate.get('affected_pages', []) or []
+        if _readiness_int(page) >= 0
+    }
+    for record in _automatic_header_footer_records(candidate, text_lookup):
+        page_index = _readiness_int(record.get('page_index', -1))
+        if page_index >= 0:
+            pages.add(page_index)
+    return sorted(pages)
+
+
+def _automatic_header_footer_contiguous_pages(pages: list) -> bool:
+    pages = sorted(set(pages or []))
+    if len(pages) < AUTOMATIC_HEADER_FOOTER_MIN_SUPPORT_COUNT:
+        return False
+    return all(
+        pages[index] == pages[index - 1] + 1
+        for index in range(1, len(pages)))
 
 
 def _automatic_header_footer_effective_role(
@@ -6518,7 +6647,11 @@ def _automatic_header_footer_decision_summary(
             for item in policy_diagnostics or []
             if item.get('policy_type')
         }),
-        'odd_even_writer_supported': False,
+        'coverage_policy_counts': dict(sorted(Counter(
+            decision.get('coverage_policy', '')
+            for decision in decisions or []
+            if decision.get('coverage_policy')).items())),
+        'odd_even_writer_supported': True,
         'manual_review_required': False,
         'public_cli_exposed': False,
         'production_default_enabled': False,
@@ -6539,7 +6672,9 @@ def _automatic_header_footer_decision_warnings(
         warnings.append({'type': 'no_auto_exclude_candidates'})
     odd_even_count = sum(
         1 for item in policy_diagnostics or []
-        if item.get('policy_type') == 'odd_even')
+        if (
+            item.get('policy_type') == 'odd_even' and
+            item.get('writer_status') != 'supported_internal_writer'))
     if odd_even_count:
         warnings.append({
             'type': 'automatic_odd_even_policy_diagnostic_only',
@@ -6555,7 +6690,7 @@ def _automatic_header_footer_decision_recommendation(
     if not summary.get('candidate_count', 0):
         return 'No repeated header/footer/page-number candidates were available for automatic classification.'
     if summary.get('odd_even_policy_detected_count', 0) and not summary.get('auto_exclude_count', 0):
-        return 'Odd/even boundary patterns were detected, but writer support remains diagnostic-only.'
+        return 'Odd/even boundary patterns were detected, but no supported high-confidence migration family was available.'
     if summary.get('auto_exclude_count', 0):
         return 'High-confidence boundary artifacts can proceed to internal automatic migration gates.'
     return 'No high-confidence automatic exclusions were found; keep uncertain candidates in the body and report diagnostics.'
@@ -6643,9 +6778,9 @@ def _automatic_header_footer_odd_even_diagnostics(
             'even_fingerprint': even_item.get('fingerprint', ''),
             'even_affected_pages': list(even_item.get('affected_pages', []) or []),
             'even_coverage': even_item.get('parity_profile', {}).get('coverage', 0.0),
-            'writer_status': 'diagnostic_only_writer_not_enabled',
-            'safe_for_migration': False,
-            'reason': 'odd_even_writer_not_supported',
+            'writer_status': 'supported_internal_writer',
+            'safe_for_migration': True,
+            'reason': 'strong_odd_even_boundary_family',
         })
     return diagnostics
 
@@ -6722,13 +6857,19 @@ def _automatic_header_footer_apply_policy_diagnostics(
             if 'odd_even_policy_detected' not in evidence:
                 evidence.append('odd_even_policy_detected')
             blocking = set(item.get('blocking_reasons', []) or [])
-            blocking.add('odd_even_writer_not_supported')
+            blocking.discard('insufficient_page_coverage')
+            blocking.discard('coverage_policy_requires_family')
             item['evidence'] = evidence
             item['blocking_reasons'] = sorted(blocking)
-            item['auto_decision'] = AUTO_DECISION_DIAGNOSTIC
-            item['safe_for_migration'] = False
+            if not item['blocking_reasons']:
+                item['auto_decision'] = AUTO_DECISION_EXCLUDE
+                item['safe_for_migration'] = True
+                item['confidence'] = max(float(item.get('confidence', 0.0)), 0.86)
+            else:
+                item['auto_decision'] = AUTO_DECISION_DIAGNOSTIC
+                item['safe_for_migration'] = False
             item['detected_policy_type'] = 'odd_even'
-            item['policy_writer_status'] = 'diagnostic_only_writer_not_enabled'
+            item['policy_writer_status'] = 'supported_internal_writer'
         updated.append(item)
     return updated
 
@@ -6766,7 +6907,9 @@ def _automatic_header_footer_transformed_dry_run(
         item['reason'] = (
             'Automatic classifier promoted this high-confidence boundary artifact '
             'for the existing internal reviewed migration gates.')
-        transformed.append(item)
+        transformed.extend(_automatic_header_footer_expand_transformed_candidate(
+            item,
+            decision))
 
     return {
         'policy': 'internal_automatic_header_footer_transformed_dry_run_only',
@@ -6779,6 +6922,59 @@ def _automatic_header_footer_transformed_dry_run(
         },
         'candidates': transformed,
     }
+
+
+def _automatic_header_footer_expand_transformed_candidate(
+        candidate: dict,
+        decision: dict) -> list:
+    template = decision.get('page_number_template') or {}
+    if (
+            decision.get('automatic_role') == ROLE_PAGE_NUMBER and
+            template.get('sequence_status') == 'parity_consecutive'):
+        return _automatic_header_footer_split_page_number_parity_candidate(
+            candidate,
+            decision)
+    return [candidate]
+
+
+def _automatic_header_footer_split_page_number_parity_candidate(
+        candidate: dict,
+        decision: dict) -> list:
+    records = decision.get('page_number_template_records') or []
+    pages = list(candidate.get('affected_pages', []) or [])
+    if not pages:
+        return [candidate]
+    items = []
+    for parity_name, predicate in (
+            ('odd', lambda page: page % 2 == 0),
+            ('even', lambda page: page % 2 == 1)):
+        parity_pages = [page for page in pages if predicate(_readiness_int(page))]
+        if not parity_pages:
+            continue
+        item = dict(candidate)
+        item['candidate_id'] = f"{candidate.get('candidate_id', '')}-{parity_name}"
+        item['affected_pages'] = parity_pages
+        item['support_count'] = len(parity_pages)
+        item['automatic_parity'] = parity_name
+        metadata = _automatic_header_footer_first_record_metadata(
+            records,
+            parity_pages)
+        if metadata:
+            item['metadata_override'] = metadata
+        items.append(item)
+    return items or [candidate]
+
+
+def _automatic_header_footer_first_record_metadata(records: list, pages: list) -> dict:
+    page_set = {_readiness_int(page) for page in pages or []}
+    for record in sorted(
+            records or [],
+            key=lambda value: (
+                _readiness_int(value.get('page_index', 0)),
+                _readiness_int(value.get('block_index', 0)))):
+        if _readiness_int(record.get('page_index', -1)) in page_set:
+            return dict(record.get('metadata') or {})
+    return {}
 
 
 def _automatic_header_footer_review_decisions(decisions_report: dict) -> dict:
@@ -6862,6 +7058,8 @@ def _reviewed_exclusion_candidates(candidates: list, decision_map: dict) -> tupl
             'regions': list(candidate.get('regions', []) or []),
             'support_count': _readiness_int(candidate.get('support_count', 0)),
             'page_count': _readiness_int(candidate.get('page_count', 0)),
+            'metadata_override': dict(candidate.get('metadata_override') or {}),
+            'automatic_parity': candidate.get('automatic_parity', ''),
         }
         if allowed:
             approved.append(item)
@@ -7088,10 +7286,12 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
         if not text:
             continue
         parsed = parse_docx_page_number_template(text)
+        metadata = dict(record.get('metadata') or {})
         ordered.append({
             'page_index': _readiness_int(record.get('page_index', 0)),
             'text': text,
             'template': parsed,
+            'metadata': metadata,
         })
     ordered.sort(key=lambda item: item['page_index'])
     if not ordered:
@@ -7123,6 +7323,7 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
     total_pages = first.get('total_pages')
     page_indices = [item['page_index'] for item in ordered]
     numbers = [item['template'].get('number') for item in ordered]
+    parity_alignment = _docx_page_number_parity_alignment(ordered)
     same_template = all(
         _docx_page_number_template_key(item) == _docx_page_number_template_key(first)
         for item in templates)
@@ -7155,8 +7356,12 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
                 for page_delta, number_delta in deltas) and
             gap_count <= 2)
         if consecutive:
-            sequence_status = 'consecutive'
-            confidence = 0.95
+            if parity_alignment.get('parity_alternating'):
+                sequence_status = 'parity_consecutive'
+                confidence = 0.96
+            else:
+                sequence_status = 'consecutive'
+                confidence = 0.95
         elif mostly_consecutive:
             sequence_status = 'mostly_consecutive'
             confidence = 0.82
@@ -7179,10 +7384,62 @@ def infer_docx_page_number_template_sequence(records: list) -> dict:
         'template_kind': first.get('template_kind', ''),
         'observed_numbers': numbers,
         'observed_page_indices': page_indices,
+        'odd_alignment': parity_alignment.get('odd_alignment', ''),
+        'even_alignment': parity_alignment.get('even_alignment', ''),
+        'coverage_policy': (
+            AUTOMATIC_COVERAGE_ODD_EVEN_PAIR
+            if sequence_status == 'parity_consecutive' else ''),
         'confidence': round(confidence, 3),
         'reason': sequence_status if sequence_status != 'not_sequence' else (
             'non_consecutive_page_number_sequence'),
     }
+
+
+def _docx_page_number_parity_alignment(ordered: list) -> dict:
+    odd_alignments = [
+        normalize_text(item.get('metadata', {}).get('alignment', '')).lower()
+        for item in ordered or []
+        if item.get('page_index', 0) % 2 == 0
+    ]
+    even_alignments = [
+        normalize_text(item.get('metadata', {}).get('alignment', '')).lower()
+        for item in ordered or []
+        if item.get('page_index', 0) % 2 == 1
+    ]
+    odd_alignment = _stable_docx_page_number_alignment(odd_alignments)
+    even_alignment = _stable_docx_page_number_alignment(even_alignments)
+    return {
+        'odd_alignment': odd_alignment,
+        'even_alignment': even_alignment,
+        'parity_alternating': bool(
+            odd_alignment in {
+                DOCX_ALIGNMENT_LEFT,
+                DOCX_ALIGNMENT_CENTER,
+                DOCX_ALIGNMENT_RIGHT,
+            } and
+            even_alignment in {
+                DOCX_ALIGNMENT_LEFT,
+                DOCX_ALIGNMENT_CENTER,
+                DOCX_ALIGNMENT_RIGHT,
+            } and
+            odd_alignment != even_alignment),
+    }
+
+
+def _stable_docx_page_number_alignment(values: list) -> str:
+    values = [
+        value for value in values or []
+        if value in {
+            DOCX_ALIGNMENT_LEFT,
+            DOCX_ALIGNMENT_CENTER,
+            DOCX_ALIGNMENT_RIGHT,
+        }
+    ]
+    if not values:
+        return ''
+    counts = Counter(values)
+    value, count = counts.most_common(1)[0]
+    return value if count / len(values) >= 0.8 else ''
 
 
 def _docx_page_number_template_key(template: dict) -> tuple:
@@ -7457,6 +7714,9 @@ def _docx_header_footer_candidate_text(candidate: dict, text_lookup: dict) -> st
 
 
 def _docx_header_footer_candidate_metadata(candidate: dict, text_lookup: dict) -> dict:
+    override = candidate.get('metadata_override')
+    if isinstance(override, dict) and override:
+        return dict(override)
     value = text_lookup.get(candidate.get('fingerprint', ''), {})
     if isinstance(value, dict):
         return dict(value.get('metadata') or {})
@@ -7510,7 +7770,10 @@ def _docx_header_footer_generation_plan_result(
         if 'dynamic_page_number_field_required' not in warning_types:
             warnings.append({'type': 'dynamic_page_number_field_required'})
             warning_types.add('dynamic_page_number_field_required')
-    section_plan = _docx_header_footer_section_plan(entries, page_number_behavior)
+    section_plan = _docx_header_footer_section_plan(
+        entries,
+        page_number_behavior,
+        policy)
     page_number_field_generation = _docx_page_number_generation_status(
         page_number_behavior)
     summary = {
@@ -7567,8 +7830,12 @@ def _docx_header_footer_generation_plan_result(
         'page_number_dynamic_field_required': bool(require_dynamic_page_number),
         'page_number_word_field_supported': True,
         'section_scope': 'document',
-        'first_page_policy': 'deferred',
-        'odd_even_policy': 'deferred',
+        'first_page_policy': (
+            'first_page_excluded_default'
+            if policy.get('policy_type') == 'first_page_excluded_default'
+            else 'deferred'),
+        'odd_even_policy': (
+            'supported' if policy.get('policy_type') == 'odd_even' else 'deferred'),
         'header_footer_policy_type': policy.get('policy_type', 'unsupported'),
         'header_footer_policy_safety_status': policy.get('safety_status', 'blocked'),
         'header_footer_policy_fail_closed': bool(policy.get('fail_closed', True)),
@@ -7591,7 +7858,10 @@ def _docx_header_footer_generation_plan_result(
         'limitations': [
             'Plan-only helper; not wired into default conversion.',
             _docx_page_number_limitation(page_number_behavior),
-            'First-page and odd/even section behavior is deferred.',
+            (
+                'First-page-excluded and odd/even text policies are internal-only; '
+                'section-scoped policies remain deferred.'
+            ),
             'Images, logos, and complex layout are not represented.',
             'Paragraph continuation merging remains out of scope.',
         ],
@@ -7671,6 +7941,18 @@ def _docx_header_footer_policy(
         if _docx_header_footer_signature_empty(signature)
     ]
     if missing_pages:
+        if (
+                missing_pages == [0] and
+                page_count > 1 and
+                all(
+                    signature == page_signatures[1]
+                    for signature in page_signatures[1:]) and
+                not _docx_header_footer_signature_empty(page_signatures[1])):
+            base.update(_docx_header_footer_first_page_excluded_default_policy(
+                page_signatures[1],
+                page_number_behavior,
+                require_dynamic_page_number))
+            return base
         base['warnings'].append({
             'type': 'incomplete_header_footer_page_coverage',
             'page_indices': missing_pages,
@@ -7678,6 +7960,16 @@ def _docx_header_footer_policy(
         return base
 
     first_signature = page_signatures[0]
+    if _docx_header_footer_entries_need_odd_even_layout(entries, page_count):
+        odd_signatures = page_signatures[0::2]
+        even_signatures = page_signatures[1::2]
+        base.update(_docx_header_footer_odd_even_policy(
+            odd_signatures[0] if odd_signatures else {},
+            even_signatures[0] if even_signatures else {},
+            page_number_behavior,
+            layout_reason='odd_even_layout_variation'))
+        return base
+
     if all(signature == first_signature for signature in page_signatures):
         base.update(_docx_header_footer_default_policy(
             first_signature,
@@ -7706,7 +7998,6 @@ def _docx_header_footer_policy(
             even_signatures[0],
             page_number_behavior))
         return base
-
     ranges = _docx_header_footer_signature_ranges(page_signatures)
     if len(ranges) > 1 and all(item['page_count'] > 1 for item in ranges):
         base.update(_docx_header_footer_section_scoped_policy(
@@ -7829,25 +8120,93 @@ def _docx_header_footer_first_page_policy(
     }
 
 
+def _docx_header_footer_first_page_excluded_default_policy(
+        default_signature: dict,
+        page_number_behavior: str,
+        require_dynamic_page_number: bool = False) -> dict:
+    policy = _docx_header_footer_default_policy(
+        default_signature,
+        page_number_behavior,
+        require_dynamic_page_number)
+    policy.update({
+        'policy_type': 'first_page_excluded_default',
+        'first_page_header_text': '',
+        'first_page_footer_text': '',
+        'first_page_behavior': 'empty_first_page_header_footer',
+        'safety_status': (
+            'safe_for_simple_first_page_excluded_writer'
+            if not policy.get('fail_closed') else 'blocked'),
+    })
+    return policy
+
+
 def _docx_header_footer_odd_even_policy(
         odd_signature: dict,
         even_signature: dict,
-        page_number_behavior: str) -> dict:
+        page_number_behavior: str,
+        layout_reason: str = 'odd_even_text_variation') -> dict:
+    warnings = []
+    fail_closed = False
+    safety_status = 'safe_for_simple_odd_even_writer'
+    if page_number_behavior == PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
+        warnings.append({'type': 'unsupported_page_number_behavior'})
+        fail_closed = True
+        safety_status = 'blocked'
     return {
         'policy_type': 'odd_even',
         'odd_header_text': _docx_header_footer_signature_text(odd_signature, 'header'),
         'odd_footer_text': _docx_header_footer_signature_text(odd_signature, 'footer'),
         'even_header_text': _docx_header_footer_signature_text(even_signature, 'header'),
         'even_footer_text': _docx_header_footer_signature_text(even_signature, 'footer'),
+        'odd_page_number_text': _docx_header_footer_signature_text(odd_signature, 'page_number'),
+        'even_page_number_text': _docx_header_footer_signature_text(even_signature, 'page_number'),
+        'layout_reason': layout_reason,
         'page_number_behavior': page_number_behavior,
         'page_number_field_generation': _docx_page_number_generation_status(
             page_number_behavior),
-        'warnings': [{'type': 'odd_even_docx_header_footer_writing_deferred'}],
-        'unsupported_features': ['odd_even_docx_header_footer_writing'] +
-        _docx_page_number_unsupported_features(page_number_behavior),
-        'fail_closed': True,
-        'safety_status': 'diagnostic_only',
+        'warnings': warnings,
+        'unsupported_features': _docx_page_number_unsupported_features(
+            page_number_behavior),
+        'fail_closed': fail_closed,
+        'safety_status': safety_status,
     }
+
+
+def _docx_header_footer_entries_need_odd_even_layout(
+        entries: list,
+        page_count: int) -> bool:
+    if page_count < 2:
+        return False
+    odd_entries = _docx_header_footer_entries_for_parity(entries, 'odd')
+    even_entries = _docx_header_footer_entries_for_parity(entries, 'even')
+    if not odd_entries or not even_entries:
+        return False
+    for role in (ROLE_HEADER, ROLE_FOOTER, ROLE_PAGE_NUMBER):
+        odd_items = _unique_entry_items(odd_entries, role)
+        even_items = _unique_entry_items(even_entries, role)
+        if not odd_items or not even_items:
+            continue
+        odd_alignment = {
+            item.get('alignment')
+            for item in odd_items
+            if item.get('alignment') in {
+                DOCX_ALIGNMENT_LEFT,
+                DOCX_ALIGNMENT_CENTER,
+                DOCX_ALIGNMENT_RIGHT,
+            }
+        }
+        even_alignment = {
+            item.get('alignment')
+            for item in even_items
+            if item.get('alignment') in {
+                DOCX_ALIGNMENT_LEFT,
+                DOCX_ALIGNMENT_CENTER,
+                DOCX_ALIGNMENT_RIGHT,
+            }
+        }
+        if odd_alignment and even_alignment and odd_alignment != even_alignment:
+            return True
+    return False
 
 
 def _docx_header_footer_signature_ranges(signatures: list) -> list:
@@ -7891,11 +8250,19 @@ def _docx_header_footer_section_scoped_policy(
 
 def _docx_header_footer_section_plan(
         entries: list,
-        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY) -> dict:
+        page_number_behavior: str = PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+        policy: dict = None) -> dict:
+    policy_type = (policy or {}).get('policy_type', 'default')
+    odd_entries = _docx_header_footer_entries_for_parity(entries, 'odd')
+    even_entries = _docx_header_footer_entries_for_parity(entries, 'even')
     return {
         'section_scope': 'document',
-        'first_page_policy': 'deferred',
-        'odd_even_policy': 'deferred',
+        'policy_type': policy_type,
+        'first_page_policy': (
+            'first_page_excluded_default'
+            if policy_type == 'first_page_excluded_default' else 'deferred'),
+        'odd_even_policy': (
+            'supported' if policy_type == 'odd_even' else 'deferred'),
         'page_number_behavior': page_number_behavior,
         'header_texts': _unique_entry_texts(entries, ROLE_HEADER),
         'footer_texts': _unique_entry_texts(entries, ROLE_FOOTER),
@@ -7910,7 +8277,41 @@ def _docx_header_footer_section_plan(
         'footer_line_groups': _docx_header_footer_line_groups(
             entries,
             {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
+        'odd_header_items': _unique_entry_items(odd_entries, ROLE_HEADER),
+        'even_header_items': _unique_entry_items(even_entries, ROLE_HEADER),
+        'odd_footer_items': _unique_entry_items(odd_entries, ROLE_FOOTER),
+        'even_footer_items': _unique_entry_items(even_entries, ROLE_FOOTER),
+        'odd_page_number_items': _unique_entry_items(odd_entries, ROLE_PAGE_NUMBER),
+        'even_page_number_items': _unique_entry_items(even_entries, ROLE_PAGE_NUMBER),
+        'odd_header_line_groups': _docx_header_footer_line_groups(
+            odd_entries,
+            {ROLE_HEADER}),
+        'even_header_line_groups': _docx_header_footer_line_groups(
+            even_entries,
+            {ROLE_HEADER}),
+        'odd_footer_line_groups': _docx_header_footer_line_groups(
+            odd_entries,
+            {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
+        'even_footer_line_groups': _docx_header_footer_line_groups(
+            even_entries,
+            {ROLE_FOOTER, ROLE_PAGE_NUMBER}),
     }
+
+
+def _docx_header_footer_entries_for_parity(entries: list, parity: str) -> list:
+    target_is_odd = parity == 'odd'
+    values = []
+    for entry in entries or []:
+        affected_pages = [
+            _readiness_int(page)
+            for page in entry.get('affected_pages', []) or []
+            if _readiness_int(page) >= 0
+        ]
+        if not affected_pages:
+            continue
+        if all((page % 2 == 0) == target_is_odd for page in affected_pages):
+            values.append(entry)
+    return values
 
 
 def _unique_entry_texts(entries: list, role: str) -> list:

@@ -246,9 +246,35 @@ candidates can be migrated while unstable or body-region numbers remain
 diagnostic or kept.
 
 The classifier also detects strong odd/even header or footer patterns as
-internal diagnostics. Because the current writer remains default-policy-only,
-odd/even candidates are not removed or written automatically yet; they are
-reported as `auto_diagnostic` with `odd_even_writer_not_supported`.
+internal diagnostics. In v2 these stayed diagnostic-only because the writer was
+still default-policy-only.
+
+## Automatic Classification v3
+
+Automatic classification now evaluates candidate coverage against the pages on
+which the candidate is expected to appear. A strong odd-page header is measured
+against odd source pages instead of being rejected for a global support ratio
+near 0.5. The coverage model records `all_pages`,
+`all_pages_except_first`, `odd_pages`, `even_pages`, `odd_even_pair`,
+`contiguous_range`, and `sparse_or_unstable`.
+
+Page-number sequence inference now recognizes parity-alternating dynamic page
+numbers. For example, odd pages can carry right-aligned `Page 123`, `Page 125`,
+`Page 127` while even pages carry left-aligned `Page 124`, `Page 126`,
+`Page 128`; the combined family is treated as `parity_consecutive` when the
+full source-page sequence is safe.
+
+The internal DOCX writer now supports strong odd/even text policies using
+Word odd/even header/footer parts. Odd/even output remains internal-only and is
+not exposed through public CLI/API or default conversion. First-page-excluded
+default repetition can also be represented internally by leaving the first-page
+header/footer empty and writing the repeated default content for later pages.
+
+Local v3 smoke on `input.pdf` through `input5.pdf` generated automatic reviewed
+outputs for `input.pdf` and `input3.pdf`. `input3.pdf` still migrated only the
+all-page footer: its top numeric candidate was not a consecutive page-number
+sequence, and the odd-side header y-band was unstable, so the odd/even header
+family remained diagnostic rather than being removed.
 
 Manual review remains a fallback/debug workflow only. Public/default conversion
 is still unchanged.
@@ -280,7 +306,10 @@ Current writer support is intentionally narrow:
 
 - `default`: supported for the simple internal writer.
 - `first_page`: classified but fail-closed.
-- `odd_even`: classified but fail-closed.
+- `first_page_excluded_default`: supported internally when the first page has
+  no migrated header/footer content and later pages are stable.
+- `odd_even`: supported internally for strong text/page-number families using
+  Word odd/even parts.
 - `section_scoped`: classified but fail-closed.
 - `unsupported`: fail-closed.
 
@@ -318,7 +347,7 @@ header/footer migration.
 - Public CLI/API option is not exposed.
 - Production/default migration is not enabled.
 - First-page Word header/footer writing is not implemented.
-- Odd/even Word header/footer writing is not implemented.
+- Odd/even Word header/footer writing remains internal-only.
 - Full section-specific production mapping is not implemented.
 - Image/logo header/footer migration is not implemented.
 - Cross-page paragraph continuation merge is not implemented.

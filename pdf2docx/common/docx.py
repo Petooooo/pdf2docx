@@ -155,7 +155,12 @@ def apply_header_footer_text_plan(
     warnings.extend(_header_footer_plan_role_warnings(plan))
     if page_number_behavior == _PAGE_NUMBER_BEHAVIOR_UNSUPPORTED:
         warnings.append({'type': 'unsupported_page_number_behavior'})
-    if policy_type and policy_type != 'default':
+    supported_policy_types = {
+        'default',
+        'first_page_excluded_default',
+        'odd_even',
+    }
+    if policy_type and policy_type not in supported_policy_types:
         warnings.append({
             'type': 'header_footer_policy_not_supported_for_simple_writer',
             'policy_type': policy_type,
@@ -170,6 +175,15 @@ def apply_header_footer_text_plan(
             'type': 'header_footer_plan_has_safety_warnings',
             'count': len(plan_safety_warnings),
         })
+    if policy_type == 'odd_even' and sections:
+        section = sections[0]
+        if not (
+                hasattr(section, 'even_page_header') and
+                hasattr(section, 'even_page_footer')):
+            warnings.append({'type': 'odd_even_header_footer_parts_unavailable'})
+    if policy_type == 'first_page_excluded_default' and sections:
+        if not hasattr(sections[0], 'different_first_page_header_footer'):
+            warnings.append({'type': 'first_page_header_footer_parts_unavailable'})
     if (
             'safe_for_internal_docx_header_footer_experiment' in recommendation and
             not recommendation.get('safe_for_internal_docx_header_footer_experiment')):
@@ -218,29 +232,88 @@ def apply_header_footer_text_plan(
         page_number_start_number = _page_number_start_number(
             page_number_items,
             section_plan)
-        if header_groups:
-            header_result = _replace_header_footer_part_line_groups(
+        if policy_type == 'first_page_excluded_default':
+            _enable_different_first_page_header_footer(section)
+        if policy_type == 'odd_even':
+            _enable_odd_even_headers(document)
+            odd_header_result = _replace_header_footer_part_from_plan(
                 section.header,
-                header_groups,
+                _header_footer_plan_line_groups(section_plan, 'odd_header_line_groups'),
+                _header_footer_plan_items(
+                    section_plan,
+                    'odd_header_items',
+                    'header_texts'),
                 section,
                 page_number_behavior,
                 page_number_start_number)
-        else:
-            header_result = _replace_header_footer_part_items(section.header, header_items)
-        if footer_groups:
-            footer_result = _replace_header_footer_part_line_groups(
+            even_header_result = _replace_header_footer_part_from_plan(
+                section.even_page_header,
+                _header_footer_plan_line_groups(section_plan, 'even_header_line_groups'),
+                _header_footer_plan_items(
+                    section_plan,
+                    'even_header_items',
+                    'header_texts'),
+                section,
+                page_number_behavior,
+                page_number_start_number)
+            odd_footer_result = _replace_header_footer_part_from_plan(
                 section.footer,
-                footer_groups,
+                _header_footer_plan_line_groups(section_plan, 'odd_footer_line_groups'),
+                _header_footer_plan_items(
+                    section_plan,
+                    'odd_footer_items',
+                    'footer_texts') +
+                _header_footer_plan_items(
+                    section_plan,
+                    'odd_page_number_items',
+                    'page_number_placeholders'),
                 section,
                 page_number_behavior,
                 page_number_start_number)
+            even_footer_result = _replace_header_footer_part_from_plan(
+                section.even_page_footer,
+                _header_footer_plan_line_groups(section_plan, 'even_footer_line_groups'),
+                _header_footer_plan_items(
+                    section_plan,
+                    'even_footer_items',
+                    'footer_texts') +
+                _header_footer_plan_items(
+                    section_plan,
+                    'even_page_number_items',
+                    'page_number_placeholders'),
+                section,
+                page_number_behavior,
+                page_number_start_number)
+            header_result = _merge_header_footer_results(
+                odd_header_result,
+                even_header_result)
+            footer_result = _merge_header_footer_results(
+                odd_footer_result,
+                even_footer_result)
         else:
-            if page_number_behavior in {
-                    _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
-                    _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
-                footer_items.extend(page_number_items)
-                page_number_placeholders_written = len(page_number_items)
-            footer_result = _replace_header_footer_part_items(section.footer, footer_items)
+            if header_groups:
+                header_result = _replace_header_footer_part_line_groups(
+                    section.header,
+                    header_groups,
+                    section,
+                    page_number_behavior,
+                    page_number_start_number)
+            else:
+                header_result = _replace_header_footer_part_items(section.header, header_items)
+            if footer_groups:
+                footer_result = _replace_header_footer_part_line_groups(
+                    section.footer,
+                    footer_groups,
+                    section,
+                    page_number_behavior,
+                    page_number_start_number)
+            else:
+                if page_number_behavior in {
+                        _PAGE_NUMBER_BEHAVIOR_PLACEHOLDER_ONLY,
+                        _PAGE_NUMBER_BEHAVIOR_STATIC_TEXT}:
+                    footer_items.extend(page_number_items)
+                    page_number_placeholders_written = len(page_number_items)
+                footer_result = _replace_header_footer_part_items(section.footer, footer_items)
         header_count = header_result['paragraphs_written']
         footer_count = footer_result['paragraphs_written']
         page_number_fields_written += (
@@ -280,7 +353,7 @@ def apply_header_footer_text_plan(
             page_number_start_applied = _set_section_page_number_start(
                 section,
                 page_number_start_number)
-            if not footer_groups:
+            if policy_type != 'odd_even' and not footer_groups:
                 page_number_result = _append_page_number_fields(
                     section.footer,
                     page_number_items,
@@ -580,6 +653,60 @@ def _replace_header_footer_part_items(part, items: list) -> dict:
             result['style_properties_applied'] += style_count
         result['paragraphs_written'] += 1
     return result
+
+
+def _replace_header_footer_part_from_plan(
+        part,
+        line_groups: list,
+        items: list,
+        section,
+        page_number_behavior: str,
+        page_number_start_number=None) -> dict:
+    if line_groups:
+        return _replace_header_footer_part_line_groups(
+            part,
+            line_groups,
+            section,
+            page_number_behavior,
+            page_number_start_number)
+    return _replace_header_footer_part_items(part, items)
+
+
+def _merge_header_footer_results(*results) -> dict:
+    merged = _header_footer_write_result()
+    for result in results or []:
+        _merge_header_footer_write_result(merged, result or {})
+    return merged
+
+
+def _enable_odd_even_headers(document) -> bool:
+    try:
+        document.settings.odd_and_even_pages_header_footer = True
+        return True
+    except Exception:
+        settings = getattr(getattr(document, 'settings', None), '_element', None)
+        if settings is None:
+            return False
+        element = settings.find(qn('w:evenAndOddHeaders'))
+        if element is None:
+            element = OxmlElement('w:evenAndOddHeaders')
+            settings.append(element)
+        return True
+
+
+def _enable_different_first_page_header_footer(section) -> bool:
+    try:
+        section.different_first_page_header_footer = True
+        return True
+    except Exception:
+        sect_pr = getattr(section, '_sectPr', None)
+        if sect_pr is None:
+            return False
+        element = sect_pr.find(qn('w:titlePg'))
+        if element is None:
+            element = OxmlElement('w:titlePg')
+            sect_pr.append(element)
+        return True
 
 
 def _replace_header_footer_part_line_groups(

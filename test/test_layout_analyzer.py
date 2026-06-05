@@ -5208,10 +5208,11 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(policy['policy_type'], 'odd_even')
         self.assertEqual(policy['odd_header_text'], 'Synthetic Odd Header')
         self.assertEqual(policy['even_header_text'], 'Synthetic Even Header')
-        self.assertTrue(policy['fail_closed'])
-        self.assertIn(
-            'odd_even_docx_header_footer_writing_deferred',
-            {warning['type'] for warning in plan['safety_warnings']})
+        self.assertFalse(policy['fail_closed'])
+        self.assertEqual(
+            policy['safety_status'],
+            'safe_for_simple_odd_even_writer')
+        self.assertFalse(plan['safety_warnings'])
 
     def test_docx_header_footer_policy_classifies_contiguous_section_ranges(self):
         plan = _docx_header_footer_policy_plan_for_page_texts(
@@ -6469,7 +6470,148 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'non_consecutive_page_number_sequence',
             decision['blocking_reasons'])
 
-    def test_automatic_header_footer_classifier_detects_odd_even_headers_as_diagnostic_policy(self):
+    def test_automatic_header_footer_classifier_reports_applicable_page_coverage(self):
+        all_fp = _summary_fingerprint('ALL HEADER', REGION_TOP)
+        skip_first_fp = _summary_fingerprint('SKIP FIRST HEADER', REGION_TOP)
+        odd_fp = _summary_fingerprint('ODD HEADER', REGION_TOP)
+        sparse_fp = _summary_fingerprint('SPARSE HEADER', REGION_TOP)
+        page_summaries = []
+        for index in range(6):
+            blocks = [
+                _automatic_summary_block(
+                    index,
+                    0,
+                    all_fp,
+                    REGION_TOP,
+                    'ALL HEADER',
+                    [50, 36, 170, 50]),
+            ]
+            if index > 0:
+                blocks.append(_automatic_summary_block(
+                    index,
+                    1,
+                    skip_first_fp,
+                    REGION_TOP,
+                    'SKIP FIRST HEADER',
+                    [50, 56, 220, 70]))
+            if index % 2 == 0:
+                blocks.append(_automatic_summary_block(
+                    index,
+                    2,
+                    odd_fp,
+                    REGION_TOP,
+                    'ODD HEADER',
+                    [50, 76, 170, 90]))
+            if index in {1, 4}:
+                blocks.append(_automatic_summary_block(
+                    index,
+                    3,
+                    sparse_fp,
+                    REGION_TOP,
+                    'SPARSE HEADER',
+                    [50, 96, 190, 110]))
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': blocks,
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate('all', all_fp, ROLE_REVIEW_ONLY, ACTION_REVIEW, list(range(6)), [REGION_TOP]),
+            _dry_run_candidate('skip-first', skip_first_fp, ROLE_REVIEW_ONLY, ACTION_REVIEW, [1, 2, 3, 4, 5], [REGION_TOP]),
+            _dry_run_candidate('odd', odd_fp, ROLE_REVIEW_ONLY, ACTION_REVIEW, [0, 2, 4], [REGION_TOP]),
+            _dry_run_candidate('sparse', sparse_fp, ROLE_REVIEW_ONLY, ACTION_REVIEW, [1, 4], [REGION_TOP]),
+        ]}
+
+        report = build_automatic_header_footer_decisions(
+            page_summaries,
+            dry_run,
+            enabled=True)
+        coverage = {
+            decision['candidate_id']: decision['coverage']['coverage_policy']
+            for decision in report['decisions']
+        }
+
+        self.assertEqual(coverage['all'], 'all_pages')
+        self.assertEqual(coverage['skip-first'], 'all_pages_except_first')
+        self.assertEqual(coverage['odd'], 'odd_pages')
+        self.assertEqual(coverage['sparse'], 'sparse_or_unstable')
+
+    def test_automatic_header_footer_classifier_writes_parity_page_numbers(self):
+        _require_docx_header_footer_support(self)
+        fingerprint = _summary_fingerprint('Page 123', REGION_BOTTOM)
+        page_summaries = []
+        for index in range(6):
+            text = f'Page {123 + index}'
+            bbox = [460, 760, 560, 774] if index % 2 == 0 else [40, 760, 140, 774]
+            page_summaries.append({
+                'page_index': index,
+                'width': 600,
+                'height': 800,
+                'text_blocks': [
+                    _automatic_summary_block(
+                        index,
+                        0,
+                        fingerprint,
+                        REGION_BOTTOM,
+                        text,
+                        bbox,
+                        {'font_name': 'Arial,Italic', 'font_size': 9, 'flags': 2, 'color': 0}),
+                ],
+            })
+        dry_run = {'candidates': [
+            _dry_run_candidate(
+                'parity-page-number',
+                fingerprint,
+                ROLE_REVIEW_ONLY,
+                ACTION_REVIEW,
+                list(range(6)),
+                [REGION_BOTTOM]),
+        ]}
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True,
+            page_number_behavior='word_field',
+            require_dynamic_page_number=True)
+        decision = migration['automatic_decisions']['decisions'][0]
+
+        self.assertEqual(decision['auto_decision'], AUTO_DECISION_EXCLUDE)
+        self.assertEqual(decision['automatic_role'], ROLE_PAGE_NUMBER)
+        self.assertEqual(
+            decision['page_number_template']['sequence_status'],
+            'parity_consecutive')
+        self.assertEqual(
+            decision['page_number_template']['odd_alignment'],
+            'right')
+        self.assertEqual(
+            decision['page_number_template']['even_alignment'],
+            'left')
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'odd_even')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-parity-page-number.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True,
+                page_number_behavior='word_field')
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(apply_report['applied'])
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
+        self.assertEqual(len(openxml['footer_parts']), 2)
+        self.assertIn('w:pgNumType w:start="123"', openxml['body_xml'])
+        self.assertEqual(openxml['footer_xml'].count(' PAGE '), 2)
+        self.assertNotIn('&lt;PAGE_NUMBER&gt;', openxml['footer_xml'])
+
+    def test_automatic_header_footer_classifier_writes_strong_odd_even_headers(self):
+        _require_docx_header_footer_support(self)
         odd_fp = _summary_fingerprint('ODD HEADER', REGION_TOP)
         even_fp = _summary_fingerprint('EVEN HEADER', REGION_TOP)
         page_summaries = []
@@ -6522,28 +6664,52 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'odd_even')
         self.assertEqual(
             decisions['odd-header']['auto_decision'],
-            AUTO_DECISION_DIAGNOSTIC)
+            AUTO_DECISION_EXCLUDE)
         self.assertEqual(
             decisions['even-header']['auto_decision'],
-            AUTO_DECISION_DIAGNOSTIC)
+            AUTO_DECISION_EXCLUDE)
         self.assertIn(
             'odd_even_policy_detected',
             decisions['odd-header']['evidence'])
-        self.assertIn(
-            'odd_even_writer_not_supported',
-            decisions['even-header']['blocking_reasons'])
+        self.assertFalse(decisions['even-header']['blocking_reasons'])
 
         migration = build_automatic_header_footer_migration_plan(
             page_summaries,
             dry_run,
             enabled=True)
-        self.assertFalse(
+        self.assertTrue(
             migration['summary']['safe_for_internal_automatic_migration'])
         self.assertEqual(
             migration['summary']['odd_even_policy_detected_count'],
             1)
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'odd_even')
 
-    def test_automatic_header_footer_classifier_detects_odd_even_footer_as_diagnostic_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-odd-even-header.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(apply_report['applied'])
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
+        self.assertEqual(len(openxml['header_parts']), 2)
+        odd_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'ODD HEADER' in xml)
+        even_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'EVEN HEADER' in xml)
+        self.assertNotIn('EVEN HEADER', odd_part)
+        self.assertNotIn('ODD HEADER', even_part)
+
+    def test_automatic_header_footer_classifier_writes_strong_odd_even_footer(self):
+        _require_docx_header_footer_support(self)
         odd_fp = _summary_fingerprint('ODD FOOTER', REGION_BOTTOM)
         even_fp = _summary_fingerprint('EVEN FOOTER', REGION_BOTTOM)
         page_summaries = []
@@ -6590,6 +6756,31 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(
             report['policy_diagnostics'][0]['role'],
             ROLE_FOOTER)
+
+        migration = build_automatic_header_footer_migration_plan(
+            page_summaries,
+            dry_run,
+            enabled=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-odd-even-footer.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(apply_report['applied'])
+        self.assertEqual(len(openxml['footer_parts']), 2)
+        odd_part = next(
+            xml for xml in openxml['footer_parts'].values()
+            if 'ODD FOOTER' in xml)
+        even_part = next(
+            xml for xml in openxml['footer_parts'].values()
+            if 'EVEN FOOTER' in xml)
+        self.assertNotIn('EVEN FOOTER', odd_part)
+        self.assertNotIn('ODD FOOTER', even_part)
 
     def test_automatic_header_footer_classifier_does_not_treat_body_alternation_as_odd_even(self):
         odd_fp = _summary_fingerprint('ODD BODY HEADING', REGION_BODY)
@@ -6780,7 +6971,8 @@ class TestLayoutAnalyzer(unittest.TestCase):
             'body_table_callout_list_content_protected',
             decisions['table-footer']['blocking_reasons'])
 
-    def test_automatic_header_footer_classifier_fails_closed_for_non_default_policy(self):
+    def test_automatic_header_footer_classifier_writes_first_page_excluded_default(self):
+        _require_docx_header_footer_support(self)
         default_fp = _summary_fingerprint('DEFAULT HEADER', REGION_TOP)
         first_fp = _summary_fingerprint('FIRST PAGE HEADER', REGION_TOP)
         page_summaries = [{
@@ -6843,11 +7035,29 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(
             migration['automatic_decisions']['summary']['auto_exclude_count'],
             1)
-        self.assertFalse(
-            migration['summary']['safe_for_internal_automatic_migration'])
-        self.assertIn('incomplete_header_footer_page_coverage', warning_types)
         self.assertTrue(
+            migration['summary']['safe_for_internal_automatic_migration'])
+        self.assertNotIn('incomplete_header_footer_page_coverage', warning_types)
+        self.assertFalse(warning_types)
+        self.assertEqual(
+            migration['summary']['header_footer_policy_type'],
+            'first_page_excluded_default')
+        self.assertFalse(
             migration['summary']['header_footer_policy_fail_closed'])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'automatic-first-page-excluded.docx'
+            document = DocxDocument()
+            apply_report = docx_utils.apply_header_footer_text_plan(
+                document,
+                migration['docx_header_footer_generation_plan'],
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(apply_report['applied'])
+        self.assertIn('w:titlePg', openxml['body_xml'])
+        self.assertIn('DEFAULT HEADER', openxml['header_xml'])
 
     def test_automatic_header_footer_classifier_summary_is_json_serializable(self):
         fingerprint = _summary_fingerprint('SERIAL HEADER', REGION_TOP)
@@ -7785,14 +7995,6 @@ class TestLayoutAnalyzer(unittest.TestCase):
                     'Synthetic Default Header',
                 ])),
             (
-                'odd_even',
-                _docx_header_footer_policy_plan_for_page_texts(headers=[
-                    'Synthetic Odd Header',
-                    'Synthetic Even Header',
-                    'Synthetic Odd Header',
-                    'Synthetic Even Header',
-                ])),
-            (
                 'section_scoped',
                 _docx_header_footer_policy_plan_for_page_texts(headers=[
                     'Synthetic Section A Header',
@@ -7834,6 +8036,39 @@ class TestLayoutAnalyzer(unittest.TestCase):
                 self.assertIn(
                     'header_footer_policy_fail_closed',
                     warning_types)
+
+    def test_internal_odd_even_policy_writes_separate_header_parts(self):
+        _require_docx_header_footer_support(self)
+        plan = _docx_header_footer_policy_plan_for_page_texts(headers=[
+            'Synthetic Odd Header',
+            'Synthetic Even Header',
+            'Synthetic Odd Header',
+            'Synthetic Even Header',
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'odd-even-header.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(report['applied'])
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
+        self.assertEqual(len(openxml['header_parts']), 2)
+        odd_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'Synthetic Odd Header' in xml)
+        even_part = next(
+            xml for xml in openxml['header_parts'].values()
+            if 'Synthetic Even Header' in xml)
+        self.assertIn('Synthetic Odd Header', odd_part)
+        self.assertNotIn('Synthetic Even Header', odd_part)
+        self.assertIn('Synthetic Even Header', even_part)
+        self.assertNotIn('Synthetic Odd Header', even_part)
 
     def test_local_corpus_smoke_summary_handles_multiple_samples(self):
         reports = [
@@ -8893,7 +9128,6 @@ class TestLayoutAnalyzer(unittest.TestCase):
         _require_synthetic_pdf_support(self)
         cases = [
             ('first_page', 'phase5f_first_page_policy'),
-            ('odd_even', 'phase5f_odd_even_policy'),
             ('section_scoped', 'phase5f_section_scoped_policy'),
         ]
 
@@ -8930,6 +9164,33 @@ class TestLayoutAnalyzer(unittest.TestCase):
                     self.assertIn(
                         'header_footer_policy_fail_closed',
                         warning_types)
+
+    def test_phase5f_public_safe_odd_even_fixture_uses_internal_writer_only(self):
+        _require_docx_header_footer_support(self)
+        _require_synthetic_pdf_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            pdf_path = temp_root / 'phase5f_odd_even_policy.pdf'
+            _write_synthetic_pdf(pdf_path, 'phase5f_odd_even_policy')
+            layout = _parse_synthetic_layout(pdf_path)
+            layout_text = _layout_all_text(layout).lower()
+            plan = _phase5f_public_safe_policy_plan('odd_even')
+            docx_path = temp_root / 'phase5f-odd-even.docx'
+            document = DocxDocument()
+            report = docx_utils.apply_header_footer_text_plan(
+                document,
+                plan,
+                enabled=True)
+            document.save(str(docx_path))
+            openxml = _read_docx_openxml_parts(docx_path)
+
+        self.assertTrue(_phase5f_artifact_is_temp_only(pdf_path, temp_root))
+        self.assertIn('synthetic public safe', layout_text)
+        self.assertFalse(_phase5f_uses_local_sample_text(layout_text))
+        self.assertEqual(plan['header_footer_policy']['policy_type'], 'odd_even')
+        self.assertFalse(plan['header_footer_policy']['fail_closed'])
+        self.assertTrue(report['applied'])
+        self.assertIn('w:evenAndOddHeaders', openxml['settings_xml'])
 
     def test_phase5f_public_safe_body_heading_similarity_preserves_body_signature(self):
         _require_synthetic_pdf_support(self)
@@ -9140,7 +9401,7 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(summary['list_text_loss_count'], 0)
         self.assertEqual(summary['residual_header_footer_pollution_count'], 0)
         self.assertTrue(summary['default_policy_supported'])
-        self.assertTrue(summary['non_default_policy_fail_closed'])
+        self.assertFalse(summary['non_default_policy_fail_closed'])
         self.assertEqual(summary['page_number_default_behavior'], 'placeholder_only')
         self.assertTrue(summary['word_field_supported_internal_only'])
         json.dumps(pack)
@@ -9172,16 +9433,16 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(pack['summary']['readiness_status'], 'blocked')
         self.assertIn('residual_header_footer_pollution', warning_types)
 
-    def test_reviewed_header_footer_quality_evaluation_keeps_non_default_policy_fail_closed(self):
+    def test_reviewed_header_footer_quality_evaluation_records_internal_odd_even_support(self):
         pack = build_reviewed_header_footer_quality_evaluation_pack(
             synthetic_coverage=_quality_synthetic_evidence(),
             local_corpus_evidence=_quality_local_evidence())
         policy = pack['policy_support']
 
         self.assertTrue(policy['default_policy_supported'])
-        self.assertTrue(policy['non_default_policy_fail_closed'])
+        self.assertFalse(policy['non_default_policy_fail_closed'])
         self.assertEqual(policy['first_page_policy'], 'fail_closed')
-        self.assertEqual(policy['odd_even_policy'], 'fail_closed')
+        self.assertEqual(policy['odd_even_policy'], 'internal_writer_supported')
         self.assertEqual(policy['section_scoped_policy'], 'fail_closed')
         self.assertEqual(policy['unsupported_policy'], 'fail_closed')
 
@@ -11383,6 +11644,9 @@ def _read_docx_openxml_parts(docx_path):
         'body_xml': '',
         'header_xml': '',
         'footer_xml': '',
+        'header_parts': {},
+        'footer_parts': {},
+        'settings_xml': '',
     }
     path = Path(docx_path)
     if not path.exists() or not zipfile.is_zipfile(str(path)):
@@ -11393,14 +11657,24 @@ def _read_docx_openxml_parts(docx_path):
         parts['part_names'] = names
         if 'word/document.xml' in names:
             parts['body_xml'] = archive.read('word/document.xml').decode('utf-8')
+        if 'word/settings.xml' in names:
+            parts['settings_xml'] = archive.read('word/settings.xml').decode('utf-8')
+        parts['header_parts'] = {
+            name: archive.read(name).decode('utf-8')
+            for name in names
+            if name.startswith('word/header') and name.endswith('.xml')
+        }
+        parts['footer_parts'] = {
+            name: archive.read(name).decode('utf-8')
+            for name in names
+            if name.startswith('word/footer') and name.endswith('.xml')
+        }
         parts['header_xml'] = ''.join(
-            archive.read(name).decode('utf-8')
-            for name in names
-            if name.startswith('word/header') and name.endswith('.xml'))
+            parts['header_parts'][name]
+            for name in sorted(parts['header_parts']))
         parts['footer_xml'] = ''.join(
-            archive.read(name).decode('utf-8')
-            for name in names
-            if name.startswith('word/footer') and name.endswith('.xml'))
+            parts['footer_parts'][name]
+            for name in sorted(parts['footer_parts']))
     return parts
 
 
