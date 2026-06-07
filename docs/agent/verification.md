@@ -8252,3 +8252,106 @@ Final result:
   reliable enough.
 - Empty paragraphs, section breaks, and trailing table paragraphs remain the
   most likely next pagination-drift investigation targets.
+
+## First Page Body Clipping Investigation
+
+### Observed issue
+
+Manual inspection of the best local static anchored `input.docx` showed the
+first-page body title `CHAPTER 13 HEADERS AND FOOTERS` clipped near the top.
+This was investigated before packaging because static anchored header/footer
+quality was otherwise suitable for closed-network inspection.
+
+### OpenXML and PDF result
+
+The title text is in `word/document.xml` as a normal body paragraph:
+
+- docx part: `word/document.xml`
+- container: paragraph
+- header/footer content: no
+- table cell/textbox/frame: no
+- largest title run font size: 28 pt
+- paragraph line spacing: 10.3 pt
+- line spacing rule: exact
+- line-height/font ratio: 0.368
+
+PyMuPDF inspection of the source first page showed the corresponding PDF title
+line had an approximately 32 pt bbox height with a 28 pt largest glyph. The
+DOCX exact line-height was therefore much smaller than the actual text and was
+the likely clipping cause.
+
+Ignored local reports:
+
+- `local_reports/body_clipping_investigation/chapter-title-location-report.md`
+- `local_reports/body_clipping_investigation/chapter-title-bbox-vs-docx-report.md`
+- `local_reports/body_clipping_investigation/chapter-title-clipping-root-cause.md`
+- `local_reports/body_clipping_investigation/variant-validation-report.md`
+- `local_reports/body_clipping_investigation/final-recommendation.md`
+
+### Implementation summary
+
+Added a narrow internal TextBlock guard for exact line spacing. Exact line
+spacing remains unchanged when it is safely larger than the paragraph's maximum
+run font size. When exact spacing is less than `max_font_size * 1.15`, the
+writer now uses Word `atLeast` line spacing of `max_font_size * 1.25`.
+
+This is a body text clipping guard, not a header/footer migration change.
+
+### Tests added
+
+- Exact 10.3 pt line spacing with 28 pt text is relaxed to 35 pt `atLeast`.
+- Safe exact spacing remains exact.
+- A synthetic TextBlock writes `w:lineRule="atLeast"` and `w:line="700"` for
+  the clipping-risk large-title case.
+
+### Local variants
+
+Generated ignored local variants:
+
+- `local_reports/body_clipping_investigation/variants/input.fix-line-spacing.docx`
+- `local_reports/body_clipping_investigation/variants/input.fix-title-padding.docx`
+- `local_reports/body_clipping_investigation/variants/input.fix-body-top-safe-gap.docx`
+
+OpenXML validation found no header/footer hash changes, no Word PAGE fields in
+static mode, no literal page-number placeholders, no source-label body
+residuals, and no paragraph/section/page-break count increase.
+
+LibreOffice/soffice was not available locally, so render-based visual
+verification was skipped. Manual Word inspection remains recommended.
+
+### Commands run
+
+Focused command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "clipping or line_height or body_top"
+```
+
+Result: passed, 4 tests.
+
+Full verification:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/text/TextBlock.py test/test_layout_analyzer.py
+git diff --check
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+git status --short --ignored
+```
+
+Result:
+
+- `test/test_layout_analyzer.py`: passed, 415 tests plus 47 subtests.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+- `test/test.py::TestConversion`: passed, 5 tests.
+
+### Status
+
+- Default conversion changed: yes, narrowly for clipping-risk exact
+  line-height body paragraphs.
+- `Converter.convert()` API/default invocation changed: no.
+- Public CLI/API changed: no.
+- Header/footer static anchored behavior changed: no.
+- Recommended next step: regenerate closed-network wheel smoke outputs after
+  manual inspection confirms the fixed first-page title no longer clips.

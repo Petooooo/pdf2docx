@@ -26,7 +26,7 @@ Data structure based on this `link <https://pymupdf.readthedocs.io/en/latest/tex
 '''
 
 from docx.shared import (Pt,Inches)
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from .Lines import Lines
 from ..image.ImageSpan import ImageSpan
 from ..common.share import (RectType, TextAlignment, lower_round)
@@ -34,6 +34,23 @@ from ..common.Block import Block
 from ..common.share import (rgb_component_from_name, lower_round)
 from ..common import constants
 from ..common import docx
+
+
+EXACT_LINE_SPACING_CLIPPING_RISK_RATIO = 1.15
+EXACT_LINE_SPACING_SAFE_RATIO = 1.25
+
+
+def _safe_exact_line_spacing_points(line_space: float, max_font_size: float):
+    """Return a non-clipping exact line spacing fallback when runs are taller."""
+    line_space = round(float(line_space), 1)
+    if not max_font_size:
+        return line_space, False
+
+    max_font_size = float(max_font_size)
+    if line_space >= max_font_size * EXACT_LINE_SPACING_CLIPPING_RISK_RATIO:
+        return line_space, False
+
+    return round(max_font_size * EXACT_LINE_SPACING_SAFE_RATIO, 1), True
 
 
 class TextBlock(Block):
@@ -285,6 +302,16 @@ class TextBlock(Block):
             self.before_space = 0.0
 
 
+    def _max_docx_font_size(self):
+        sizes = []
+        for line in self.lines:
+            for span in getattr(line, 'spans', []):
+                size = getattr(span, 'size', None)
+                if isinstance(size, (int, float)) and size > 0:
+                    sizes.append(round(size*2.0)/2.0)
+        return max(sizes) if sizes else 0.0
+
+
     def make_docx(self, p):
         '''Create paragraph for a text block.
 
@@ -311,7 +338,12 @@ class TextBlock(Block):
 
         # line spacing
         if self.line_space_type==0: # exact line spacing
-            pf.line_spacing = Pt(round(self.line_space, 1))
+            line_spacing, use_at_least = _safe_exact_line_spacing_points(
+                self.line_space,
+                self._max_docx_font_size())
+            pf.line_spacing = Pt(line_spacing)
+            if use_at_least:
+                pf.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
         else: # relative line spacing
             pf.line_spacing = round(self.line_space, 2)
 

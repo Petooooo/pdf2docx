@@ -6,6 +6,10 @@ import unittest
 from collections import Counter
 from importlib import util
 from pathlib import Path
+from types import SimpleNamespace
+
+from pdf2docx.common.share import TextAlignment
+from pdf2docx.text.TextBlock import TextBlock, _safe_exact_line_spacing_points
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'pdf2docx' / 'page' / 'LayoutAnalyzer.py'
@@ -7804,6 +7808,48 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertEqual(
             integration['summary']['body_region_removed_count'],
             0)
+
+    def test_body_title_clipping_relaxes_too_small_exact_line_height(self):
+        line_spacing, use_at_least = _safe_exact_line_spacing_points(10.3, 28.0)
+
+        self.assertEqual(line_spacing, 35.0)
+        self.assertTrue(use_at_least)
+
+    def test_body_title_line_height_keeps_safe_exact_spacing(self):
+        line_spacing, use_at_least = _safe_exact_line_spacing_points(34.0, 28.0)
+
+        self.assertEqual(line_spacing, 34.0)
+        self.assertFalse(use_at_least)
+
+    def test_body_title_clipping_writes_at_least_line_height_for_large_text(self):
+        _require_docx_header_footer_support(self)
+        block = TextBlock()
+        block.before_space = 21.8
+        block.after_space = 0.0
+        block.line_space_type = 0
+        block.line_space = 10.3
+        block.left_space = 0.0
+        block.right_space = 0.0
+        block.first_line_space = 0.0
+        block.alignment = TextAlignment.LEFT
+        block.tab_stops = []
+        block.lines = [
+            SimpleNamespace(
+                spans=[SimpleNamespace(size=28.0)],
+                make_docx=lambda paragraph: paragraph.add_run(
+                    'CHAPTER 13 HEADERS AND FOOTERS')),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'body-title-line-height.docx'
+            document = DocxDocument()
+            block.make_docx(document.add_paragraph())
+            document.save(str(docx_path))
+            document_xml = _read_docx_openxml_parts(docx_path)['body_xml']
+
+        self.assertIn('CHAPTER 13 HEADERS AND FOOTERS', document_xml)
+        self.assertIn('w:line="700"', document_xml)
+        self.assertIn('w:lineRule="atLeast"', document_xml)
 
     def test_header_footer_clipping_avoids_exact_line_spacing_for_large_text(self):
         _require_docx_header_footer_support(self)
