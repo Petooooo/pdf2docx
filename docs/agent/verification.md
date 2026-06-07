@@ -8355,3 +8355,124 @@ Result:
 - Header/footer static anchored behavior changed: no.
 - Recommended next step: regenerate closed-network wheel smoke outputs after
   manual inspection confirms the fixed first-page title no longer clips.
+
+## Static Anchored Internal Helper Promotion
+
+### Goal
+
+Promote the successful local static anchored v5 prototype into tracked
+internal code so it can be used by a private wrapper and later wheel smoke
+testing, without changing default conversion or exposing a public CLI/API.
+
+### Local evidence
+
+The revalidation root was:
+
+- `local_reports/static_anchored_v5_after_clipping_fix/`
+
+The local revalidation produced static anchored outputs for `input.pdf`,
+`input2.pdf`, `input3.pdf`, `input4.pdf`, and `input5.pdf`. Static mode safety
+counts were clean:
+
+- Word PAGE field count: 0
+- literal `<PAGE_NUMBER>` count: 0
+- source label body residual count: 0
+- duplicate header/footer text count: 0
+- multi-zone missing count: 0
+- mispositioned static label count: 0
+- variable family page text mismatch count: 0
+- last token reuse: false
+
+The first-page title clipping recheck also confirmed the regenerated
+`input.pdf` body title paragraph used `w:line="700"` with
+`w:lineRule="atLeast"`.
+
+### Implementation summary
+
+Added tracked internal modules under `pdf2docx/static_anchored/`:
+
+- `analyzer.py`: source-page visual family detection, static label records,
+  variable family detection, coverage policies, source refs, and internal
+  filtering config generation.
+- `writer.py`: source-page section header/footer static text writer with
+  left/center/right tab-stop grouping and style hints.
+- `validator.py`: OpenXML safety validation for static mode.
+- `converter.py`: internal PDF-to-DOCX facade that uses the existing reviewed
+  filtered-parse hook, applies static anchored headers/footers, and validates
+  before writing final output.
+
+Added tracked internal script:
+
+```bash
+python -m scripts.internal.static_anchored_convert --input input.pdf --output input.docx --report input.report.json
+```
+
+The script is not registered as a public console entry point.
+
+### Synthetic tests added
+
+- Three-zone footer preservation.
+- Left/right footer right-tab preservation.
+- Static page label preservation.
+- Chapter-prefixed label preservation.
+- Variable footer family per-source-page ownership.
+- Delayed every-other variable family detection.
+- Last-token reuse detection.
+- Source-label body residual detection.
+- Static-mode PAGE field rejection.
+- Literal `<PAGE_NUMBER>` rejection.
+- Multi-zone missing detection.
+- Mispositioned static label detection.
+- Mode selector recommendation for representative input/input2/input3/input4/input5-style fixtures.
+
+### Commands run
+
+Focused command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "static_anchored or static_visual or source_page_fidelity or variable_family or multi_zone or delayed"
+```
+
+Result: passed, 13 tests.
+
+Script help:
+
+```bash
+.venv/bin/python -m scripts.internal.static_anchored_convert --help
+```
+
+Result: passed.
+
+Internal script smoke:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m scripts.internal.static_anchored_convert --input local_reports/static_anchored_internal_smoke/static-anchored-smoke.pdf --output local_reports/static_anchored_internal_smoke/static-anchored-smoke.docx --report local_reports/static_anchored_internal_smoke/static-anchored-smoke.report.json --markdown-report local_reports/static_anchored_internal_smoke/static-anchored-smoke.report.md --overwrite
+```
+
+Result: passed, status `converted`. The synthetic PDF/DOCX/report remained
+under ignored `local_reports/`.
+
+Full verification:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/page/LayoutAnalyzer.py pdf2docx/page/Pages.py pdf2docx/common/docx.py pdf2docx/text/TextBlock.py pdf2docx/static_anchored/__init__.py pdf2docx/static_anchored/analyzer.py pdf2docx/static_anchored/writer.py pdf2docx/static_anchored/validator.py pdf2docx/static_anchored/converter.py test/test_layout_analyzer.py scripts/internal/static_anchored_convert.py
+git diff --check
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+git status --short --ignored
+```
+
+Result:
+
+- `test/test_layout_analyzer.py`: passed, 428 tests plus 47 subtests.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+- `test/test.py::TestConversion`: passed, 5 tests.
+
+### Status
+
+- Default `Converter.convert()` behavior changed: no.
+- Public CLI/API changed: no.
+- Public console script exposed: no.
+- Generated local DOCX/reports committed: no.
+- Next step: private/offline wheel packaging smoke using the internal helper.

@@ -339,6 +339,60 @@ before odd/even running heads can be promoted more broadly.
 Public/default conversion remains unchanged and the public CLI/API remains
 closed.
 
+## Static Anchored Internal Promotion
+
+The local static anchored v5 prototype was promoted into tracked internal
+helpers after the clipping fix revalidation passed. This is a visual fidelity
+path, not semantic Word page-number reconstruction: source page labels and
+header/footer artifacts are preserved as static text owned by their source PDF
+page.
+
+Tracked internal modules now cover:
+
+- source-page boundary observation analysis
+- exact repeated header/footer families
+- static visible page labels
+- chapter-prefixed labels
+- variable header/footer families with common prefix/suffix or pipe-number
+  patterns
+- delayed-start, front-matter-excluded, odd/even, every-n-pages, and
+  contiguous-range coverage policies
+- same-line left/center/right grouping with tab stops
+- static OpenXML validation for PAGE fields, literal placeholders, source
+  label body residuals, duplicate text, missing zones, mispositioned labels,
+  and variable-family page ownership
+
+The tracked internal script is:
+
+```bash
+python -m scripts.internal.static_anchored_convert --input input.pdf --output input.docx --report input.report.json
+```
+
+This remains an internal helper only. It is not registered as a public CLI
+entry point, and `Converter.convert()` default behavior is unchanged.
+
+Synthetic coverage mirrors the local corpus patterns:
+
+- three-zone footer layout
+- left/right footer tab preservation
+- `Page i` and `Page X of Y` static labels
+- `8-1` chapter-prefixed labels with alternating positions
+- per-source-page variable footer ownership
+- delayed every-other variable footer families
+- last-token reuse detection
+- source-label residual detection
+- PAGE field and literal placeholder rejection in static mode
+- multi-zone collapse and mispositioned label detection
+- mode selection recommending `static_anchored` for representative fixtures
+
+Local ignored evidence remains under
+`local_reports/static_anchored_v5_after_clipping_fix/`. That evidence is useful
+for private readiness, but it is not committed public fixture data.
+
+Public/default readiness remains blocked. The next practical step is a private
+wheel packaging smoke that installs the current fork and runs the internal
+static anchored helper in a fresh environment.
+
 ## Safety Gates
 
 The current MVP remains fail-closed around these gates:

@@ -8,7 +8,19 @@ from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
 
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
 from pdf2docx.common.share import TextAlignment
+from pdf2docx.static_anchored import (
+    apply_static_anchored_plan,
+    build_static_anchored_plan,
+    recommend_static_anchored_mode,
+    validate_static_anchored_docx,
+)
+from pdf2docx.static_anchored.analyzer import (
+    common_variable_template as static_common_variable_template,
+    coverage_info_for_pages as static_coverage_info_for_pages,
+)
 from pdf2docx.text.TextBlock import TextBlock, _safe_exact_line_spacing_points
 
 
@@ -7851,6 +7863,292 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('w:line="700"', document_xml)
         self.assertIn('w:lineRule="atLeast"', document_xml)
 
+    def test_static_anchored_three_zone_footer_preserves_source_zones(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [
+                _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                _static_block('Page 127', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+            ],
+            [
+                _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                _static_block('Page 128', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+            ],
+        ])
+
+        report = _static_anchored_docx_report(layout)
+
+        self.assertTrue(report['validation']['safety_gate_passed'])
+        self.assertEqual(report['validation']['word_PAGE_field_count'], 0)
+        self.assertEqual(report['validation']['literal_PAGE_NUMBER_placeholder_count'], 0)
+        self.assertEqual(report['validation']['missing_zone_count'], 0)
+        self.assertEqual(report['validation']['mispositioned_static_label_count'], 0)
+        self.assertEqual(
+            report['validation']['multi_zone_source_group_count'],
+            2)
+
+    def test_static_anchored_left_right_footer_uses_right_tab_for_label(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [
+                _static_block('Manual Footer', REGION_BOTTOM, [40, 760, 190, 778], 0),
+                _static_block('Page 1 of 3', REGION_BOTTOM, [480, 760, 560, 778], 1, '<page_number>'),
+            ],
+            [
+                _static_block('Manual Footer', REGION_BOTTOM, [40, 760, 190, 778], 0),
+                _static_block('Page 2 of 3', REGION_BOTTOM, [480, 760, 560, 778], 1, '<page_number>'),
+            ],
+        ])
+
+        report = _static_anchored_docx_report(layout)
+
+        self.assertTrue(report['validation']['safety_gate_passed'])
+        self.assertEqual(report['validation']['right_zone_label_count'], 2)
+        self.assertEqual(report['validation']['center_zone_label_count'], 0)
+        self.assertEqual(report['validation']['mispositioned_static_label_count'], 0)
+
+    def test_static_anchored_page_labels_preserve_visible_text(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('Page i', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('Page 1 of 15', REGION_BOTTOM, [470, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('Page 2 of 15', REGION_BOTTOM, [470, 760, 560, 778], 0, '<page_number>')],
+        ])
+
+        report = _static_anchored_docx_report(layout)
+        footer_xml = report['openxml']['footer_xml']
+
+        self.assertIn('Page i', footer_xml)
+        self.assertIn('Page 1 of 15', footer_xml)
+        self.assertIn('Page 2 of 15', footer_xml)
+        self.assertEqual(report['validation']['word_PAGE_field_count'], 0)
+        self.assertEqual(report['validation']['source_label_body_residual_count'], 0)
+
+    def test_static_anchored_chapter_prefixed_labels_preserve_parity_positions(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('8-1', REGION_BOTTOM, [520, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('8-2', REGION_BOTTOM, [40, 760, 80, 778], 0, '<page_number>')],
+            [_static_block('8-3', REGION_BOTTOM, [520, 760, 560, 778], 0, '<page_number>')],
+        ])
+
+        report = _static_anchored_docx_report(layout)
+
+        self.assertTrue(report['validation']['safety_gate_passed'])
+        self.assertEqual(report['validation']['right_zone_label_count'], 2)
+        self.assertEqual(report['validation']['left_zone_label_count'], 1)
+        self.assertEqual(report['validation']['mispositioned_static_label_count'], 0)
+
+    def test_static_anchored_variable_footer_family_preserves_page_ownership(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __1', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __2', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __3', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __4', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+        ])
+
+        report = _static_anchored_docx_report(layout)
+
+        self.assertEqual(report['plan']['report']['variable_family_count'], 1)
+        self.assertEqual(
+            report['validation']['variable_family_page_text_mismatch_count'],
+            0)
+        self.assertFalse(report['validation']['last_token_reuse_detected'])
+        expected = [
+            item['expected']
+            for item in report['validation']['variable_family_per_page_expected_actual']
+        ]
+        actual = [
+            item['actual']
+            for item in report['validation']['variable_family_per_page_expected_actual']
+        ]
+        self.assertEqual(expected, actual)
+
+    def test_static_anchored_detects_delayed_every_other_variable_family(self):
+        layout = _static_anchored_layout([
+            [],
+            [],
+            [_static_block('Chapter 5, Formatting Pages: Basics | 3', REGION_BOTTOM, [250, 760, 560, 778], 0)],
+            [],
+            [_static_block('Changing page margins | 5', REGION_BOTTOM, [310, 760, 560, 778], 0)],
+            [],
+            [_static_block('Inserting page breaks | 7', REGION_BOTTOM, [315, 760, 560, 778], 0)],
+            [],
+            [_static_block('Creating headers and footers | 9', REGION_BOTTOM, [290, 760, 560, 778], 0)],
+        ])
+
+        plan = build_static_anchored_plan(layout)
+        family = plan['variable_families'][0]
+
+        self.assertEqual(family['coverage_policy'], 'odd_pages_after_front_matter')
+        self.assertEqual(family['numeric_sequence'], [3, 5, 7, 9])
+        self.assertEqual(family['step'], 2)
+
+    def test_static_anchored_validator_detects_last_token_reuse(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('VAR __1', REGION_BOTTOM, [480, 760, 560, 778], 0)],
+            [_static_block('VAR __2', REGION_BOTTOM, [480, 760, 560, 778], 0)],
+            [_static_block('VAR __3', REGION_BOTTOM, [480, 760, 560, 778], 0)],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'bad-last-token.docx'
+            _write_static_bad_footer_docx(docx_path, 3, 'VAR __3')
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(
+            validation['variable_family_page_text_mismatch_count'],
+            0)
+        self.assertTrue(validation['last_token_reuse_detected'])
+        self.assertIn(
+            'variable_family_last_token_reused',
+            validation['warning_codes'])
+
+    def test_static_anchored_validator_detects_source_label_body_residual(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('Page 1', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('Page 2', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'residual.docx'
+            document = DocxDocument()
+            document.add_paragraph('Body still contains Page 1')
+            apply_static_anchored_plan(document, plan)
+            document.save(str(docx_path))
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(validation['source_label_body_residual_count'], 0)
+        self.assertIn('source_label_body_residual', validation['warning_codes'])
+
+    def test_static_anchored_validator_rejects_word_page_fields_and_placeholders(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('Page 1', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('Page 2', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'placeholder.docx'
+            document = DocxDocument()
+            footer = document.sections[0].footer
+            footer.paragraphs[0].add_run('<PAGE_NUMBER>')
+            docx_utils.add_page_number_field(footer.paragraphs[0])
+            document.save(str(docx_path))
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(validation['word_PAGE_field_count'], 0)
+        self.assertGreater(validation['literal_PAGE_NUMBER_placeholder_count'], 0)
+        self.assertIn('word_page_field_in_static_mode', validation['warning_codes'])
+        self.assertIn('literal_page_number_placeholder', validation['warning_codes'])
+
+    def test_static_anchored_validator_detects_missing_multizone_tabs(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [
+                _static_block('LEFT', REGION_BOTTOM, [40, 760, 120, 778], 0),
+                _static_block('Page 1', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT', REGION_BOTTOM, [480, 760, 560, 778], 2),
+            ],
+            [
+                _static_block('LEFT', REGION_BOTTOM, [40, 760, 120, 778], 0),
+                _static_block('Page 2', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT', REGION_BOTTOM, [480, 760, 560, 778], 2),
+            ],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'collapsed.docx'
+            _write_static_bad_footer_docx(docx_path, 2, 'LEFT Page 1 RIGHT')
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(validation['missing_zone_count'], 0)
+        self.assertIn('static_multizone_footer_zone_missing', validation['warning_codes'])
+
+    def test_static_anchored_validator_detects_mispositioned_static_label(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('Page 1', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+            [_static_block('Page 2', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'centered-label.docx'
+            document = DocxDocument()
+            paragraph = document.sections[0].footer.paragraphs[0]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.add_run('Page 1')
+            document.save(str(docx_path))
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(validation['mispositioned_static_label_count'], 0)
+        self.assertIn('static_label_position_mismatch', validation['warning_codes'])
+
+    def test_static_anchored_mode_selector_recommends_static_for_representative_fixtures(self):
+        _require_docx_header_footer_support(self)
+        layouts = [
+            _static_anchored_layout([
+                [
+                    _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                    _static_block('Page 127', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                    _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+                ],
+                [
+                    _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                    _static_block('Page 128', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                    _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+                ],
+            ]),
+            _static_anchored_layout([
+                [_static_block('Page i', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+                [_static_block('Page 1 of 15', REGION_BOTTOM, [470, 760, 560, 778], 0, '<page_number>')],
+            ]),
+            _static_anchored_layout([
+                [_static_block('8-1', REGION_BOTTOM, [520, 760, 560, 778], 0, '<page_number>')],
+                [_static_block('8-2', REGION_BOTTOM, [40, 760, 80, 778], 0, '<page_number>')],
+            ]),
+            _static_anchored_layout([
+                [_static_block('SPSCC Student Computing Center__Headers and Footers __1', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+                [_static_block('SPSCC Student Computing Center__Headers and Footers __2', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            ]),
+            _static_anchored_layout([
+                [],
+                [],
+                [_static_block('Chapter 5, Formatting Pages: Basics | 3', REGION_BOTTOM, [250, 760, 560, 778], 0)],
+                [],
+                [_static_block('Changing page margins | 5', REGION_BOTTOM, [310, 760, 560, 778], 0)],
+            ]),
+        ]
+
+        recommendations = []
+        for layout in layouts:
+            report = _static_anchored_docx_report(layout)
+            recommendations.append(
+                recommend_static_anchored_mode(report['validation'], report['plan']))
+
+        self.assertEqual(recommendations, ['static_anchored'] * 5)
+
+    def test_static_visual_common_variable_templates_cover_page_and_chapter_labels(self):
+        self.assertEqual(
+            static_common_variable_template(['Page 1 of 15', 'Page 2 of 15'])['stable_suffix'],
+            ' of 15')
+        self.assertEqual(
+            static_common_variable_template(['8-1', '8-2'])['stable_prefix'],
+            '8-')
+        self.assertEqual(
+            static_coverage_info_for_pages([2, 4, 6, 8], 10)['coverage_policy'],
+            'odd_pages_after_front_matter')
+
     def test_header_footer_clipping_avoids_exact_line_spacing_for_large_text(self):
         _require_docx_header_footer_support(self)
         plan = {
@@ -13985,6 +14283,71 @@ def _unsafe_diff_report_for_removed_blocks(pages, removed_keys):
         'retained_candidates': [],
         'safety': {'warnings': []},
     }
+
+
+def _static_anchored_layout(page_blocks):
+    pages = []
+    for page_index, blocks in enumerate(page_blocks):
+        page = {
+            'page_index': page_index,
+            'width': 600,
+            'height': 800,
+            'text_blocks': [],
+        }
+        for block_index, block in enumerate(blocks):
+            item = dict(block)
+            item.setdefault('block_index', block_index)
+            page['text_blocks'].append(item)
+        pages.append(page)
+    return {'page_count': len(pages), 'pages': pages}
+
+
+def _static_block(text, region, bbox, block_index, normalized_text=None):
+    normalized = normalized_text if normalized_text is not None else normalize_text(text)
+    return {
+        'text': text,
+        'normalized_text': normalized,
+        'fingerprint': f'{region}:{block_index}:{normalize_text(text).lower()}',
+        'block_index': block_index,
+        'region': region,
+        'bbox': [float(value) for value in bbox],
+        'style_properties': {
+            'font_name': 'Arial',
+            'font_size': 9.0,
+            'bold': False,
+            'italic': False,
+            'color': '#000000',
+        },
+    }
+
+
+def _static_anchored_docx_report(layout):
+    plan = build_static_anchored_plan(layout)
+    with tempfile.TemporaryDirectory() as tmp:
+        docx_path = Path(tmp) / 'static-anchored.docx'
+        document = DocxDocument()
+        document.add_paragraph('Synthetic body remains.')
+        apply_report = apply_static_anchored_plan(document, plan)
+        document.save(str(docx_path))
+        validation = validate_static_anchored_docx(docx_path, plan)
+        openxml = _read_docx_openxml_parts(docx_path)
+    return {
+        'plan': plan,
+        'apply_report': apply_report,
+        'validation': validation,
+        'openxml': openxml,
+    }
+
+
+def _write_static_bad_footer_docx(docx_path, section_count, footer_text):
+    document = DocxDocument()
+    for _ in range(max(section_count - 1, 0)):
+        document.add_section()
+    for section in document.sections:
+        section.footer.is_linked_to_previous = False
+        paragraph = section.footer.paragraphs[0]
+        paragraph.add_run(footer_text)
+    document.save(str(docx_path))
 
 
 if __name__ == '__main__':
