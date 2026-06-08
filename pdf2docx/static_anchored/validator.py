@@ -151,8 +151,21 @@ def count_literal_placeholders(parts: dict) -> int:
 def source_label_body_residuals(body_text: str, static_items: list) -> dict:
     result = {}
     for text in sorted({clean_visible_text(item.get('text', '')) for item in static_items if item.get('text')}):
-        result[text] = body_text.count(text)
+        result[text] = count_static_label_occurrences(body_text, text)
     return result
+
+
+def count_static_label_occurrences(body_text: str, label_text: str) -> int:
+    """Count label residuals without matching inside ordinary body words."""
+    text = clean_visible_text(label_text)
+    if not text:
+        return 0
+    pattern = (
+        r'(?<![A-Za-z0-9])'
+        f'{re.escape(text)}'
+        r'(?![A-Za-z0-9])'
+    )
+    return len(re.findall(pattern, body_text))
 
 
 def duplicate_header_footer_text(parts: dict, static_items: list) -> dict:

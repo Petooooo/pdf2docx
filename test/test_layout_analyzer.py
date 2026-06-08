@@ -8028,6 +8028,27 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertGreater(validation['source_label_body_residual_count'], 0)
         self.assertIn('source_label_body_residual', validation['warning_codes'])
 
+    def test_static_anchored_validator_ignores_label_inside_body_word(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('Page i', REGION_BOTTOM, [500, 760, 560, 778], 0, '<page_number>')],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'body-word-fragment.docx'
+            document = DocxDocument()
+            document.add_paragraph(
+                'The Odd Page is like the Next Page break.')
+            apply_static_anchored_plan(document, plan)
+            document.save(str(docx_path))
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertEqual(validation['source_label_body_residual_count'], 0)
+        self.assertNotIn(
+            'source_label_body_residual',
+            validation['warning_codes'])
+
     def test_static_anchored_validator_rejects_word_page_fields_and_placeholders(self):
         _require_docx_header_footer_support(self)
         layout = _static_anchored_layout([

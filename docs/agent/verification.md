@@ -8476,3 +8476,203 @@ Result:
 - Public console script exposed: no.
 - Generated local DOCX/reports committed: no.
 - Next step: private/offline wheel packaging smoke using the internal helper.
+
+## Packaging Phase 6B: Static Anchored Wheel Smoke
+
+### Scope
+
+Verified that the internal static anchored helper can be imported and executed
+from an installed wheel in a fresh environment outside the checkout source
+tree.
+
+The default `Converter.convert()` behavior remains unchanged, and no public
+CLI/API or console script was exposed.
+
+### Packaging metadata result
+
+- `setup.py` uses `find_packages(...)`, so `pdf2docx.static_anchored` is
+  included in the wheel.
+- `scripts/internal/static_anchored_convert.py` is source-tree convenience
+  only; top-level `scripts/` is not packaged.
+- Added packaged internal module entrypoint:
+
+```bash
+python -m pdf2docx.static_anchored.cli --input input.pdf --output input.docx --report input.report.json
+```
+
+The source-tree wrapper now delegates to that packaged module. No public
+`console_scripts` entry was added.
+
+### Wheel build and contents
+
+Command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
+```
+
+Result: passed.
+
+Wheel:
+
+```text
+dist/pdf2docx-0.5.13-py3-none-any.whl
+```
+
+Wheel contents check confirmed:
+
+```text
+pdf2docx/static_anchored/__init__.py
+pdf2docx/static_anchored/analyzer.py
+pdf2docx/static_anchored/cli.py
+pdf2docx/static_anchored/converter.py
+pdf2docx/static_anchored/validator.py
+pdf2docx/static_anchored/writer.py
+```
+
+### Fresh wheel install smoke
+
+Fresh venv:
+
+```text
+.venv-static-wheel-smoke/
+```
+
+Install command:
+
+```bash
+.venv-static-wheel-smoke/Scripts/python.exe -m pip install dist/*.whl
+```
+
+Import smoke was run from `/tmp`; imports resolved to installed
+`site-packages`, not the checkout source tree:
+
+```text
+D:\Workspaces\Codex\pdf2docx\.venv-static-wheel-smoke\Lib\site-packages\pdf2docx\__init__.py
+D:\Workspaces\Codex\pdf2docx\.venv-static-wheel-smoke\Lib\site-packages\pdf2docx\static_anchored\__init__.py
+D:\Workspaces\Codex\pdf2docx\.venv-static-wheel-smoke\Lib\site-packages\pdf2docx\static_anchored\cli.py
+```
+
+### Installed static anchored conversion smoke
+
+Command shape:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input <pdf> \
+  --output <docx> \
+  --report <json> \
+  --markdown-report <md> \
+  --overwrite
+```
+
+Committed sample:
+
+- `test/samples/demo.pdf`: `diagnostic_only`,
+  `no_static_source_page_candidates`.
+
+Local sample results from installed wheel:
+
+- `local_samples/input.pdf`: `converted`.
+- `local_samples/input2.pdf`: `converted`.
+- `local_samples/input3.pdf`: `converted`.
+- `local_samples/input4.pdf`: `converted`.
+- `local_samples/input5.pdf`: `converted`.
+- `local_samples/input6_large.pdf`: skipped.
+
+Ignored output root:
+
+```text
+local_reports/static_anchored_wheel_smoke/
+```
+
+Static-mode safety counts for the five local samples:
+
+- `word_PAGE_field_count`: 0.
+- `literal_PAGE_NUMBER_placeholder_count`: 0.
+- `source_label_body_residual_count`: 0.
+- `duplicate_header_footer_text_count`: 0.
+- `missing_zone_count`: 0.
+- `mispositioned_static_label_count`: 0.
+- `variable_family_page_text_mismatch_count`: 0.
+- `last_token_reuse_detected`: `false`.
+
+For `input.pdf`, the first-page title clipping guard remains present in
+OpenXML:
+
+```text
+w:line="700"
+w:lineRule="atLeast"
+```
+
+For `input4.pdf`, per-source-page variable footer ownership remained correct
+for `__1`, `__2`, `__3`, and `__4`.
+
+For `input5.pdf`, delayed/every-other static visual family ownership remained
+valid with no page-text mismatch.
+
+### Smoke fix
+
+The first installed-wheel pass revealed a validator false positive for
+`input2.pdf`: static label `Page i` was counted inside ordinary body text such
+as `Page is`. The fix was intentionally narrow:
+
+- `source_label_body_residuals()` now counts residual labels with
+  alphanumeric boundary guards.
+- A synthetic regression test verifies that `Page i` is not counted inside
+  `Odd Page is...`.
+- The existing positive residual test still detects a true body residual.
+
+This did not change default conversion behavior or expose a public API.
+
+### Wheelhouse smoke
+
+Wheelhouse command:
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pip wheel -w wheelhouse .
+```
+
+Fresh offline-style venv:
+
+```text
+.venv-static-wheelhouse-smoke/
+```
+
+Install command:
+
+```bash
+.venv-static-wheelhouse-smoke/Scripts/python.exe -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Result: passed. Import smoke from `/tmp` resolved to
+`.venv-static-wheelhouse-smoke/.../site-packages`.
+
+Conversion smoke:
+
+- input: `local_samples/input4.pdf`.
+- status: `converted`.
+- all static-mode safety counts above were 0/false as expected.
+
+The wheelhouse contains platform/Python-version-specific dependency wheels
+such as PyMuPDF, NumPy, lxml, and OpenCV. It must be rebuilt for the target
+closed-network Python/platform.
+
+### Commands run
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pip install --upgrade build wheel setuptools
+rm -rf build dist *.egg-info pdf2docx.egg-info
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
+rm -rf .venv-static-wheel-smoke
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m venv .venv-static-wheel-smoke
+.venv-static-wheel-smoke/Scripts/python.exe -m pip install --upgrade pip
+.venv-static-wheel-smoke/Scripts/python.exe -m pip install dist/*.whl
+cd /tmp && /mnt/d/Workspaces/Codex/pdf2docx/.venv-static-wheel-smoke/Scripts/python.exe -c "import pdf2docx, pdf2docx.static_anchored, pdf2docx.static_anchored.cli; print(pdf2docx.__file__); print(pdf2docx.static_anchored.__file__); print(pdf2docx.static_anchored.cli.__file__)"
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pip wheel -w wheelhouse .
+rm -rf .venv-static-wheelhouse-smoke
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m venv .venv-static-wheelhouse-smoke
+.venv-static-wheelhouse-smoke/Scripts/python.exe -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Full regression commands are listed in the final Phase 6B verification run.

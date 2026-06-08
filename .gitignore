@@ -5,6 +5,8 @@ layout.json
 .vscode/
 .venv/
 .venv-wheel-smoke/
+.venv-static-wheel-smoke/
+.venv-static-wheelhouse-smoke/
 local_samples/
 local_reports/
 wheelhouse/

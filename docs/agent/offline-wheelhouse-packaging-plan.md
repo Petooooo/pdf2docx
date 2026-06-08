@@ -155,6 +155,48 @@ python scripts/smoke_convert_pdf_to_docx.py local_samples/input.pdf local_report
 
 Generated DOCX files must remain ignored and must not be committed.
 
+## Static Anchored Internal Smoke
+
+The static source-page anchored fidelity helper is internal-only and not
+enabled by default. It is packaged as an importable module, not as a public
+console script:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input input.pdf \
+  --output input.static.docx \
+  --report input.static.report.json \
+  --markdown-report input.static.report.md \
+  --overwrite
+```
+
+The source-tree convenience wrapper remains available for local development:
+
+```bash
+python -m scripts.internal.static_anchored_convert \
+  --input input.pdf \
+  --output input.static.docx \
+  --report input.static.report.json \
+  --overwrite
+```
+
+When testing an installed wheel, run the module command from outside the
+checkout root and confirm `pdf2docx.__file__`,
+`pdf2docx.static_anchored.__file__`, and
+`pdf2docx.static_anchored.cli.__file__` all point inside the fresh
+environment's `site-packages`.
+
+Static anchored smoke output should report:
+
+- `word_PAGE_field_count == 0`
+- `literal_PAGE_NUMBER_placeholder_count == 0`
+- `source_label_body_residual_count == 0`
+- `duplicate_header_footer_text_count == 0`
+- `missing_zone_count == 0`
+- `mispositioned_static_label_count == 0`
+- `variable_family_page_text_mismatch_count == 0`
+- `last_token_reuse_detected == false`
+
 ## Offline Bundle Layout
 
 A practical closed-network bundle can contain:
@@ -207,3 +249,8 @@ Inside the closed network:
 Phase 6B should repeat the wheelhouse smoke on the actual target Python and
 platform matrix, record dependency wheel availability, and define the offline
 bundle transfer/checksum procedure.
+
+Phase 6B local smoke on Windows Python 3.12 produced
+`dist/pdf2docx-0.5.13-py3-none-any.whl` and a wheelhouse containing platform
+specific dependencies such as PyMuPDF, NumPy, lxml, and OpenCV. Rebuild the
+wheelhouse for each closed-network target Python/platform combination.
