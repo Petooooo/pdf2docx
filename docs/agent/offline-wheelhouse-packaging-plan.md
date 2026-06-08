@@ -254,3 +254,50 @@ Phase 6B local smoke on Windows Python 3.12 produced
 `dist/pdf2docx-0.5.13-py3-none-any.whl` and a wheelhouse containing platform
 specific dependencies such as PyMuPDF, NumPy, lxml, and OpenCV. Rebuild the
 wheelhouse for each closed-network target Python/platform combination.
+
+## Phase 6C Bundle Layout
+
+Phase 6C prepared a closed-network import bundle under an ignored local path:
+
+```text
+local_dist/pdf2docx-static-anchored-bundle/
+```
+
+The bundle contains:
+
+- `wheels/pdf2docx-0.5.13-py3-none-any.whl`
+- `wheelhouse/*.whl`
+- `scripts/install_offline.sh`
+- `scripts/install_offline.ps1`
+- `scripts/smoke_static_anchored.py`
+- `scripts/smoke_static_anchored.sh`
+- `samples/demo.pdf`
+- `README.md`
+- `MANIFEST.json`
+- `SHA256SUMS.txt`
+
+The bundle directory is ignored and must not be committed.
+
+Closed-network install from the bundle root:
+
+```bash
+python -m venv .venv-pdf2docx-static
+.venv-pdf2docx-static/bin/python -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Static anchored quality smoke:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input approved-input.pdf \
+  --output reports/approved-input.static.docx \
+  --report reports/approved-input.static.report.json \
+  --markdown-report reports/approved-input.static.report.md \
+  --overwrite
+```
+
+Phase 6C local bundle smoke installed from only the bundle wheelhouse into a
+fresh venv, imported from `site-packages` outside the checkout, and converted
+`local_samples/input4.pdf` with all static-mode safety counts passing. The
+included `samples/demo.pdf` is an install/import smoke sample only and is
+expected to return `diagnostic_only`.

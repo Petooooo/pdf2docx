@@ -7,8 +7,10 @@ layout.json
 .venv-wheel-smoke/
 .venv-static-wheel-smoke/
 .venv-static-wheelhouse-smoke/
+.venv-closed-bundle-smoke/
 local_samples/
 local_reports/
+local_dist/
 wheelhouse/
 *.whl
 

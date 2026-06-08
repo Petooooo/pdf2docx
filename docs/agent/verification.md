@@ -8676,3 +8676,206 @@ TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m venv .venv-static-wheelhouse-
 ```
 
 Full regression commands are listed in the final Phase 6B verification run.
+
+## Packaging Phase 6C: Closed-Network Import Bundle
+
+### Scope
+
+Prepared a closed-network import bundle for the internal static anchored helper.
+
+The default `Converter.convert()` behavior remains unchanged. No public
+CLI/API, public `console_scripts` entry point, or PyPI publish happened during
+bundle creation.
+
+### Bundle path
+
+Ignored local bundle root:
+
+```text
+local_dist/pdf2docx-static-anchored-bundle/
+```
+
+Created structure:
+
+```text
+wheels/
+wheelhouse/
+scripts/
+samples/
+docs/
+reports/
+README.md
+MANIFEST.json
+SHA256SUMS.txt
+```
+
+The bundle directory is ignored by `.gitignore` and was not committed.
+
+### Bundle contents
+
+Project wheel:
+
+```text
+wheels/pdf2docx-0.5.13-py3-none-any.whl
+```
+
+Dependency wheelhouse:
+
+- 10 wheels total, including the project wheel and runtime dependencies.
+- Platform/Python target: Windows AMD64 / Python 3.12 dependency wheels.
+
+Scripts:
+
+```text
+scripts/install_offline.sh
+scripts/install_offline.ps1
+scripts/smoke_static_anchored.py
+scripts/smoke_static_anchored.sh
+scripts/static_anchored_convert.py
+```
+
+Committed-safe sample:
+
+```text
+samples/demo.pdf
+```
+
+`demo.pdf` is for install/import smoke only and is expected to report
+`diagnostic_only` because it has no static source-page candidates.
+
+### Bundle install command
+
+Manual offline install:
+
+```bash
+python -m venv .venv-pdf2docx-static
+.venv-pdf2docx-static/bin/python -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Windows manual install:
+
+```powershell
+python -m venv .venv-pdf2docx-static
+.venv-pdf2docx-static\Scripts\python.exe -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Bundle helper:
+
+```bash
+scripts/install_offline.sh
+```
+
+### Bundle smoke command
+
+Internal module command:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input input.pdf \
+  --output output.docx \
+  --report output.report.json \
+  --markdown-report output.report.md \
+  --overwrite
+```
+
+Bundle smoke wrapper:
+
+```bash
+python scripts/smoke_static_anchored.py \
+  --input samples/demo.pdf \
+  --output reports/demo.static.docx \
+  --report reports/demo.static.report.json \
+  --allow-diagnostic \
+  --overwrite
+```
+
+### Manifest and checksums
+
+Created:
+
+```text
+local_dist/pdf2docx-static-anchored-bundle/MANIFEST.json
+local_dist/pdf2docx-static-anchored-bundle/SHA256SUMS.txt
+```
+
+`MANIFEST.json` records:
+
+- creation time
+- git commit
+- Python version used
+- platform
+- project wheel name, size, and sha256
+- dependency wheel list with size and sha256
+- internal module command
+- Phase 6B smoke summary
+- Phase 6C bundle smoke summary
+
+Checksum verification:
+
+```bash
+cd local_dist/pdf2docx-static-anchored-bundle
+sha256sum -c SHA256SUMS.txt
+```
+
+Result: passed for all 28 bundle files.
+
+### Closed-bundle install smoke
+
+Fresh venv:
+
+```text
+.venv-closed-bundle-smoke/
+```
+
+Install command:
+
+```bash
+.venv-closed-bundle-smoke/Scripts/python.exe -m pip install --no-index --find-links local_dist/pdf2docx-static-anchored-bundle/wheelhouse pdf2docx
+```
+
+Result: passed.
+
+Import smoke was run from `/tmp`; imports resolved to:
+
+```text
+.venv-closed-bundle-smoke\Lib\site-packages\pdf2docx\__init__.py
+.venv-closed-bundle-smoke\Lib\site-packages\pdf2docx\static_anchored\__init__.py
+.venv-closed-bundle-smoke\Lib\site-packages\pdf2docx\static_anchored\cli.py
+```
+
+Quality conversion smoke:
+
+- input: `local_samples/input4.pdf`
+- output:
+  `local_dist/pdf2docx-static-anchored-bundle/reports/input4.bundle-smoke.docx`
+- status: `converted`
+- warnings: none
+
+Static-mode validation:
+
+- `word_PAGE_field_count`: 0
+- `literal_PAGE_NUMBER_placeholder_count`: 0
+- `source_label_body_residual_count`: 0
+- `duplicate_header_footer_text_count`: 0
+- `missing_zone_count`: 0
+- `mispositioned_static_label_count`: 0
+- `variable_family_page_text_mismatch_count`: 0
+- `last_token_reuse_detected`: `false`
+- `safety_gate_passed`: `true`
+
+Bundle smoke runner:
+
+- input: `samples/demo.pdf`
+- status: `diagnostic_only`
+- warnings: `no_static_source_page_candidates`
+- result: accepted with `--allow-diagnostic`.
+
+### Remaining closed-network steps
+
+- Rebuild the wheelhouse for each target Python/platform combination.
+- Transfer the bundle with `MANIFEST.json` and `SHA256SUMS.txt`.
+- Verify checksums in the closed network.
+- Install into a fresh venv with `--no-index --find-links wheelhouse`.
+- Run import smoke from outside any source checkout.
+- Run static anchored conversion smoke on an approved representative PDF.
+- Perform visual QA in Word/LibreOffice or an approved renderer.
