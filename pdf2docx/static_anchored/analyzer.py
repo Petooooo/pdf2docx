@@ -26,13 +26,17 @@ def build_static_anchored_plan(layout: dict) -> dict:
     variable_records = variable_family_records(variable_families)
     static_items = static_labels + variable_records
     source_map = build_source_page_layout_map(source_analysis)
-    source_line_groups = build_source_line_groups(
+    migrated_source_items = build_migrated_source_items(
         source_analysis,
         source_map,
         static_items)
+    source_line_groups = build_source_line_groups(
+        source_analysis,
+        source_map,
+        migrated_source_items)
     candidates = static_filter_candidates(
         source_analysis,
-        static_items,
+        migrated_source_items,
         source_analysis.get('page_count', 0))
     report = {
         'mode': 'static_anchored',
@@ -40,6 +44,7 @@ def build_static_anchored_plan(layout: dict) -> dict:
         'static_label_count': len(static_labels),
         'variable_family_count': len(variable_families),
         'variable_record_count': len(variable_records),
+        'migrated_source_item_count': len(migrated_source_items),
         'filter_candidate_count': len(candidates),
         'detected_policy_types': source_analysis.get('detected_policy_types', []),
         'detected_coverage_policies': source_analysis.get('detected_coverage_policies', []),
@@ -53,6 +58,7 @@ def build_static_anchored_plan(layout: dict) -> dict:
         'variable_families': variable_families,
         'variable_records': variable_records,
         'static_items': static_items,
+        'migrated_source_items': migrated_source_items,
         'source_line_groups': source_line_groups,
         'filter_candidates': candidates,
         'report': report,
@@ -606,6 +612,54 @@ def build_source_page_layout_map(source_analysis: dict) -> dict:
     }
 
 
+def build_migrated_source_items(source_analysis: dict, source_map: dict, static_items: list) -> list:
+    """Return the exact source items that the static writer migrates."""
+    items_by_page = labels_by_source_page(static_items)
+    page_count = int(source_analysis.get('page_count') or source_map.get('source_page_count') or 0)
+    pages = source_map.get('pages', []) or [
+        {'source_page_index': index}
+        for index in range(page_count)
+    ]
+    migrated = []
+    seen = set()
+    for page_entry in pages[:page_count]:
+        page_index = page_entry.get('source_page_index', 0)
+        for family_key, target_part in (
+                ('selected_header_families', 'header'),
+                ('selected_footer_families', 'footer')):
+            for family in families_for_page(source_analysis.get(family_key, []), page_index):
+                observation = family_observation_for_page(family, page_index)
+                item = static_item_from_observation(
+                    family.get('text', ''),
+                    observation,
+                    target_part,
+                    'family')
+                append_unique_migrated_item(migrated, seen, item)
+        for label in items_by_page.get(page_index, []):
+            item = static_item_from_observation(
+                label.get('text', ''),
+                label,
+                label.get('target_part', ''),
+                'static_label')
+            append_unique_migrated_item(migrated, seen, item)
+    return sorted(migrated, key=observation_sort_key)
+
+
+def append_unique_migrated_item(items: list, seen: set, item: dict):
+    ref = item.get('source_ref') or {}
+    key = (
+        ref.get('page_index'),
+        ref.get('block_index'),
+        ref.get('region'),
+        clean_visible_text(item.get('text', '')),
+        item.get('target_part', ''),
+    )
+    if key in seen or not item.get('text'):
+        return
+    seen.add(key)
+    items.append(item)
+
+
 def build_source_line_groups(source_analysis: dict, source_map: dict, static_items: list) -> list:
     items_by_page = labels_by_source_page(static_items)
     groups = []
@@ -685,15 +739,15 @@ def static_filter_candidate(region: str, role: str, records: list, page_count: i
             f'static_candidate_role:{role}',
         ],
         'filter_fingerprints': sorted({
-            item.get('fingerprint', '')
+            item.get('fingerprint', '') or (item.get('source_ref') or {}).get('fingerprint', '')
             for item in records
-            if item.get('fingerprint')
+            if item.get('fingerprint') or (item.get('source_ref') or {}).get('fingerprint')
         }),
         'filter_block_refs': [
-            source_ref_from_observation(item)
+            item.get('source_ref') or source_ref_from_observation(item)
             for item in records
         ],
-        'metadata_override': metadata_from_observation(first),
+        'metadata_override': metadata_from_observation(first.get('observation') or first),
         'reason': 'Internal static source-page visual fidelity candidate.',
     }
 
@@ -735,7 +789,7 @@ def build_static_filtering_config(plan: dict, LayoutAnalyzer):
 def recommend_static_anchored_mode(validation: dict, plan: dict) -> str:
     if not validation.get('safety_gate_passed'):
         return 'diagnostic_only'
-    if plan.get('static_items') or plan.get('variable_families'):
+    if plan.get('migrated_source_items') or plan.get('static_items') or plan.get('variable_families'):
         return 'static_anchored'
     return 'existing_auto_reviewed'
 
@@ -754,12 +808,17 @@ def decision_for_candidate(candidate: dict) -> dict:
 def static_candidate_role(record: dict) -> str:
     family_type = record.get('family_type', '')
     region = record.get('region', '')
+    role = record.get('role', '')
+    if role == ROLE_PAGE_NUMBER:
+        return ROLE_PAGE_NUMBER
     if family_type == 'variable_text_footer':
         return ROLE_FOOTER
     if family_type == 'variable_text_header':
         return ROLE_HEADER
-    if region == REGION_TOP and record.get('role') == ROLE_HEADER:
+    if region == REGION_TOP:
         return ROLE_HEADER
+    if region == REGION_BOTTOM:
+        return ROLE_FOOTER
     return ROLE_PAGE_NUMBER
 
 
@@ -791,6 +850,7 @@ def family_observation_for_page(family: dict, page_index: int) -> dict:
 
 def static_item_from_observation(text: str, observation: dict, target_part: str, source_kind: str) -> dict:
     x = observation.get('x_center_normalized', 0.0)
+    ref = observation.get('source_ref') or source_ref_from_observation(observation)
     return {
         'text': clean_visible_text(text),
         'observation': observation,
@@ -802,7 +862,22 @@ def static_item_from_observation(text: str, observation: dict, target_part: str,
         'source_kind': source_kind,
         'family_id': observation.get('family_id', ''),
         'family_type': observation.get('family_type', ''),
-        'source_ref': observation.get('source_ref') or source_ref_from_observation(observation),
+        'source_ref': ref,
+        'source_page_index': ref.get('page_index'),
+        'source_page_number_one_based': (
+            ref.get('page_index') + 1 if ref.get('page_index') is not None else None),
+        'block_index': ref.get('block_index'),
+        'region': ref.get('region', ''),
+        'role': observation.get('role', ''),
+        'fingerprint': ref.get('fingerprint', ''),
+        'bbox': observation.get('bbox', []),
+        'x_center_normalized': x,
+        'y_center_normalized': observation.get('y_center_normalized', 0.0),
+        'font_name': observation.get('font_name', ''),
+        'font_size': observation.get('font_size'),
+        'bold': observation.get('bold'),
+        'italic': observation.get('italic'),
+        'color': observation.get('color'),
     }
 
 

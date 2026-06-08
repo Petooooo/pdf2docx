@@ -8,7 +8,13 @@ from collections import defaultdict
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from .analyzer import clean_visible_text, zone_from_x
+from .analyzer import (
+    build_migrated_source_items,
+    build_source_page_layout_map,
+    clean_visible_text,
+    looks_like_explicit_page_label,
+    zone_from_x,
+)
 
 
 W_NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
@@ -17,7 +23,7 @@ RID = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
 W_TYPE = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type'
 
 
-def validate_static_anchored_docx(docx_path, plan: dict) -> dict:
+def validate_static_anchored_docx(docx_path, plan: dict, conversion_report: dict = None) -> dict:
     """Validate core static anchored safety invariants using DOCX OpenXML."""
     docx_path = Path(docx_path)
     if not docx_path.exists() or not zipfile.is_zipfile(str(docx_path)):
@@ -29,7 +35,9 @@ def validate_static_anchored_docx(docx_path, plan: dict) -> dict:
         }
     parts = read_docx_parts(docx_path)
     body_text, header_text, footer_text = visible_text_parts(parts)
+    body_paragraphs = docx_body_paragraph_texts(parts)
     static_items = plan.get('static_items') or []
+    migrated_items = migrated_source_items_from_plan(plan)
     source_line_groups = plan.get('source_line_groups') or []
     source_analysis = plan.get('source_analysis') or {}
     variable_records = [
@@ -38,14 +46,16 @@ def validate_static_anchored_docx(docx_path, plan: dict) -> dict:
     ]
     word_field_count = count_page_fields(parts)
     placeholder_count = count_literal_placeholders(parts)
-    residuals = source_label_body_residuals(body_text, static_items)
+    residuals = source_label_body_residuals(body_text, migrated_items, body_paragraphs)
+    residual_details = body_residual_details(body_text, migrated_items, body_paragraphs)
+    accounting = migrated_source_ref_accounting(migrated_items, conversion_report)
     multi_zone = multi_zone_validation(docx_path, source_line_groups)
     label_positions = static_label_position_validation(docx_path, static_items)
     variable_ownership = variable_family_page_ownership_validation(
         docx_path,
         source_analysis,
         variable_records)
-    duplicate = duplicate_header_footer_text(parts, static_items)
+    duplicate = duplicate_header_footer_text(parts, migrated_items)
     warning_codes = []
     if word_field_count:
         warning_codes.append('word_page_field_in_static_mode')
@@ -53,6 +63,8 @@ def validate_static_anchored_docx(docx_path, plan: dict) -> dict:
         warning_codes.append('literal_page_number_placeholder')
     if sum(residuals.values()):
         warning_codes.append('source_label_body_residual')
+    if accounting.get('missing_removed_source_refs'):
+        warning_codes.append('migrated_source_ref_not_removed')
     if duplicate['duplicate_header_footer_text_count']:
         warning_codes.append('duplicate_header_footer_text')
     if multi_zone['missing_zone_count']:
@@ -75,6 +87,9 @@ def validate_static_anchored_docx(docx_path, plan: dict) -> dict:
         'literal_PAGE_NUMBER_placeholder_count': placeholder_count,
         'source_label_body_residual_count': sum(residuals.values()),
         'source_labels_remaining_in_body': residuals,
+        'body_residual_count': sum(residuals.values()),
+        'body_residual_texts': residual_details,
+        **accounting,
         'duplicate_header_footer_text_count': duplicate['duplicate_header_footer_text_count'],
         'duplicate_header_footer_text_examples': duplicate['duplicate_header_footer_text_examples'],
         'body_text_loss_count': 0,
@@ -148,10 +163,10 @@ def count_literal_placeholders(parts: dict) -> int:
         text.count('<PAGE NUMBER>'))
 
 
-def source_label_body_residuals(body_text: str, static_items: list) -> dict:
+def source_label_body_residuals(body_text: str, static_items: list, body_paragraphs: list = None) -> dict:
     result = {}
     for text in sorted({clean_visible_text(item.get('text', '')) for item in static_items if item.get('text')}):
-        result[text] = count_static_label_occurrences(body_text, text)
+        result[text] = count_migrated_text_occurrences(body_text, text, body_paragraphs)
     return result
 
 
@@ -166,6 +181,123 @@ def count_static_label_occurrences(body_text: str, label_text: str) -> int:
         r'(?![A-Za-z0-9])'
     )
     return len(re.findall(pattern, body_text))
+
+
+def count_migrated_text_occurrences(body_text: str, label_text: str, body_paragraphs: list = None) -> int:
+    """Count migrated source residuals while avoiding short-label false positives."""
+    text = clean_visible_text(label_text)
+    if not text:
+        return 0
+    if residual_requires_boundary_matching(text):
+        return count_static_label_occurrences(body_text, text)
+    normalized_text = normalize_residual_text(text)
+    if not normalized_text:
+        return 0
+    return sum(
+        1 for paragraph in body_paragraphs or []
+        if normalize_residual_text(paragraph).lower() == normalized_text.lower())
+
+
+def residual_requires_boundary_matching(text: str) -> bool:
+    value = clean_visible_text(text)
+    return len(value) <= 16 or looks_like_explicit_page_label(value)
+
+
+def normalize_residual_text(text: str) -> str:
+    return re.sub(r'\s+', ' ', clean_visible_text(text)).strip()
+
+
+def body_residual_details(body_text: str, migrated_items: list, body_paragraphs: list = None) -> list:
+    details = []
+    seen = set()
+    for item in migrated_items or []:
+        text = clean_visible_text(item.get('text', ''))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        count = count_migrated_text_occurrences(body_text, text, body_paragraphs)
+        if not count:
+            continue
+        details.append({
+            'text': trim_report_text(text),
+            'occurrence_count': count,
+            'match_mode': (
+                'boundary_aware'
+                if residual_requires_boundary_matching(text)
+                else 'normalized_exact'),
+            'source_refs': [
+                dict(record.get('source_ref') or {})
+                for record in migrated_items
+                if clean_visible_text(record.get('text', '')) == text
+            ][:12],
+        })
+    return details
+
+
+def migrated_source_items_from_plan(plan: dict) -> list:
+    items = plan.get('migrated_source_items') or []
+    if items:
+        return items
+    source_analysis = plan.get('source_analysis') or {}
+    source_map = plan.get('source_page_layout_map') or build_source_page_layout_map(source_analysis)
+    return build_migrated_source_items(
+        source_analysis,
+        source_map,
+        plan.get('static_items') or [])
+
+
+def docx_body_paragraph_texts(parts: dict) -> list:
+    return [
+        paragraph.get('text', '')
+        for paragraph in paragraph_layouts_with_tabs(parts.get('word/document.xml', ''))
+        if paragraph.get('text')
+    ]
+
+
+def migrated_source_ref_accounting(migrated_items: list, conversion_report: dict = None) -> dict:
+    planned = sorted({
+        source_ref_key(item.get('source_ref') or {})
+        for item in migrated_items or []
+        if valid_source_ref(item.get('source_ref') or {})
+    })
+    removed_refs = sorted(removed_source_ref_keys(conversion_report or {}))
+    missing = sorted(set(planned) - set(removed_refs)) if conversion_report else []
+    return {
+        'planned_migrated_source_ref_count': len(planned),
+        'removed_source_ref_count': len(removed_refs) if conversion_report else None,
+        'missing_removed_source_refs': [
+            {'page_index': page, 'block_index': block, 'region': region}
+            for page, block, region in missing
+        ],
+        'missing_removed_source_ref_count': len(missing),
+    }
+
+
+def removed_source_ref_keys(conversion_report: dict) -> set:
+    keys = set()
+    internal = conversion_report.get('internal_filtered_parse_report') or {}
+    for page in internal.get('removed_objects_by_page', []) or []:
+        page_index = page.get('page_index')
+        for item in page.get('objects', []) or []:
+            region = item.get('region', '')
+            if page_index is None:
+                page_index = item.get('page_index')
+            block_index = item.get('block_index', item.get('object_index'))
+            if page_index is None or block_index is None or not region:
+                continue
+            keys.add((page_index, block_index, region))
+    return keys
+
+
+def source_ref_key(ref: dict):
+    return (ref.get('page_index'), ref.get('block_index'), ref.get('region', ''))
+
+
+def valid_source_ref(ref: dict) -> bool:
+    return (
+        ref.get('page_index') is not None and
+        ref.get('block_index') is not None and
+        bool(ref.get('region')))
 
 
 def duplicate_header_footer_text(parts: dict, static_items: list) -> dict:

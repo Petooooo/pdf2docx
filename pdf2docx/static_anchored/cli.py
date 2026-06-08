@@ -20,7 +20,10 @@ def build_parser():
         description='Internal static anchored PDF-to-DOCX conversion helper.')
     parser.add_argument('--input', required=True, help='Input PDF path.')
     parser.add_argument('--output', required=True, help='Output DOCX path.')
-    parser.add_argument('--report', required=True, help='Output JSON report path.')
+    parser.add_argument(
+        '--report',
+        default='',
+        help='Optional output JSON report path.')
     parser.add_argument(
         '--markdown-report',
         default='',
@@ -42,7 +45,10 @@ def main(argv=None):
         write_markdown_report(Path(args.markdown_report), report)
     print(f"status: {report.get('status')}")
     print(f"output: {args.output}")
-    print(f"report: {args.report}")
+    if args.report:
+        print(f"report: {args.report}")
+    if args.markdown_report:
+        print(f"markdown_report: {args.markdown_report}")
     if report.get('warning_codes'):
         print('warnings: ' + ', '.join(report.get('warning_codes', [])))
     return 0 if report.get('status') == 'converted' else 1

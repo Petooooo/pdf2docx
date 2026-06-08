@@ -9153,3 +9153,180 @@ and wheelhouse offline smoke successfully. The existing copied closed-network
 bundle is intact by checksum. If a Linux/Python 3.10 closed-network bundle is
 needed, create it as a separate ignored bundle from the regenerated
 `wheelhouse/`; otherwise no bundle regeneration was required in this recheck.
+
+## Static Anchored Body Residual Fix
+
+Date: 2026-06-08.
+
+### Trigger
+
+Manual inspection of the initial-PC static anchored DOCX outputs found that
+some text written into DOCX header/footer parts was still present in the DOCX
+body. Treating `status: converted` as success was unsafe while migrated source
+text could remain in `word/document.xml`.
+
+### Root cause
+
+The static anchored writer migrated both selected repeated header/footer family
+items and static/variable labels, but the filtered-parse config was built only
+from `static_items` (`static_labels + variable_records`). As a result:
+
+- static labels and variable footer families were removed from the body;
+- selected repeated header/footer family text could be written to header/footer
+  parts while its source raw block remained in the body;
+- validation only counted static-label residuals, so repeated header/footer
+  family residuals could pass as `converted`.
+
+An ignored investigation report was generated:
+
+```text
+local_reports/static_anchored_body_residual_fix/body-residual-investigation.json
+local_reports/static_anchored_body_residual_fix/body-residual-investigation.md
+```
+
+Existing initial-PC outputs showed missing filtering refs and body residuals
+for `input.pdf`, `input2.pdf`, and `input3.pdf`; `input4.pdf` and `input5.pdf`
+were already covered because they used variable family records.
+
+### Fix summary
+
+- Added a single `migrated_source_items` plan list for the exact source items
+  the static anchored writer migrates.
+- Built static filtering candidates from `migrated_source_items`, so selected
+  header/footer family refs, multi-zone left/center/right items, page labels,
+  and variable family per-page refs all reach the internal filtered-parse config.
+- Added validator accounting:
+  - `planned_migrated_source_ref_count`
+  - `removed_source_ref_count`
+  - `missing_removed_source_refs`
+  - `missing_removed_source_ref_count`
+  - `body_residual_texts`
+  - `body_residual_count`
+- Strengthened body residual validation to check all migrated source text, not
+  only labels. Short page labels use boundary-aware matching; longer visual
+  header/footer text uses normalized paragraph/line-exact matching to avoid
+  false positives such as body titles containing a footer substring.
+- Made internal static anchored CLI reports optional. This now works:
+
+```bash
+python -m pdf2docx.static_anchored.cli --input input.pdf --output output.docx
+```
+
+JSON and Markdown reports are written only when `--report` and
+`--markdown-report` are explicitly provided.
+
+### Commands run
+
+```bash
+git status --short --ignored
+git log --oneline -8
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "static_anchored or static_visual or source_page_fidelity or variable_family or multi_zone or delayed"
+rm -rf local_reports/static_anchored_body_residual_fix/recheck
+mkdir -p local_reports/static_anchored_body_residual_fix/recheck
+for name in input input2 input3 input4 input5; do
+  .venv/bin/python -m pdf2docx.static_anchored.cli \
+    --input local_samples/${name}.pdf \
+    --output local_reports/static_anchored_body_residual_fix/recheck/${name}.static.docx \
+    --report local_reports/static_anchored_body_residual_fix/recheck/${name}.static.report.json \
+    --markdown-report local_reports/static_anchored_body_residual_fix/recheck/${name}.static.report.md \
+    --overwrite
+done
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile \
+  pdf2docx/static_anchored/__init__.py \
+  pdf2docx/static_anchored/analyzer.py \
+  pdf2docx/static_anchored/writer.py \
+  pdf2docx/static_anchored/validator.py \
+  pdf2docx/static_anchored/converter.py \
+  pdf2docx/static_anchored/cli.py \
+  scripts/internal/static_anchored_convert.py \
+  pdf2docx/text/TextBlock.py \
+  test/test_layout_analyzer.py
+git diff --check
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+rm -rf build dist wheelhouse *.egg-info pdf2docx.egg-info
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pip wheel -w wheelhouse .
+```
+
+Fresh smoke venv creation used `virtualenv` because system `venv` still lacks
+`ensurepip` on this PC.
+
+### Local sample recheck
+
+Ignored summary files:
+
+```text
+local_reports/static_anchored_body_residual_fix/recheck-summary.json
+local_reports/static_anchored_body_residual_fix/recheck-summary.md
+```
+
+Results:
+
+| sample | status | body residual count | missing removed source refs | required static-mode counts |
+| --- | ---: | ---: | ---: | --- |
+| `input.pdf` | `converted` | 0 | 0 | passed |
+| `input2.pdf` | `converted` | 0 | 0 | passed |
+| `input3.pdf` | `converted` | 0 | 0 | passed |
+| `input4.pdf` | `converted` | 0 | 0 | passed |
+| `input5.pdf` | `converted` | 0 | 0 | passed |
+
+For all five samples:
+
+- `word_PAGE_field_count == 0`
+- `literal_PAGE_NUMBER_placeholder_count == 0`
+- `source_label_body_residual_count == 0`
+- `duplicate_header_footer_text_count == 0`
+- `missing_zone_count == 0`
+- `mispositioned_static_label_count == 0`
+- `variable_family_page_text_mismatch_count == 0`
+- `last_token_reuse_detected == false`
+- migrated text was present in DOCX header/footer parts
+- migrated source refs were removed from the filtered body path
+
+### Test results
+
+- Focused static anchored tests: `20 passed, 415 deselected`.
+- Full layout analyzer tests: `435 passed, 47 subtests passed`.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+- Existing conversion tests: `5 passed`.
+
+### Wheel smoke
+
+Regenerated:
+
+```text
+dist/pdf2docx-0.5.13-py3-none-any.whl
+wheelhouse/
+```
+
+The wheel contains `pdf2docx/static_anchored/*`.
+
+Installed-wheel smoke:
+
+- imported from `.venv-static-wheel-smoke/.../site-packages` outside the source
+  checkout;
+- converted `input4.pdf`;
+- `status: converted`;
+- `body_residual_count == 0`;
+- `missing_removed_source_ref_count == 0`.
+
+Wheelhouse offline smoke:
+
+- installed with `--no-index --find-links wheelhouse`;
+- imported from `.venv-static-wheelhouse-smoke/.../site-packages`;
+- converted `input5.pdf`;
+- `status: converted`;
+- `body_residual_count == 0`;
+- `missing_removed_source_ref_count == 0`.
+
+### Public/default behavior
+
+- Default `Converter.convert()` behavior was not changed.
+- No public CLI/API was exposed.
+- Static anchored remains internal-only.
+- The internal CLI still performs static anchored conversion only; report output
+  is now optional.
+- Ignored local samples, reports, wheel artifacts, wheelhouse artifacts, and
+  smoke venvs were not committed.

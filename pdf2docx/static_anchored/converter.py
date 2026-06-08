@@ -78,7 +78,7 @@ def convert_static_anchored_pdf(
             return report
         temp_output = tmp / f'static-{output_docx.name}'
         document.save(str(temp_output))
-        validation = validate_static_anchored_docx(temp_output, plan)
+        validation = validate_static_anchored_docx(temp_output, plan, conversion)
         report['validation'] = validation
         report['warning_codes'].extend(validation.get('warning_codes', []))
         if not validation.get('safety_gate_passed'):
@@ -127,6 +127,7 @@ def convert_filtered_body(input_pdf: Path, output_docx: Path, password, config: 
             'status': 'converted' if applied and output_docx.exists() else 'blocked',
             'applied_to_parse': applied,
             'internal_filtered_parse_summary': internal_report.get('summary', {}),
+            'internal_filtered_parse_report': internal_report,
             'warning_codes': warning_codes,
             'size_bytes': output_docx.stat().st_size if output_docx.exists() else 0,
         }

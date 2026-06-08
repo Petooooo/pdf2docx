@@ -7,13 +7,16 @@ from collections import Counter
 from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+import pdf2docx.static_anchored.cli as static_anchored_cli
 from pdf2docx.common.share import TextAlignment
 from pdf2docx.static_anchored import (
     apply_static_anchored_plan,
     build_static_anchored_plan,
+    convert_static_anchored_pdf,
     recommend_static_anchored_mode,
     validate_static_anchored_docx,
 )
@@ -7889,6 +7892,37 @@ class TestLayoutAnalyzer(unittest.TestCase):
             report['validation']['multi_zone_source_group_count'],
             2)
 
+    def test_static_anchored_multizone_filter_refs_cover_all_footer_items(self):
+        layout = _static_anchored_layout([
+            [
+                _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                _static_block('Page 127', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+            ],
+            [
+                _static_block('LEFT FOOTER', REGION_BOTTOM, [40, 760, 140, 778], 0),
+                _static_block('Page 128', REGION_BOTTOM, [260, 760, 340, 778], 1, '<page_number>'),
+                _static_block('RIGHT FOOTER', REGION_BOTTOM, [460, 760, 560, 778], 2),
+            ],
+        ])
+
+        plan = build_static_anchored_plan(layout)
+        refs = [
+            ref
+            for candidate in plan['filter_candidates']
+            for ref in candidate.get('filter_block_refs', [])
+        ]
+        ref_keys = {
+            (ref.get('page_index'), ref.get('block_index'), ref.get('region'))
+            for ref in refs
+        }
+
+        self.assertEqual(plan['report']['migrated_source_item_count'], 6)
+        self.assertEqual(len(ref_keys), 6)
+        self.assertEqual(
+            sorted(candidate['proposed_role'] for candidate in plan['filter_candidates']),
+            ['footer', 'page_number'])
+
     def test_static_anchored_left_right_footer_uses_right_tab_for_label(self):
         _require_docx_header_footer_support(self)
         layout = _static_anchored_layout([
@@ -7925,6 +7959,38 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertIn('Page 2 of 15', footer_xml)
         self.assertEqual(report['validation']['word_PAGE_field_count'], 0)
         self.assertEqual(report['validation']['source_label_body_residual_count'], 0)
+
+    def test_static_anchored_conversion_removes_migrated_text_from_body(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pdf_path = tmp_path / 'static-source.pdf'
+            output_docx = tmp_path / 'static-source.docx'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            report = convert_static_anchored_pdf(
+                pdf_path,
+                output_docx,
+                overwrite=True)
+            openxml = _read_docx_openxml_parts(output_docx)
+            metrics = _read_docx_file_metrics(output_docx)
+
+        self.assertEqual(report['status'], 'converted')
+        self.assertIn('SYNTHETIC REPORT HEADER', openxml['header_xml'])
+        self.assertIn('SYNTHETIC REPORT FOOTER', openxml['footer_xml'])
+        self.assertNotIn('SYNTHETIC REPORT HEADER', openxml['body_xml'])
+        self.assertNotIn('SYNTHETIC REPORT FOOTER', openxml['body_xml'])
+        self.assertNotIn('Page 1 of 4', openxml['body_xml'])
+        self.assertIn(
+            'the body region text must remain after reviewed filtering',
+            metrics['all_text'])
+        self.assertEqual(report['validation']['body_residual_count'], 0)
+        self.assertEqual(
+            report['validation']['missing_removed_source_ref_count'],
+            0)
+        self.assertGreater(
+            report['validation']['planned_migrated_source_ref_count'],
+            0)
 
     def test_static_anchored_chapter_prefixed_labels_preserve_parity_positions(self):
         _require_docx_header_footer_support(self)
@@ -7966,6 +8032,28 @@ class TestLayoutAnalyzer(unittest.TestCase):
             for item in report['validation']['variable_family_per_page_expected_actual']
         ]
         self.assertEqual(expected, actual)
+
+    def test_static_anchored_variable_filter_refs_cover_per_page_items(self):
+        layout = _static_anchored_layout([
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __1', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __2', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __3', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+            [_static_block('SPSCC Student Computing Center__Headers and Footers __4', REGION_BOTTOM, [220, 760, 560, 778], 0)],
+        ])
+
+        plan = build_static_anchored_plan(layout)
+        refs = [
+            ref
+            for candidate in plan['filter_candidates']
+            for ref in candidate.get('filter_block_refs', [])
+        ]
+
+        self.assertEqual(plan['report']['variable_record_count'], 4)
+        self.assertEqual(plan['report']['migrated_source_item_count'], 4)
+        self.assertEqual(len(refs), 4)
+        self.assertEqual(
+            sorted(ref.get('page_index') for ref in refs),
+            [0, 1, 2, 3])
 
     def test_static_anchored_detects_delayed_every_other_variable_family(self):
         layout = _static_anchored_layout([
@@ -8028,6 +8116,29 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertGreater(validation['source_label_body_residual_count'], 0)
         self.assertIn('source_label_body_residual', validation['warning_codes'])
 
+    def test_static_anchored_validator_detects_long_migrated_body_residual(self):
+        _require_docx_header_footer_support(self)
+        layout = _static_anchored_layout([
+            [_static_block('SYNTHETIC LONG FOOTER TEXT FOR RESIDUAL CHECK', REGION_BOTTOM, [40, 760, 420, 778], 0)],
+            [_static_block('SYNTHETIC LONG FOOTER TEXT FOR RESIDUAL CHECK', REGION_BOTTOM, [40, 760, 420, 778], 0)],
+        ])
+        plan = build_static_anchored_plan(layout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = Path(tmp) / 'long-residual.docx'
+            document = DocxDocument()
+            document.add_paragraph(
+                'SYNTHETIC LONG FOOTER TEXT FOR RESIDUAL CHECK')
+            apply_static_anchored_plan(document, plan)
+            document.save(str(docx_path))
+            validation = validate_static_anchored_docx(docx_path, plan)
+
+        self.assertGreater(validation['body_residual_count'], 0)
+        self.assertEqual(
+            validation['body_residual_texts'][0]['match_mode'],
+            'normalized_exact')
+        self.assertIn('source_label_body_residual', validation['warning_codes'])
+
     def test_static_anchored_validator_ignores_label_inside_body_word(self):
         _require_docx_header_footer_support(self)
         layout = _static_anchored_layout([
@@ -8070,6 +8181,67 @@ class TestLayoutAnalyzer(unittest.TestCase):
         self.assertGreater(validation['literal_PAGE_NUMBER_placeholder_count'], 0)
         self.assertIn('word_page_field_in_static_mode', validation['warning_codes'])
         self.assertIn('literal_page_number_placeholder', validation['warning_codes'])
+
+    def test_static_anchored_cli_without_report_writes_only_docx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_docx = tmp_path / 'only.docx'
+
+            def fake_convert(input_pdf, output_docx_path, report_path=None, password=None, overwrite=False):
+                Path(output_docx_path).write_bytes(b'fake docx')
+                self.assertFalse(report_path)
+                return {'status': 'converted', 'warning_codes': []}
+
+            with mock.patch.object(
+                    static_anchored_cli,
+                    'convert_static_anchored_pdf',
+                    side_effect=fake_convert):
+                rc = static_anchored_cli.main([
+                    '--input', str(tmp_path / 'in.pdf'),
+                    '--output', str(output_docx),
+                ])
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(output_docx.exists())
+            self.assertEqual(list(tmp_path.glob('*.json')), [])
+            self.assertEqual(list(tmp_path.glob('*.md')), [])
+
+    def test_static_anchored_cli_writes_reports_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_docx = tmp_path / 'with-report.docx'
+            json_report = tmp_path / 'with-report.json'
+            markdown_report = tmp_path / 'with-report.md'
+
+            def fake_convert(input_pdf, output_docx_path, report_path=None, password=None, overwrite=False):
+                Path(output_docx_path).write_bytes(b'fake docx')
+                Path(report_path).write_text(
+                    json.dumps({'status': 'converted'}),
+                    encoding='utf-8')
+                return {
+                    'status': 'converted',
+                    'input_pdf': input_pdf,
+                    'output_docx': output_docx_path,
+                    'warning_codes': [],
+                    'plan_summary': {},
+                    'validation': {},
+                }
+
+            with mock.patch.object(
+                    static_anchored_cli,
+                    'convert_static_anchored_pdf',
+                    side_effect=fake_convert):
+                rc = static_anchored_cli.main([
+                    '--input', str(tmp_path / 'in.pdf'),
+                    '--output', str(output_docx),
+                    '--report', str(json_report),
+                    '--markdown-report', str(markdown_report),
+                ])
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(output_docx.exists())
+            self.assertTrue(json_report.exists())
+            self.assertTrue(markdown_report.exists())
 
     def test_static_anchored_validator_detects_missing_multizone_tabs(self):
         _require_docx_header_footer_support(self)

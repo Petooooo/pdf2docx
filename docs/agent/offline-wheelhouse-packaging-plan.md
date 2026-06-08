@@ -362,3 +362,56 @@ Commit policy:
 - `local_samples/`, `local_reports/`, `local_dist/`, `dist/`, `wheelhouse/`,
   `.venv*`, generated DOCX files, generated reports, and caches remain ignored
   and must not be committed.
+
+## Static Anchored Body Residual Fix Packaging Notes
+
+On 2026-06-08 a release-blocking static anchored body residual issue was fixed
+and the initial-PC wheel/wheelhouse artifacts were regenerated.
+
+Packaging-impacting behavior:
+
+- The internal module CLI remains static anchored only.
+- Reports are optional:
+
+```bash
+python -m pdf2docx.static_anchored.cli --input approved-input.pdf --output approved-input.static.docx
+```
+
+- JSON/Markdown reports are generated only when explicitly requested:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input approved-input.pdf \
+  --output reports/approved-input.static.docx \
+  --report reports/approved-input.static.report.json \
+  --markdown-report reports/approved-input.static.report.md \
+  --overwrite
+```
+
+Validation-impacting behavior:
+
+- Static anchored conversion now builds filtering refs from the full migrated
+  source item plan, not only static labels and variable records.
+- The validator now fails closed if any planned migrated source ref is missing
+  from the removed raw-object set.
+- The validator now checks all migrated header/footer/static label text for
+  body residuals. Short labels use boundary-aware matching; longer visual text
+  uses normalized paragraph/line-exact matching.
+
+Initial-PC smoke after the fix:
+
+- `local_samples/input.pdf` through `input5.pdf`: all `status: converted`.
+- `body_residual_count == 0` for all five samples.
+- `missing_removed_source_ref_count == 0` for all five samples.
+- Installed-wheel smoke converted `input4.pdf` with the strengthened gate.
+- Wheelhouse offline smoke converted `input5.pdf` with the strengthened gate.
+
+The regenerated artifacts remain ignored:
+
+```text
+dist/
+wheelhouse/
+.venv-static-wheel-smoke/
+.venv-static-wheelhouse-smoke/
+local_reports/static_anchored_body_residual_fix/
+```
