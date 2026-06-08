@@ -301,3 +301,64 @@ fresh venv, imported from `site-packages` outside the checkout, and converted
 `local_samples/input4.pdf` with all static-mode safety counts passing. The
 included `samples/demo.pdf` is an install/import smoke sample only and is
 expected to return `diagnostic_only`.
+
+## Initial PC Recheck Notes
+
+On 2026-06-08 the initial PC was revalidated after copying ignored local
+samples/reports/bundle artifacts back from another machine.
+
+Environment notes:
+
+- Git HEAD: `68f4980 docs: document closed-network static anchored bundle`.
+- `master` matched `origin/master`; no `git pull` was needed.
+- System Python: Python 3.10.12 on Linux/WSL.
+- `python3 -m venv` was unavailable because `ensurepip` / `python3.10-venv`
+  was not installed. A fresh `.venv` was created with user-installed
+  `virtualenv` instead of modifying system packages.
+
+Static anchored validation:
+
+- `local_samples/input.pdf` through `input5.pdf` were present.
+- The internal static anchored CLI help worked.
+- Static anchored focused tests passed.
+- Full `test/test_layout_analyzer.py` passed.
+- Existing `test/test.py::TestConversion` passed.
+- Local sample conversions for `input.pdf`, `input2.pdf`, `input3.pdf`,
+  `input4.pdf`, and `input5.pdf` all returned `status: converted`.
+- All required static-mode safety counts were zero and
+  `last_token_reuse_detected` was `false`.
+
+Generated ignored local summaries:
+
+```text
+local_reports/initial_pc_static_anchored_recheck/recheck-summary.json
+local_reports/initial_pc_static_anchored_recheck/recheck-summary.md
+```
+
+Wheel/wheelhouse:
+
+- Rebuilt `dist/pdf2docx-0.5.13-py3-none-any.whl` on the initial PC.
+- Rebuilt `wheelhouse/` for Linux/Python 3.10 compatible dependencies.
+- Confirmed the wheel contains `pdf2docx/static_anchored/*`.
+- Installed-wheel smoke imported `pdf2docx.static_anchored` from
+  `.venv-static-wheel-smoke/.../site-packages` outside the source checkout.
+- Wheelhouse offline smoke installed with
+  `--no-index --find-links wheelhouse` and imported from
+  `.venv-static-wheelhouse-smoke/.../site-packages`.
+- Both installed-wheel and wheelhouse smoke converted `input4.pdf` with
+  static-mode safety counts passing.
+
+Copied bundle:
+
+- `local_dist/pdf2docx-static-anchored-bundle/` was present.
+- `sha256sum -c SHA256SUMS.txt` passed for every listed file.
+- The copied bundle was not regenerated because checksum validation passed.
+- The copied bundle still targets the wheelhouse recorded in that bundle; use
+  the regenerated local `wheelhouse/` only when a Linux/Python 3.10 bundle is
+  intentionally needed.
+
+Commit policy:
+
+- `local_samples/`, `local_reports/`, `local_dist/`, `dist/`, `wheelhouse/`,
+  `.venv*`, generated DOCX files, generated reports, and caches remain ignored
+  and must not be committed.

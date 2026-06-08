@@ -8879,3 +8879,277 @@ Bundle smoke runner:
 - Run import smoke from outside any source checkout.
 - Run static anchored conversion smoke on an approved representative PDF.
 - Perform visual QA in Word/LibreOffice or an approved renderer.
+
+## Initial PC Static Anchored Recheck
+
+Date: 2026-06-08.
+
+Purpose: revalidate the static anchored v5/internal helper after returning to
+the initial PC, using the latest code already pushed to GitHub plus copied
+ignored local samples/reports/bundle artifacts.
+
+### Repository state
+
+- Current HEAD: `68f4980 docs: document closed-network static anchored bundle`.
+- Branch: `master` tracking `origin/master`.
+- `git pull` was not needed because local `master` matched `origin/master`.
+- Recent commit history included:
+  - `feat: add internal static anchored conversion helper`
+  - `fix: package static anchored internal entrypoint`
+  - `docs: document closed-network static anchored bundle`
+  - `fix: reduce first page body title clipping`
+
+Ignored local artifacts remained ignored:
+
+- `local_samples/`
+- `local_reports/`
+- `local_dist/`
+- `.venv/`
+- generated caches and test outputs
+
+### Environment
+
+Python:
+
+```text
+/usr/bin/python3
+Python 3.10.12
+```
+
+The system `python3 -m venv .venv` command failed because `ensurepip` /
+`python3.10-venv` was unavailable and `sudo` required a password. To keep a
+fresh venv without changing system packages, `virtualenv` was installed in the
+user environment and used only as a local environment creation tool.
+
+Actual test Python:
+
+```text
+.venv/bin/python
+```
+
+### Local samples
+
+Required samples were present:
+
+- `local_samples/input.pdf`
+- `local_samples/input2.pdf`
+- `local_samples/input3.pdf`
+- `local_samples/input4.pdf`
+- `local_samples/input5.pdf`
+
+`local_samples/input6_large.pdf` was also present but was not part of this
+five-sample recheck.
+
+### Static anchored tests
+
+Commands run:
+
+```bash
+.venv/bin/python -m pdf2docx.static_anchored.cli --help
+```
+
+Result: passed. The internal module CLI help was available.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "static_anchored or static_visual or source_page_fidelity or variable_family or multi_zone or delayed"
+```
+
+Result: passed. 14 selected tests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py
+```
+
+Result: passed. 429 tests and 47 subtests ran successfully.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile pdf2docx/static_anchored/__init__.py pdf2docx/static_anchored/analyzer.py pdf2docx/static_anchored/writer.py pdf2docx/static_anchored/validator.py pdf2docx/static_anchored/converter.py pdf2docx/static_anchored/cli.py scripts/internal/static_anchored_convert.py pdf2docx/text/TextBlock.py test/test_layout_analyzer.py
+```
+
+Result: passed.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+```bash
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test.py::TestConversion
+```
+
+Result: passed. 5 conversion tests ran successfully.
+
+### Local sample recheck
+
+Output directory:
+
+```text
+local_reports/initial_pc_static_anchored_recheck/
+```
+
+Generated summary reports:
+
+```text
+local_reports/initial_pc_static_anchored_recheck/recheck-summary.json
+local_reports/initial_pc_static_anchored_recheck/recheck-summary.md
+```
+
+Sample results:
+
+| sample | status | safety gate | static labels | variable records |
+| --- | --- | --- | ---: | ---: |
+| `input.pdf` | `converted` | passed | 12 | 0 |
+| `input2.pdf` | `converted` | passed | 16 | 0 |
+| `input3.pdf` | `converted` | passed | 5 | 0 |
+| `input4.pdf` | `converted` | passed | 0 | 4 |
+| `input5.pdf` | `converted` | passed | 0 | 10 |
+
+All five reports had:
+
+- `validation.word_PAGE_field_count == 0`
+- `validation.literal_PAGE_NUMBER_placeholder_count == 0`
+- `validation.source_label_body_residual_count == 0`
+- `validation.duplicate_header_footer_text_count == 0`
+- `validation.missing_zone_count == 0`
+- `validation.mispositioned_static_label_count == 0`
+- `validation.variable_family_page_text_mismatch_count == 0`
+- `validation.last_token_reuse_detected == false`
+
+Focused sample checks:
+
+- `input.pdf`: the generated DOCX body contained the `CHAPTER 13` title; footer
+  left/center/right zones were preserved for 12 groups.
+- `input2.pdf`: `Page i`, `Page 1 of 15`, `Page 2 of 15`, and
+  `Page 15 of 15` were preserved in the right footer zone.
+- `input3.pdf`: `8-1` through `8-5` had zero body residuals and were anchored
+  to source-page footer zones.
+- `input4.pdf`: `SPSCC Student Computing Center__Headers and Footers __1`
+  through `__4` matched the expected source pages; `__4` was not repeatedly
+  reused.
+- `input5.pdf`: the every-other variable footer family from source page index
+  2 onward was detected and matched without page-text mismatch.
+
+### Wheel and wheelhouse
+
+Commands run:
+
+```bash
+rm -rf build dist wheelhouse *.egg-info pdf2docx.egg-info
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pip wheel -w wheelhouse .
+```
+
+Result: passed.
+
+Generated project wheel:
+
+```text
+dist/pdf2docx-0.5.13-py3-none-any.whl
+```
+
+The wheel contained:
+
+```text
+pdf2docx/static_anchored/__init__.py
+pdf2docx/static_anchored/analyzer.py
+pdf2docx/static_anchored/cli.py
+pdf2docx/static_anchored/converter.py
+pdf2docx/static_anchored/validator.py
+pdf2docx/static_anchored/writer.py
+```
+
+### Installed wheel smoke
+
+Fresh environment:
+
+```text
+.venv-static-wheel-smoke/
+```
+
+Installed `dist/*.whl` with `--force-reinstall`, then imported from `/tmp`.
+Imports resolved to:
+
+```text
+.venv-static-wheel-smoke/lib/python3.10/site-packages/pdf2docx/__init__.py
+.venv-static-wheel-smoke/lib/python3.10/site-packages/pdf2docx/static_anchored/__init__.py
+.venv-static-wheel-smoke/lib/python3.10/site-packages/pdf2docx/static_anchored/cli.py
+```
+
+Installed-wheel `input4.pdf` static anchored smoke:
+
+- status: `converted`
+- safety gate: passed
+- all required static-mode safety counts: passed
+
+Generated ignored outputs:
+
+```text
+local_reports/initial_pc_static_anchored_recheck/input4.installed-wheel.docx
+local_reports/initial_pc_static_anchored_recheck/input4.installed-wheel.report.json
+local_reports/initial_pc_static_anchored_recheck/input4.installed-wheel.report.md
+```
+
+### Wheelhouse offline smoke
+
+Fresh environment:
+
+```text
+.venv-static-wheelhouse-smoke/
+```
+
+Install command:
+
+```bash
+.venv-static-wheelhouse-smoke/bin/python -m pip install --no-index --find-links wheelhouse pdf2docx
+```
+
+Result: passed. Imports from `/tmp` resolved to:
+
+```text
+.venv-static-wheelhouse-smoke/lib/python3.10/site-packages/pdf2docx/__init__.py
+.venv-static-wheelhouse-smoke/lib/python3.10/site-packages/pdf2docx/static_anchored/__init__.py
+.venv-static-wheelhouse-smoke/lib/python3.10/site-packages/pdf2docx/static_anchored/cli.py
+```
+
+Wheelhouse `input4.pdf` static anchored smoke:
+
+- status: `converted`
+- safety gate: passed
+- all required static-mode safety counts: passed
+
+### Closed-network bundle
+
+Copied bundle path:
+
+```text
+local_dist/pdf2docx-static-anchored-bundle/
+```
+
+Checksum command:
+
+```bash
+cd local_dist/pdf2docx-static-anchored-bundle
+sha256sum -c SHA256SUMS.txt
+```
+
+Result: passed for every listed bundle file.
+
+The copied bundle was not regenerated because checksum validation passed. The
+current PC wheel and wheelhouse were regenerated separately under ignored
+`dist/` and `wheelhouse/`.
+
+### Public/default behavior
+
+- Public CLI/API was not changed.
+- Default `Converter.convert()` behavior was not changed.
+- Static anchored remains internal-only.
+- No code changes were required.
+
+### Initial PC recheck recommendation
+
+The initial PC can run the static anchored internal helper, installed wheel,
+and wheelhouse offline smoke successfully. The existing copied closed-network
+bundle is intact by checksum. If a Linux/Python 3.10 closed-network bundle is
+needed, create it as a separate ignored bundle from the regenerated
+`wheelhouse/`; otherwise no bundle regeneration was required in this recheck.
