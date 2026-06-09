@@ -9361,8 +9361,8 @@ read `local_samples/` or any private local artifact.
 Docker tags built locally:
 
 ```text
-petooooo/pdf2docx:0.5.13-py311-static
-petooooo/pdf2docx:latest
+petoo/pdf2docx:0.5.13-py311-static
+petoo/pdf2docx:latest
 ```
 
 ### Commands run
@@ -9372,22 +9372,22 @@ rm -rf build dist wheelhouse *.egg-info pdf2docx.egg-info
 TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
 docker build \
   -f docker/Dockerfile \
-  -t petooooo/pdf2docx:0.5.13-py311-static \
-  -t petooooo/pdf2docx:latest \
+  -t petoo/pdf2docx:0.5.13-py311-static \
+  -t petoo/pdf2docx:latest \
   .
-docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+docker run --rm petoo/pdf2docx:0.5.13-py311-static \
   python -m pdf2docx.static_anchored.cli --help
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_smoke:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out --with-report
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_docx_only:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out
-docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+docker run --rm petoo/pdf2docx:0.5.13-py311-static \
   sh -lc 'python --version && ls -lh /opt/wheels && python -m pdf2docx.static_anchored.cli --help | head'
-docker save petooooo/pdf2docx:0.5.13-py311-static \
+docker save petoo/pdf2docx:0.5.13-py311-static \
   -o local_dist/docker/pdf2docx_0.5.13-py311-static.tar
 docker load -i local_dist/docker/pdf2docx_0.5.13-py311-static.tar
 TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "static_anchored or static_visual or source_page_fidelity or variable_family or multi_zone or delayed"
@@ -9461,9 +9461,61 @@ local_dist/docker/pdf2docx_0.5.13-py311-static.tar
 
 ### Docker Hub / GitHub status
 
-At this checkpoint the Docker image is built and locally smoke-tested. Docker
-Hub push/pull smoke and GitHub push are recorded in the follow-up Docker Hub
-verification section after registry operations complete.
+GitHub push:
+
+- commit: `0545767 build: add static anchored docker image`
+- branch: `master`
+- remote: `origin/master`
+- result: passed.
+
+Docker Hub namespace correction:
+
+- Initial push to `petooooo/pdf2docx:*` failed because Docker Hub username is
+  `petoo`, not the GitHub username.
+- The existing local image was not rebuilt.
+- The existing image id was retagged from `petooooo/pdf2docx:*` to
+  `petoo/pdf2docx:*`.
+
+Docker Hub push:
+
+```text
+petoo/pdf2docx:0.5.13-py311-static
+petoo/pdf2docx:latest
+```
+
+- push result: passed.
+- digest for both tags:
+  `sha256:d3ef804baceed3516e8ce89df3a33abfde00c1fd348541c3b8ad0cb9fc404f0f`
+
+Docker Hub pull smoke for `petoo/pdf2docx:0.5.13-py311-static`:
+
+- local `petoo/*` tags were removed before pull.
+- `docker pull petoo/pdf2docx:0.5.13-py311-static`: passed.
+- CLI help smoke: passed.
+- report-mode conversion smoke: passed.
+- DOCX-only conversion smoke: passed.
+- report validation:
+  - `status == converted`
+  - `body_residual_count == 0`
+  - `missing_removed_source_ref_count == 0`
+  - `word_PAGE_field_count == 0`
+  - `literal_PAGE_NUMBER_placeholder_count == 0`
+
+Docker Hub `latest` smoke:
+
+- `docker pull petoo/pdf2docx:latest`: passed.
+- CLI help smoke: passed.
+- report-mode conversion smoke: passed.
+- report validation:
+  - `status == converted`
+  - `body_residual_count == 0`
+  - `missing_removed_source_ref_count == 0`
+  - `word_PAGE_field_count == 0`
+  - `literal_PAGE_NUMBER_placeholder_count == 0`
+
+Note: Docker Desktop credential helper returned `error getting credentials`
+when pulling `latest` immediately after push. Logging out with `docker logout`
+allowed public Docker Hub pulls to proceed, and both pull smokes passed.
 
 ### Public/default behavior
 

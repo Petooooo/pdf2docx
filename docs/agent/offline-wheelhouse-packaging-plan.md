@@ -433,8 +433,8 @@ docker/README.md
 Image tags:
 
 ```text
-petooooo/pdf2docx:0.5.13-py311-static
-petooooo/pdf2docx:latest
+petoo/pdf2docx:0.5.13-py311-static
+petoo/pdf2docx:latest
 ```
 
 Image contents:
@@ -455,25 +455,25 @@ Docker build:
 ```bash
 docker build \
   -f docker/Dockerfile \
-  -t petooooo/pdf2docx:0.5.13-py311-static \
-  -t petooooo/pdf2docx:latest \
+  -t petoo/pdf2docx:0.5.13-py311-static \
+  -t petoo/pdf2docx:latest \
   .
 ```
 
 Smoke commands:
 
 ```bash
-docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+docker run --rm petoo/pdf2docx:0.5.13-py311-static \
   python -m pdf2docx.static_anchored.cli --help
 
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_smoke:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out --with-report
 
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_docx_only:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out
 ```
 
@@ -501,5 +501,34 @@ local_dist/docker/pdf2docx_0.5.13-py311-static.tar
 - `docker load` succeeded.
 
 The Docker tar and smoke outputs remain ignored and must not be committed.
-Docker Hub push/pull smoke results are recorded separately after registry
-verification completes.
+
+Docker Hub registry:
+
+```text
+petoo/pdf2docx:0.5.13-py311-static
+petoo/pdf2docx:latest
+```
+
+Registry notes:
+
+- Docker Hub username is `petoo`; GitHub username-derived
+  `petooooo/pdf2docx` is not the correct Docker Hub namespace.
+- The local image was retagged to `petoo/pdf2docx:*` without rebuilding.
+- Push succeeded for both tags.
+- Both tags resolved to digest:
+  `sha256:d3ef804baceed3516e8ce89df3a33abfde00c1fd348541c3b8ad0cb9fc404f0f`.
+
+Docker Hub pull smoke:
+
+- `petoo/pdf2docx:0.5.13-py311-static` was removed locally, pulled from
+  Docker Hub, and smoke-tested with CLI help, report-mode conversion, and
+  DOCX-only conversion.
+- `petoo/pdf2docx:latest` was pulled from Docker Hub and smoke-tested with CLI
+  help and report-mode conversion.
+- Report-mode validation passed with `status == converted`,
+  `body_residual_count == 0`, `missing_removed_source_ref_count == 0`,
+  `word_PAGE_field_count == 0`, and
+  `literal_PAGE_NUMBER_placeholder_count == 0`.
+- Docker Desktop credential helper returned `error getting credentials` for
+  the first `latest` pull attempt after push; `docker logout` allowed public
+  pull validation to complete successfully.

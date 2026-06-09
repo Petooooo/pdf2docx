@@ -19,15 +19,15 @@ Build:
 python -m build --wheel
 docker build \
   -f docker/Dockerfile \
-  -t petooooo/pdf2docx:0.5.13-py311-static \
-  -t petooooo/pdf2docx:latest \
+  -t petoo/pdf2docx:0.5.13-py311-static \
+  -t petoo/pdf2docx:latest \
   .
 ```
 
 Help smoke:
 
 ```bash
-docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+docker run --rm petoo/pdf2docx:0.5.13-py311-static \
   python -m pdf2docx.static_anchored.cli --help
 ```
 
@@ -36,7 +36,7 @@ DOCX-only smoke:
 ```bash
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_docx_only:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out
 ```
 
@@ -45,7 +45,7 @@ Report-mode smoke:
 ```bash
 docker run --rm \
   -v "$PWD/local_reports/docker_static_anchored_smoke:/work/out" \
-  petooooo/pdf2docx:0.5.13-py311-static \
+  petoo/pdf2docx:0.5.13-py311-static \
   python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out --with-report
 ```
 
