@@ -415,3 +415,91 @@ wheelhouse/
 .venv-static-wheelhouse-smoke/
 local_reports/static_anchored_body_residual_fix/
 ```
+
+## Python 3.11 Docker Image Packaging
+
+On 2026-06-09 a Python 3.11 slim Docker image was added for the internal static
+anchored smoke path.
+
+Tracked Docker packaging files:
+
+```text
+docker/Dockerfile
+docker/examples/static_anchored_smoke.py
+docker/README.md
+.dockerignore
+```
+
+Image tags:
+
+```text
+petooooo/pdf2docx:0.5.13-py311-static
+petooooo/pdf2docx:latest
+```
+
+Image contents:
+
+- base image: `python:3.11-slim`
+- installed Python version observed in smoke: `Python 3.11.15`
+- included wheel: `/opt/wheels/pdf2docx-0.5.13-py3-none-any.whl`
+- installed package: `pdf2docx` from the included wheel
+- public example script:
+  `/opt/pdf2docx/examples/static_anchored_smoke.py`
+
+The example script generates a synthetic PDF with PyMuPDF at runtime, runs the
+internal static anchored conversion path, and can operate in DOCX-only or
+report mode. It does not consume `local_samples/`.
+
+Docker build:
+
+```bash
+docker build \
+  -f docker/Dockerfile \
+  -t petooooo/pdf2docx:0.5.13-py311-static \
+  -t petooooo/pdf2docx:latest \
+  .
+```
+
+Smoke commands:
+
+```bash
+docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+  python -m pdf2docx.static_anchored.cli --help
+
+docker run --rm \
+  -v "$PWD/local_reports/docker_static_anchored_smoke:/work/out" \
+  petooooo/pdf2docx:0.5.13-py311-static \
+  python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out --with-report
+
+docker run --rm \
+  -v "$PWD/local_reports/docker_static_anchored_docx_only:/work/out" \
+  petooooo/pdf2docx:0.5.13-py311-static \
+  python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out
+```
+
+Local smoke results:
+
+- CLI help passed and shows optional `--report`.
+- Report mode generated `sample.pdf`, `sample.static.docx`,
+  `sample.static.report.json`, and `sample.static.report.md`.
+- Report mode passed with `status == converted`, `body_residual_count == 0`,
+  `missing_removed_source_ref_count == 0`, `word_PAGE_field_count == 0`, and
+  `literal_PAGE_NUMBER_placeholder_count == 0`.
+- DOCX-only mode generated only `sample.pdf` and `sample.static.docx`; no
+  JSON/Markdown report was generated.
+
+Closed-network Docker tar:
+
+```text
+local_dist/docker/pdf2docx_0.5.13-py311-static.tar
+```
+
+- tar size: 467M
+- image id:
+  `sha256:53a9e395b377c5a410439148a180cba15c8ab6f70fa015159e7a177f1a70bafb`
+- image size: 481198010 bytes
+- `docker load` succeeded.
+
+The Docker tar and smoke outputs remain ignored and must not be committed.
+Docker Hub push/pull smoke results are recorded separately after registry
+verification completes.

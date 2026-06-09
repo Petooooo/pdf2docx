@@ -9330,3 +9330,146 @@ Wheelhouse offline smoke:
   is now optional.
 - Ignored local samples, reports, wheel artifacts, wheelhouse artifacts, and
   smoke venvs were not committed.
+
+## Python 3.11 Static Anchored Docker Image
+
+Date: 2026-06-09.
+
+### Image design
+
+Tracked Docker assets added:
+
+```text
+docker/Dockerfile
+docker/examples/static_anchored_smoke.py
+docker/README.md
+.dockerignore
+```
+
+The image uses:
+
+- base image: `python:3.11-slim`
+- local wheel copied to `/opt/wheels/pdf2docx-0.5.13-py3-none-any.whl`
+- installed package: `pdf2docx` from that wheel
+- public smoke script:
+  `/opt/pdf2docx/examples/static_anchored_smoke.py`
+- workdir: `/work`
+
+The smoke script creates a synthetic PDF at runtime with PyMuPDF. It does not
+read `local_samples/` or any private local artifact.
+
+Docker tags built locally:
+
+```text
+petooooo/pdf2docx:0.5.13-py311-static
+petooooo/pdf2docx:latest
+```
+
+### Commands run
+
+```bash
+rm -rf build dist wheelhouse *.egg-info pdf2docx.egg-info
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m build --wheel
+docker build \
+  -f docker/Dockerfile \
+  -t petooooo/pdf2docx:0.5.13-py311-static \
+  -t petooooo/pdf2docx:latest \
+  .
+docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+  python -m pdf2docx.static_anchored.cli --help
+docker run --rm \
+  -v "$PWD/local_reports/docker_static_anchored_smoke:/work/out" \
+  petooooo/pdf2docx:0.5.13-py311-static \
+  python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out --with-report
+docker run --rm \
+  -v "$PWD/local_reports/docker_static_anchored_docx_only:/work/out" \
+  petooooo/pdf2docx:0.5.13-py311-static \
+  python /opt/pdf2docx/examples/static_anchored_smoke.py --out-dir /work/out
+docker run --rm petooooo/pdf2docx:0.5.13-py311-static \
+  sh -lc 'python --version && ls -lh /opt/wheels && python -m pdf2docx.static_anchored.cli --help | head'
+docker save petooooo/pdf2docx:0.5.13-py311-static \
+  -o local_dist/docker/pdf2docx_0.5.13-py311-static.tar
+docker load -i local_dist/docker/pdf2docx_0.5.13-py311-static.tar
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m pytest -q test/test_layout_analyzer.py -k "static_anchored or static_visual or source_page_fidelity or variable_family or multi_zone or delayed"
+TMPDIR=/tmp TEMP=/tmp TMP=/tmp .venv/bin/python -m py_compile \
+  pdf2docx/static_anchored/__init__.py \
+  pdf2docx/static_anchored/analyzer.py \
+  pdf2docx/static_anchored/writer.py \
+  pdf2docx/static_anchored/validator.py \
+  pdf2docx/static_anchored/converter.py \
+  pdf2docx/static_anchored/cli.py \
+  scripts/internal/static_anchored_convert.py \
+  test/test_layout_analyzer.py \
+  docker/examples/static_anchored_smoke.py
+git diff --check
+```
+
+### Local Docker smoke results
+
+Image Python version:
+
+```text
+Python 3.11.15
+```
+
+Wheel included in image:
+
+```text
+/opt/wheels/pdf2docx-0.5.13-py3-none-any.whl
+```
+
+CLI help smoke:
+
+- `python -m pdf2docx.static_anchored.cli --help`: passed.
+- `--report` is optional in the help text.
+
+Report-mode smoke:
+
+- generated `sample.pdf`
+- generated `sample.static.docx`
+- generated `sample.static.report.json`
+- generated `sample.static.report.md`
+- `status == converted`
+- `validation.body_residual_count == 0`
+- `validation.missing_removed_source_ref_count == 0`
+- `validation.word_PAGE_field_count == 0`
+- `validation.literal_PAGE_NUMBER_placeholder_count == 0`
+
+DOCX-only smoke:
+
+- generated `sample.pdf`
+- generated `sample.static.docx`
+- did not generate `sample.static.report.json`
+- did not generate `sample.static.report.md`
+
+Docker save/load:
+
+```text
+local_dist/docker/pdf2docx_0.5.13-py311-static.tar
+```
+
+- tar size: 467M
+- image id: `sha256:53a9e395b377c5a410439148a180cba15c8ab6f70fa015159e7a177f1a70bafb`
+- image size: 481198010 bytes
+- `docker load` succeeded.
+
+### Test results
+
+- Focused static anchored tests: `20 passed, 415 deselected`.
+- `py_compile`: passed.
+- `git diff --check`: passed.
+
+### Docker Hub / GitHub status
+
+At this checkpoint the Docker image is built and locally smoke-tested. Docker
+Hub push/pull smoke and GitHub push are recorded in the follow-up Docker Hub
+verification section after registry operations complete.
+
+### Public/default behavior
+
+- Default `Converter.convert()` behavior was not changed.
+- No new public CLI/API was exposed.
+- Static anchored remains internal-only.
+- Private `local_samples/`, `local_reports/`, `local_dist/`, wheelhouse, and
+  generated Docker smoke artifacts were not added to the image and were not
+  committed.
