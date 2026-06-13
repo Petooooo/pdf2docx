@@ -9525,3 +9525,112 @@ allowed public Docker Hub pulls to proceed, and both pull smokes passed.
 - Private `local_samples/`, `local_reports/`, `local_dist/`, wheelhouse, and
   generated Docker smoke artifacts were not added to the image and were not
   committed.
+
+## Static Anchored Always-Output Diagnostic Artifacts
+
+### Scope
+
+After pulling the latest `origin/master`, the static anchored internal helper
+still failed closed before moving any DOCX to the requested `--output` path
+when a diagnostic or blocked path was hit. This made manual QA awkward because
+there was no file to inspect.
+
+The default `Converter.convert()` behavior remains unchanged. No public CLI/API
+or public console script was exposed.
+
+### Implementation summary
+
+`convert_static_anchored_pdf()` now records output artifact metadata:
+
+- `output_written`
+- `output_kind`
+- `diagnostic_output`
+- `diagnostic_output_reason`
+- `output_size_bytes`
+
+When no static source-page candidates are detected, the helper now writes a
+normal default-conversion DOCX to the requested output path and keeps
+`status == diagnostic_only`.
+
+When the filtered body stage is blocked, the helper preserves the best
+available intermediate DOCX if one exists; otherwise it attempts a default
+conversion fallback.
+
+When static anchored validation fails, the helper preserves the generated
+static DOCX at the requested output path, keeps `status == blocked`, and marks
+the file as a diagnostic output.
+
+The safety gates were not weakened. A diagnostic output is explicitly labeled
+as such in the JSON/Markdown report and should not be treated as a validated
+static anchored conversion.
+
+### Preview images
+
+The internal module CLI now supports optional source PDF preview images:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input input.pdf \
+  --output output.docx \
+  --report output.report.json \
+  --preview-dir previews \
+  --preview-pages 2 \
+  --overwrite
+```
+
+Preview images are rendered from the source PDF pages using PyMuPDF. DOCX
+rendering is intentionally not required because that would introduce a
+Word/LibreOffice dependency.
+
+### Local smoke
+
+Ignored smoke root:
+
+```text
+local_reports/always_output_smoke/
+```
+
+`test/samples/demo.pdf` has no static source-page candidates. The CLI returned
+`diagnostic_only` but still wrote:
+
+- `demo.diagnostic.docx`
+- `demo.diagnostic.report.json`
+- `demo.diagnostic.report.md`
+- `previews/page-001.png`
+- `previews/page-002.png`
+
+The output DOCX was zip-valid and the report recorded:
+
+- `output_written == true`
+- `output_kind == diagnostic_default_conversion`
+- `diagnostic_output == true`
+- `diagnostic_output_reason == no_static_source_page_candidates`
+
+`local_samples/input4.pdf` was also smoke-tested with preview output. It
+converted successfully with:
+
+- `output_written == true`
+- `output_kind == static_anchored_validated`
+- `diagnostic_output == false`
+- `safety_gate_passed == true`
+- `word_PAGE_field_count == 0`
+- `literal_PAGE_NUMBER_placeholder_count == 0`
+- `source_label_body_residual_count == 0`
+- `duplicate_header_footer_text_count == 0`
+- `missing_zone_count == 0`
+- `mispositioned_static_label_count == 0`
+- `variable_family_page_text_mismatch_count == 0`
+- `last_token_reuse_detected == false`
+
+### Tests added
+
+- Diagnostic-only/no-candidate conversion still writes a DOCX and preview PNGs.
+- Validation-blocked conversion preserves a diagnostic DOCX at `--output`.
+- CLI fake-conversion tests were updated for the new internal preview
+  arguments.
+
+### Public/default behavior
+
+- Default `Converter.convert()` behavior changed: no.
+- Public CLI/API changed: no.
+- Static anchored safety gates weakened: no.

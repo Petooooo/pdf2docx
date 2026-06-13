@@ -30,6 +30,15 @@ def build_parser():
         help='Optional Markdown report path.')
     parser.add_argument('--password', default=None, help='PDF password if required.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite output DOCX/report.')
+    parser.add_argument(
+        '--preview-dir',
+        default='',
+        help='Optional directory for source PDF page preview PNGs.')
+    parser.add_argument(
+        '--preview-pages',
+        type=int,
+        default=3,
+        help='Number of source PDF pages to render when --preview-dir is used.')
     return parser
 
 
@@ -40,11 +49,17 @@ def main(argv=None):
         args.output,
         report_path=args.report,
         password=args.password,
-        overwrite=args.overwrite)
+        overwrite=args.overwrite,
+        preview_dir=args.preview_dir or None,
+        preview_pages=args.preview_pages)
     if args.markdown_report:
         write_markdown_report(Path(args.markdown_report), report)
     print(f"status: {report.get('status')}")
     print(f"output: {args.output}")
+    print(f"output_written: {report.get('output_written')}")
+    print(f"output_kind: {report.get('output_kind')}")
+    if report.get('diagnostic_output'):
+        print(f"diagnostic_output_reason: {report.get('diagnostic_output_reason')}")
     if args.report:
         print(f"report: {args.report}")
     if args.markdown_report:
@@ -64,6 +79,10 @@ def write_markdown_report(path: Path, report: dict):
         f"- input: `{report.get('input_pdf', '')}`",
         f"- output: `{report.get('output_docx', '')}`",
         f"- status: `{report.get('status', '')}`",
+        f"- output_written: `{report.get('output_written', False)}`",
+        f"- output_kind: `{report.get('output_kind', '')}`",
+        f"- diagnostic_output: `{report.get('diagnostic_output', False)}`",
+        f"- diagnostic_output_reason: `{report.get('diagnostic_output_reason', '')}`",
         f"- warning_codes: `{', '.join(report.get('warning_codes', []))}`",
         '',
         '## Plan Summary',
@@ -93,6 +112,13 @@ def write_markdown_report(path: Path, report: dict):
         }, ensure_ascii=False, indent=2),
         '```',
     ]
+    if report.get('preview_images'):
+        lines.extend([
+            '',
+            '## Preview Images',
+            '',
+        ])
+        lines.extend(f"- `{path}`" for path in report.get('preview_images', []))
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 

@@ -532,3 +532,34 @@ Docker Hub pull smoke:
 - Docker Desktop credential helper returned `error getting credentials` for
   the first `latest` pull attempt after push; `docker logout` allowed public
   pull validation to complete successfully.
+
+## Static Anchored Diagnostic Outputs and Preview Images
+
+The internal static anchored helper now leaves an inspectable DOCX at the
+requested `--output` path even when it reports `diagnostic_only` or `blocked`.
+The JSON/Markdown reports distinguish validated output from diagnostic output
+with:
+
+- `output_written`
+- `output_kind`
+- `diagnostic_output`
+- `diagnostic_output_reason`
+
+Safety gates are still enforced. A diagnostic output is for manual inspection
+and should not be treated as a validated static anchored conversion.
+
+Optional source PDF preview images can be generated during smoke runs:
+
+```bash
+python -m pdf2docx.static_anchored.cli \
+  --input input.pdf \
+  --output output.docx \
+  --report output.report.json \
+  --preview-dir previews \
+  --preview-pages 2 \
+  --overwrite
+```
+
+The previews render source PDF pages to PNG files with PyMuPDF. DOCX rendering
+still requires external Word/LibreOffice-style tooling and is not part of the
+base offline bundle.

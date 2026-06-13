@@ -12,6 +12,7 @@ from unittest import mock
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 import pdf2docx.static_anchored.cli as static_anchored_cli
+import pdf2docx.static_anchored.converter as static_anchored_converter
 from pdf2docx.common.share import TextAlignment
 from pdf2docx.static_anchored import (
     apply_static_anchored_plan,
@@ -7992,6 +7993,67 @@ class TestLayoutAnalyzer(unittest.TestCase):
             report['validation']['planned_migrated_source_ref_count'],
             0)
 
+    def test_static_anchored_diagnostic_only_still_writes_output_and_previews(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pdf_path = tmp_path / 'no-static-candidates.pdf'
+            output_docx = tmp_path / 'no-static-candidates.docx'
+            preview_dir = tmp_path / 'previews'
+            _write_synthetic_pdf(pdf_path, 'no_header_footer')
+
+            report = convert_static_anchored_pdf(
+                pdf_path,
+                output_docx,
+                overwrite=True,
+                preview_dir=preview_dir,
+                preview_pages=2)
+
+            self.assertEqual(report['status'], 'diagnostic_only')
+            self.assertTrue(report['output_written'])
+            self.assertTrue(report['diagnostic_output'])
+            self.assertEqual(report['output_kind'], 'diagnostic_default_conversion')
+            self.assertEqual(
+                report['diagnostic_output_reason'],
+                'no_static_source_page_candidates')
+            self.assertTrue(zipfile.is_zipfile(output_docx))
+            self.assertEqual(report['preview_report']['status'], 'rendered')
+            self.assertEqual(len(report['preview_images']), 2)
+            self.assertTrue(
+                all(Path(path).exists() for path in report['preview_images']))
+
+    def test_static_anchored_validation_block_preserves_diagnostic_output(self):
+        _require_synthetic_docx_support(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pdf_path = tmp_path / 'blocked-static-source.pdf'
+            output_docx = tmp_path / 'blocked-static-source.docx'
+            _write_synthetic_pdf(pdf_path, 'repeated_header_footer')
+
+            with mock.patch.object(
+                    static_anchored_converter,
+                    'validate_static_anchored_docx',
+                    return_value={
+                        'safety_gate_passed': False,
+                        'warning_codes': ['synthetic_validation_failure'],
+                    }):
+                report = static_anchored_converter.convert_static_anchored_pdf(
+                    pdf_path,
+                    output_docx,
+                    overwrite=True)
+
+            self.assertEqual(report['status'], 'blocked')
+            self.assertTrue(report['output_written'])
+            self.assertTrue(report['diagnostic_output'])
+            self.assertEqual(
+                report['output_kind'],
+                'diagnostic_static_validation_failed')
+            self.assertEqual(
+                report['diagnostic_output_reason'],
+                'static_anchored_validation_failed')
+            self.assertTrue(zipfile.is_zipfile(output_docx))
+            self.assertIn('synthetic_validation_failure', report['warning_codes'])
+
     def test_static_anchored_chapter_prefixed_labels_preserve_parity_positions(self):
         _require_docx_header_footer_support(self)
         layout = _static_anchored_layout([
@@ -8187,7 +8249,14 @@ class TestLayoutAnalyzer(unittest.TestCase):
             tmp_path = Path(tmp)
             output_docx = tmp_path / 'only.docx'
 
-            def fake_convert(input_pdf, output_docx_path, report_path=None, password=None, overwrite=False):
+            def fake_convert(
+                    input_pdf,
+                    output_docx_path,
+                    report_path=None,
+                    password=None,
+                    overwrite=False,
+                    preview_dir=None,
+                    preview_pages=3):
                 Path(output_docx_path).write_bytes(b'fake docx')
                 self.assertFalse(report_path)
                 return {'status': 'converted', 'warning_codes': []}
@@ -8213,7 +8282,14 @@ class TestLayoutAnalyzer(unittest.TestCase):
             json_report = tmp_path / 'with-report.json'
             markdown_report = tmp_path / 'with-report.md'
 
-            def fake_convert(input_pdf, output_docx_path, report_path=None, password=None, overwrite=False):
+            def fake_convert(
+                    input_pdf,
+                    output_docx_path,
+                    report_path=None,
+                    password=None,
+                    overwrite=False,
+                    preview_dir=None,
+                    preview_pages=3):
                 Path(output_docx_path).write_bytes(b'fake docx')
                 Path(report_path).write_text(
                     json.dumps({'status': 'converted'}),
